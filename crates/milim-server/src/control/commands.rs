@@ -270,7 +270,9 @@ impl RunManager {
         crate::keyed_lock::KeyedLockLease::acquire(&self.command_locks, command_id)
     }
 
-    fn lock_for_thread(&self, thread_id: &str) -> crate::keyed_lock::KeyedLockLease<'_> {
+    /// Serializes a thread's turn admission (send, steer, queue changes)
+    /// with run completion, which releases the thread and drains its queue.
+    pub(super) fn lock_for_thread(&self, thread_id: &str) -> crate::keyed_lock::KeyedLockLease<'_> {
         crate::keyed_lock::KeyedLockLease::acquire(&self.thread_locks, thread_id)
     }
 

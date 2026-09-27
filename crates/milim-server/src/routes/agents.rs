@@ -1,5 +1,17 @@
 use super::*;
 
+mod agent_tools;
+mod linked_thread_tools;
+mod run_builder;
+mod schedule_tools;
+mod workers;
+
+pub(crate) use agent_tools::*;
+use linked_thread_tools::*;
+use run_builder::*;
+pub(crate) use schedule_tools::*;
+pub(crate) use workers::*;
+
 // ----- Agents -----
 
 #[derive(Serialize)]
@@ -120,6 +132,10 @@ pub(crate) fn account_runtime_tool_endpoint(
         preview_tools_enabled: context.tool_context.preview_tools_enabled,
         experimental_hashline_patch: context.tool_context.experimental_hashline_patch,
         plan_mode: context.tool_context.plan_mode,
+        // An account runtime keeps its own history, so this turn's prompt
+        // cannot tell whether an earlier turn asked for these tools.
+        schedule_tools: true,
+        mcp_server_tools: true,
     };
     let memory = AgentMemoryContext {
         enabled: context.memory_context.memory_enabled,
@@ -380,6 +396,18 @@ const ACTIVE_PREVIEW_TOOL_NAMES: &[&str] = &[
     "preview_scroll",
 ];
 const PREVIEW_OPEN_TOOL_NAMES: &[&str] = &["preview_open_url"];
+const SCHEDULE_TOOL_NAMES: &[&str] = &[
+    "schedule_create",
+    "schedule_update",
+    "schedule_list",
+    "schedule_delete",
+];
+const MCP_SERVER_TOOL_NAMES: &[&str] = &[
+    "mcp_server_list",
+    "mcp_server_test",
+    "mcp_server_save",
+    "mcp_server_delete",
+];
 const CHILD_THREAD_TOOL_NAMES: &[&str] = &[
     "delegate_workers",
     "child_thread_spawn",
@@ -409,7 +437,14 @@ const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "linked_thread_list",
     "linked_thread_read",
 ];
-const MAX_CHILD_THREAD_WAIT_MS: u64 = 300_000;
+/// How long a Worker Run may execute. It is measured from when its Workers
+/// start, so plan resolution and review-worktree setup do not count, and
+/// each Worker schedules its tools on its own, so no Worker waits in another
+/// run's tool queue.
+const WORKER_RUN_TIMEOUT: Duration = Duration::from_secs(300);
+/// Time `delegate_workers` may spend resolving its plan and creating review
+/// worktrees before the Workers start.
+const WORKER_SETUP_ALLOWANCE: Duration = Duration::from_secs(120);
 /// Extra time past a tool's own wait so its timeout handling and cleanup run
 /// before the pipeline deadline cancels the call.
 const TOOL_WAIT_GRACE: Duration = Duration::from_secs(30);
@@ -457,6 +492,12 @@ struct ToolRunPolicy {
     preview_tools_enabled: bool,
     experimental_hashline_patch: bool,
     plan_mode: bool,
+    /// The conversation asked for scheduled automations, so the default tool
+    /// mode includes the `schedule_*` tools.
+    schedule_tools: bool,
+    /// The conversation asked about MCP servers, so the default tool mode
+    /// includes the `mcp_server_*` management tools.
+    mcp_server_tools: bool,
 }
 
 impl Default for ToolRunPolicy {
@@ -470,8 +511,68 @@ impl Default for ToolRunPolicy {
             preview_tools_enabled: false,
             experimental_hashline_patch: false,
             plan_mode: false,
+            schedule_tools: false,
+            mcp_server_tools: false,
         }
     }
+}
+
+impl ToolRunPolicy {
+    /// Expose the management tool groups the conversation asks for. Every
+    /// user message counts, so a group stays exposed for the rest of the
+    /// thread instead of changing the tool list (and invalidating the
+    /// provider's prompt cache) from turn to turn.
+    fn with_management_tools_for<'a>(
+        mut self,
+        requests: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        for request in requests {
+            self.schedule_tools |= requests_schedule_tools(request);
+            self.mcp_server_tools |= requests_mcp_server_tools(request);
+        }
+        self
+    }
+
+    /// Tools the default tool mode leaves out. `current_time` duplicates the
+    /// date each turn carries; the schedule and MCP-server groups are large
+    /// and only useful when asked for; `list_agents` only helps choose an
+    /// `agent_id` for delegation or a schedule, or while planning. A custom
+    /// Agent that names one of these tools still gets it.
+    fn hidden_default_tools(&self, delegation_available: bool) -> Vec<&'static str> {
+        let mut hidden = vec!["current_time"];
+        if !self.schedule_tools {
+            hidden.extend(SCHEDULE_TOOL_NAMES);
+        }
+        if !self.mcp_server_tools {
+            hidden.extend(MCP_SERVER_TOOL_NAMES);
+        }
+        if !self.plan_mode && !delegation_available && !self.schedule_tools {
+            hidden.push("list_agents");
+        }
+        hidden
+    }
+}
+
+fn requests_schedule_tools(text: &str) -> bool {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)\b(?:schedul\w*|automat(?:e|es|ion|ions)|cron\w*|recurring|periodic(?:ally)?|hourly|daily|nightly|weekly|monthly|every\s+(?:\d+\s+)?(?:second|minute|hour|day|weekday|week|month|morning|evening|night)s?)\b",
+            )
+            .expect("valid schedule request pattern")
+        })
+        .is_match(text)
+}
+
+fn requests_mcp_server_tools(text: &str) -> bool {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(r"(?i)\bmcp\b|model context protocol")
+                .expect("valid MCP request pattern")
+        })
+        .is_match(text)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1653,8 +1754,8 @@ mod native_run_context_tests {
             },
         };
         let deadline = delegate.deadline_for_call(&json!({})).unwrap();
-        assert!(deadline > Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS));
-        assert_eq!(deadline, Duration::from_secs(330));
+        assert!(deadline > WORKER_RUN_TIMEOUT + WORKER_SETUP_ALLOWANCE);
+        assert_eq!(deadline, Duration::from_secs(450));
 
         let store = Arc::new(
             milim_storage::UserDataStore::new(Database::open_in_memory().unwrap()).unwrap(),
@@ -1704,7 +1805,7 @@ mod native_run_context_tests {
             base_prompt: None,
             environment: None,
         };
-        add_native_worker_context(&mut spec, &registry, None);
+        assert!(add_native_worker_context(&mut spec, &registry, None).is_none());
         let base = spec.base_prompt.as_deref().unwrap();
         assert!(base.starts_with("You are milim's coding agent"));
         assert!(base.contains("read_file"));
@@ -1716,6 +1817,7 @@ mod native_run_context_tests {
         let environment = spec.environment.as_deref().unwrap();
         assert!(environment.starts_with("<environment>"));
         assert!(environment.contains("Model: model-x"));
+        assert!(environment.contains("Today's date: "));
 
         let mut bare = spec.clone();
         bare.base_prompt = None;
@@ -1724,37 +1826,402 @@ mod native_run_context_tests {
         assert!(bare.base_prompt.is_none() && bare.environment.is_none());
     }
 
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    fn git_ok(dir: &FsPath, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn control_spec<'a>(
+        run_context: &'a RunContext,
+        instructions: crate::workspace_context::InstructionLayers,
+        messages: Vec<ChatMessage>,
+    ) -> NativeRunSpec<'a> {
+        NativeRunSpec {
+            kind: NativeRunKind::Control,
+            model: "model-x",
+            run_id: "run-1",
+            thread_id: Some("thread-1"),
+            run_context,
+            policy: ToolRunPolicy {
+                approval: ToolApprovalPolicy::Open,
+                ..Default::default()
+            },
+            streamed: true,
+            tool_mode: "all",
+            enabled_tools: &[],
+            skill_mode: "auto",
+            enabled_skills: &[],
+            skills_resolved: false,
+            instructions,
+            memory: AgentMemoryContext::default(),
+            messages,
+            turn_context: Vec::new(),
+        }
+    }
+
+    fn leading_system(messages: &[ChatMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .take_while(|message| message.role == "system")
+            .map(ChatMessage::text_content)
+            .collect()
+    }
+
     #[test]
-    fn native_run_context_leads_with_base_prompt_and_ends_system_block_with_environment() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(ReadOnlyProbe("read_file")));
+    fn native_run_prefix_stays_byte_identical_when_only_the_turn_changes() {
+        let workspace = temp_dir("milim-native-prefix");
+        std::fs::write(workspace.join("AGENTS.md"), "Run the tests.").unwrap();
+        let git = git_ok(&workspace, &["init", "-q", "-b", "main"])
+            && git_ok(&workspace, &["config", "user.email", "test@example.com"])
+            && git_ok(&workspace, &["config", "user.name", "Test"])
+            && git_ok(&workspace, &["add", "AGENTS.md"])
+            && git_ok(&workspace, &["commit", "-q", "-m", "first commit"]);
+        let state = state_with(&["read_file"], None);
+        let run_context = RunContext {
+            workspace: Some(workspace.clone()),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let instructions = crate::workspace_context::InstructionLayers {
+            milim: "Be brief.".into(),
+            ..Default::default()
+        };
+
+        let first = build_native_run(
+            &state,
+            control_spec(
+                &run_context,
+                instructions.clone(),
+                vec![ChatMessage::text("user", "first request")],
+            ),
+            Default::default(),
+        );
+        std::fs::write(workspace.join("new.txt"), "changed").unwrap();
+        let second = build_native_run(
+            &state,
+            NativeRunSpec {
+                turn_context: vec![ChatMessage::text(
+                    "system",
+                    "Linked chat mail: reply ready.",
+                )],
+                ..control_spec(
+                    &run_context,
+                    instructions,
+                    vec![
+                        ChatMessage::text("user", "first request"),
+                        ChatMessage::text("assistant", "done"),
+                        ChatMessage::text("user", "second request"),
+                    ],
+                )
+            },
+            Default::default(),
+        );
+
+        // The first turn's context directly follows the prefix; from the
+        // second turn on, history separates them.
+        let prefix = leading_system(&second.messages);
+        assert_eq!(
+            leading_system(&first.messages)[..prefix.len()],
+            prefix[..],
+            "git changes and per-turn context must not touch the cached prefix"
+        );
+        assert!(prefix[0].starts_with("You are milim's coding agent"));
+        assert!(prefix[1].starts_with("# Instructions"));
+        assert!(prefix[1].contains("Be brief.") && prefix[1].contains("Run the tests."));
+        assert!(prefix.last().unwrap().starts_with("<environment>"));
+        assert!(prefix.iter().all(|text| !text.contains("Today's date:")));
+
+        let roles = |run: &NativeRun| {
+            run.messages[prefix.len()..]
+                .iter()
+                .map(|message| message.role.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(roles(&first), ["system", "user"]);
+        assert_eq!(roles(&second), ["user", "assistant", "system", "user"]);
+        let turn_context = |run: &NativeRun| run.messages[run.messages.len() - 2].text_content();
+        let first_turn = turn_context(&first);
+        let second_turn = turn_context(&second);
+        assert_eq!(first.turn_context.as_deref(), Some(first_turn.as_str()));
+        assert_eq!(second.turn_context.as_deref(), Some(second_turn.as_str()));
+        assert!(first_turn.starts_with("Context for this turn"));
+        assert!(first_turn.contains("Today's date: "));
+        assert!(second_turn.contains("Linked chat mail: reply ready."));
+        if git {
+            assert!(first_turn.contains("Git status: clean"), "{first_turn}");
+            assert!(
+                second_turn.contains("Git status (1 changed paths):"),
+                "{second_turn}"
+            );
+            assert!(second_turn.contains("first commit"));
+        }
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn every_native_run_kind_gets_base_prompt_environment_instructions_and_hooks() {
+        let workspace = temp_dir("milim-native-parity");
+        std::fs::write(workspace.join("AGENTS.md"), "REPO_RULE").unwrap();
+        std::fs::create_dir_all(workspace.join(".milim")).unwrap();
+        // Untrusted project hooks still attach, to report that they were skipped.
+        std::fs::write(
+            workspace.join(".milim").join("settings.json"),
+            r#"{"hooks": {"Stop": [{"command": "true"}]}}"#,
+        )
+        .unwrap();
+        let state = state_with(&["read_file"], None);
+        let run_context = RunContext {
+            workspace: Some(workspace.clone()),
+            privacy_mode: crate::privacy::PrivacyMode::Off,
+        };
+        let layers = crate::workspace_context::InstructionLayers {
+            milim: "CUSTOM_RULE".into(),
+            ..Default::default()
+        };
+        let check = |kind: &str, messages: &[ChatMessage], hooks: bool| {
+            let texts: Vec<String> = messages.iter().map(ChatMessage::text_content).collect();
+            assert!(
+                texts[0].starts_with("You are milim's coding agent"),
+                "{kind}: {texts:?}"
+            );
+            for needle in [
+                "REPO_RULE",
+                "CUSTOM_RULE",
+                "<environment>",
+                "Today's date: ",
+            ] {
+                assert!(
+                    texts.iter().any(|text| text.contains(needle)),
+                    "{kind} is missing {needle}: {texts:?}"
+                );
+            }
+            assert!(hooks, "{kind} runs without the user's hooks");
+        };
+
+        let control = build_native_run(
+            &state,
+            control_spec(
+                &run_context,
+                layers.clone(),
+                vec![ChatMessage::text("user", "work")],
+            ),
+            Default::default(),
+        );
+        check(
+            "control",
+            &control.messages,
+            control.config.interceptor.is_some(),
+        );
+
+        for (tool_mode, instructions) in [
+            ("all", Default::default()),
+            (
+                "custom",
+                crate::workspace_context::InstructionLayers {
+                    agent: "AGENT_RULE".into(),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let enabled = ["read_file".to_string()];
+            let http = build_native_run(
+                &state,
+                NativeRunSpec {
+                    kind: NativeRunKind::Http,
+                    tool_mode,
+                    enabled_tools: &enabled,
+                    instructions,
+                    streamed: false,
+                    messages: vec![
+                        ChatMessage::text("system", "CUSTOM_RULE"),
+                        ChatMessage::text("user", "work"),
+                    ],
+                    ..control_spec(&run_context, Default::default(), Vec::new())
+                },
+                Default::default(),
+            );
+            check(tool_mode, &http.messages, http.config.interceptor.is_some());
+        }
+
+        let mut worker_run = milim_agents::WorkerRun {
+            id: "worker-run".to_string(),
+            parent_thread_id: "thread-1".to_string(),
+            parent_turn_id: None,
+            policy: milim_agents::DelegationPolicy::Auto,
+            runtime: milim_agents::WorkerRuntime::Managed,
+            status: milim_agents::WorkerRunStatus::Running,
+            tasks: Vec::new(),
+            context: None,
+            workspace: None,
+            privacy_mode: Some("off".to_string()),
+            error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            finished_at: None,
+        };
+        worker_run.tasks.push(milim_agents::WorkerPlanTask {
+            id: "task".to_string(),
+            title: "Worker".to_string(),
+            prompt: "Inspect.".to_string(),
+            role: Some("reviewer".to_string()),
+            agent_id: None,
+            agent_snapshot: None,
+            model: "model-x".to_string(),
+            access: milim_agents::WorkerAccess::ReadOnly,
+        });
+        worker_run.context = managed_worker_context(
+            Some(&workspace),
+            worker_context("work", &layers, &[], None).as_deref(),
+        );
+        let mut spec = worker_specs(&worker_run, vec![None]).pop().unwrap();
+        let tools = state_with(&["read_file"], None)
+            .tools
+            .as_deref()
+            .cloned()
+            .unwrap();
+        let hooks = add_native_worker_context(&mut spec, &tools, Some(&workspace));
+        let messages = crate::threads::worker_messages(&spec);
+        check("worker", &messages, hooks.is_some());
+        assert!(messages.iter().any(|message| message
+            .text_content()
+            .contains("Your role for this task: reviewer")));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn default_tools_hide_management_groups_until_the_conversation_asks() {
+        let root = temp_dir("milim-default-tools");
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(ReadOnlyProbe("current_time")));
+        tools.register(Arc::new(ReadOnlyProbe("read_file")));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools)
+        .with_schedules(
+            milim_automation::ScheduleStore::new(Database::open_in_memory().unwrap()).unwrap(),
+        )
+        .with_agents(milim_agents::AgentStore::new(Database::open_in_memory().unwrap()).unwrap())
+        .with_mcp(Arc::new(milim_mcp_client::McpHub::open(&root)));
         let run_context = RunContext {
             workspace: None,
             privacy_mode: crate::privacy::PrivacyMode::Off,
         };
-        let mut messages = vec![
-            ChatMessage::text("system", "Custom instructions"),
-            ChatMessage::text("user", "hello"),
-        ];
-        add_native_run_context(&mut messages, &registry, &run_context, "model-x", true);
-        let texts: Vec<String> = messages.iter().map(ChatMessage::text_content).collect();
-        assert!(texts[0].starts_with("You are milim's coding agent"));
-        assert!(texts[0].contains("# Plan mode"));
-        assert_eq!(texts[1], "Custom instructions");
-        assert!(texts[2].starts_with("<environment>"));
-        assert!(texts[2].contains("Workspace root: none"));
-        assert!(texts[2].contains("Model: model-x"));
-        assert_eq!(messages[3].role, "user");
+        let open = ToolRunPolicy {
+            approval: ToolApprovalPolicy::Open,
+            ..Default::default()
+        };
+        let names = |policy: ToolRunPolicy, mode: &str, enabled: &[String]| {
+            agent_registry_for_mode_with_context(&state, mode, enabled, None, &policy, &run_context)
+                .list()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
 
-        let mut plain = vec![ChatMessage::text("user", "hello")];
-        add_native_run_context(
-            &mut plain,
-            &ToolRegistry::new(),
-            &run_context,
-            "model-x",
-            false,
+        let plain = names(
+            open.with_management_tools_for(["fix the parser"]),
+            "all",
+            &[],
         );
-        assert_eq!(plain.len(), 1, "runs without tools are plain chat");
+        assert_eq!(plain, ["read_file"]);
+
+        let scheduled = names(
+            open.with_management_tools_for(["fix the parser", "Run this every 5 minutes"]),
+            "all",
+            &[],
+        );
+        for name in SCHEDULE_TOOL_NAMES.iter().chain(&["list_agents"]) {
+            assert!(scheduled.iter().any(|tool| tool == name), "{scheduled:?}");
+        }
+        assert!(!scheduled.iter().any(|tool| tool.starts_with("mcp_server_")));
+
+        let mcp = names(
+            open.with_management_tools_for(["Add the GitHub MCP server"]),
+            "all",
+            &[],
+        );
+        for name in MCP_SERVER_TOOL_NAMES {
+            assert!(mcp.iter().any(|tool| tool == name), "{mcp:?}");
+        }
+        assert!(!mcp.iter().any(|tool| tool.starts_with("schedule_")));
+
+        let custom = names(
+            open,
+            "custom",
+            &["current_time".to_string(), "schedule_list".to_string()],
+        );
+        assert_eq!(custom, ["current_time", "schedule_list"]);
+
+        assert!(requests_schedule_tools("set up a cron job"));
+        assert!(requests_schedule_tools("what automations do I have?"));
+        assert!(!requests_schedule_tools(
+            "add automated tests for the parser"
+        ));
+        assert!(requests_mcp_server_tools(
+            "connect a Model Context Protocol server"
+        ));
+        assert!(!requests_mcp_server_tools("the mcpx binary"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn workers_get_their_own_run_state() {
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(milim_tools::TodoWriteTool::default()));
+        let state = AppState::new(
+            Arc::new(TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_tools(tools);
+        let parent = agent_base_registry_with_memory(
+            &state,
+            Some(AgentMemoryContext {
+                thread_id: Some(format!("parent-{}", uuid::Uuid::new_v4())),
+                ..Default::default()
+            }),
+            &ToolRunPolicy {
+                approval: ToolApprovalPolicy::Open,
+                ..Default::default()
+            },
+            &RunContext {
+                workspace: None,
+                privacy_mode: crate::privacy::PrivacyMode::Off,
+            },
+        );
+        let todos = |count: usize| {
+            json!({ "todos": (0..count)
+                .map(|index| json!({ "content": format!("step {index}"), "status": "pending" }))
+                .collect::<Vec<_>>() })
+        };
+        let previous = |result: Value| result["previous_count"].as_u64().unwrap();
+
+        parent.call("todo_write", todos(2)).await.unwrap();
+        let first = worker_tools(&parent, None);
+        let second = worker_tools(&parent, None);
+        assert_eq!(
+            previous(first.call("todo_write", todos(1)).await.unwrap()),
+            0
+        );
+        assert_eq!(
+            previous(second.call("todo_write", todos(3)).await.unwrap()),
+            0
+        );
+        assert_eq!(
+            previous(parent.call("todo_write", todos(2)).await.unwrap()),
+            2,
+            "Workers leave the parent's checklist alone"
+        );
     }
 }
 
@@ -1794,6 +2261,7 @@ fn tool_run_policy_from_request(req: &ChatCompletionRequest) -> ToolRunPolicy {
         preview_tools_enabled: bool_extra(req, "preview_tools_enabled"),
         experimental_hashline_patch: bool_extra(req, "experimental_hashline_patch"),
         plan_mode: bool_extra(req, "plan_mode"),
+        ..Default::default()
     }
 }
 
@@ -1811,37 +2279,9 @@ fn memory_context_from_request(req: &ChatCompletionRequest, model: String) -> Ag
             _ => milim_agents::DelegationPolicy::Ask,
         },
         worker_model: string_extra(req, "worker_model"),
-        worker_context: worker_context_from_request(req),
+        worker_context: None,
         linked_thread_grants: Vec::new(),
     }
-}
-
-fn worker_context_from_request(req: &ChatCompletionRequest) -> Option<String> {
-    let instructions = req
-        .messages
-        .iter()
-        .filter(|message| message.role == "system")
-        .map(ChatMessage::text_content)
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let request = req
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .map(ChatMessage::text_content)
-        .unwrap_or_default();
-    let context = [
-        (!request.trim().is_empty()).then(|| format!("Current request:\n{request}")),
-        (!instructions.trim().is_empty())
-            .then(|| format!("Resolved instructions and skills:\n{instructions}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    (!context.is_empty()).then(|| context.chars().take(32_000).collect())
 }
 
 pub(crate) fn workspace_snapshot(st: &AppState) -> Option<PathBuf> {
@@ -1922,20 +2362,6 @@ fn desktop_workspace_unavailable_for(st: &AppState, workspace: Option<&FsPath>) 
             .unwrap_or(false)
 }
 
-fn add_workspace_notice_if_needed(messages: &mut Vec<ChatMessage>, workspace_unavailable: bool) {
-    if !workspace_unavailable {
-        return;
-    }
-    let insert_at = messages
-        .iter()
-        .position(|message| message.role != "system")
-        .unwrap_or(messages.len());
-    messages.insert(
-        insert_at,
-        ChatMessage::text("system", WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT),
-    );
-}
-
 pub(crate) fn add_workspace_instructions(messages: &mut Vec<ChatMessage>, st: &AppState) {
     add_workspace_instructions_for(messages, workspace_snapshot(st).as_deref());
 }
@@ -1951,51 +2377,10 @@ pub(crate) fn add_workspace_instructions_for(
     messages.insert(0, ChatMessage::text("system", instructions));
 }
 
-/// Base context shared by every native tool-agent run (desktop, mobile, and
-/// schedules through the control path, plus the HTTP agent routes): milim's
-/// base coding-agent prompt first, ahead of custom, agent, and repository
-/// instructions, and the environment snapshot at the end of the leading system
-/// block. Both are computed once here, so they stay byte-identical across the
-/// run's steps. Runs without tools are plain chat and get neither.
-fn add_native_run_context(
-    messages: &mut Vec<ChatMessage>,
-    registry: &ToolRegistry,
-    run_context: &RunContext,
-    model: &str,
-    plan_mode: bool,
-) {
-    if registry.is_empty() {
-        return;
-    }
-    let environment =
-        crate::workspace_context::RunEnvironment::capture(run_context.workspace(), model).render();
-    let insert_at = messages
-        .iter()
-        .position(|message| message.role != "system")
-        .unwrap_or(messages.len());
-    messages.insert(insert_at, ChatMessage::text("system", environment));
-    messages.insert(
-        0,
-        ChatMessage::text(
-            "system",
-            crate::agent_prompt::base_system_prompt(registry, plan_mode),
-        ),
-    );
-}
-
 /// The effective tool registry for an agent run: the static tools (builtins,
 /// host fs/shell, Docker sandbox) plus any tools exposed by connected MCP
 /// servers. Rebuilt per-run (cheap clone) so newly-added MCP servers are
 /// picked up without restarting the app.
-fn agent_registry_with_memory(
-    st: &AppState,
-    memory: Option<AgentMemoryContext>,
-    policy: &ToolRunPolicy,
-    run_context: &RunContext,
-) -> ToolRegistry {
-    agent_registry_for_mode_with_context(st, "all", &[], memory, policy, run_context)
-}
-
 fn agent_base_registry_with_memory(
     st: &AppState,
     memory: Option<AgentMemoryContext>,
@@ -2274,540 +2659,39 @@ fn agent_registry_for_mode_with_context(
     run_context: &RunContext,
 ) -> ToolRegistry {
     let all = agent_base_registry_with_memory(st, memory.clone(), policy, run_context);
+    let delegation = memory
+        .zip(st.threads.as_ref())
+        .filter(|(memory, supervisor)| {
+            memory.delegation_policy != milim_agents::DelegationPolicy::Off
+                && tools_available(policy)
+                && child_thread_tools_allowed(supervisor, memory)
+        });
     let normalized = milim_agents::normalize_tool_mode(tool_mode, enabled_tools);
     let inherited = match normalized.as_str() {
         "none" => ToolRegistry::new(),
         "custom" if enabled_tools.is_empty() => ToolRegistry::new(),
         "custom" => all.filtered(enabled_tools),
-        _ => all,
+        _ => all.without(&policy.hidden_default_tools(delegation.is_some())),
     };
     let mut reg = inherited.clone();
-    if let (Some(memory), Some(supervisor)) = (memory, st.threads.as_ref()) {
-        if tools_available(policy) && child_thread_tools_allowed(supervisor, &memory) {
-            register_child_thread_tools_with_context(
-                &mut reg,
-                st.clone(),
-                supervisor.clone(),
-                memory,
-                child_registry_for_policy(st, policy, inherited, run_context),
-                policy.approval == ToolApprovalPolicy::Open
-                    || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted),
-                policy.approval == ToolApprovalPolicy::Open,
-                run_context.clone(),
-            );
-        }
+    if let Some((memory, supervisor)) = delegation {
+        register_child_thread_tools_with_context(
+            &mut reg,
+            st.clone(),
+            supervisor.clone(),
+            memory,
+            child_registry_for_policy(st, policy, inherited, run_context),
+            policy.approval == ToolApprovalPolicy::Open
+                || (policy.approval == ToolApprovalPolicy::Review && policy.approval_granted),
+            policy.approval == ToolApprovalPolicy::Open,
+            run_context.clone(),
+        );
     }
     match normalized.as_str() {
         "none" => ToolRegistry::new(),
         "custom" if enabled_tools.is_empty() => ToolRegistry::new(),
         "custom" => reg.filtered(enabled_tools),
         _ => reg,
-    }
-}
-
-fn register_linked_thread_tools(
-    registry: &mut ToolRegistry,
-    state: AppState,
-    control: Arc<crate::control::RunManager>,
-    context: AgentMemoryContext,
-    policy: &ToolRunPolicy,
-) {
-    let Some(origin_thread_id) = context.thread_id.clone() else {
-        return;
-    };
-    let grants = context.linked_thread_grants.clone();
-    registry.register(Arc::new(LinkedThreadListTool {
-        control: control.clone(),
-        origin_thread_id: origin_thread_id.clone(),
-        grants: grants.clone(),
-    }));
-    registry.register(Arc::new(LinkedThreadReadTool {
-        control: control.clone(),
-        grants: grants.clone(),
-    }));
-    if !policy.plan_mode && policy.approval != ToolApprovalPolicy::Guarded {
-        let origin_run_id = context.message_id.clone();
-        let destinations = grants
-            .iter()
-            .map(|grant| {
-                format!(
-                    "{} [{}] in {} using {}/{}",
-                    grant.title,
-                    grant.target_thread_id,
-                    grant.project.as_deref().unwrap_or("unknown project"),
-                    grant.model.as_deref().unwrap_or("unknown model"),
-                    grant.runtime
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        registry.register(Arc::new(LinkedThreadSendTool {
-            state,
-            control: control.clone(),
-            origin_thread_id: origin_thread_id.clone(),
-            origin_run_id: origin_run_id.clone(),
-            grants: grants.clone(),
-            description: format!(
-                "Send a message to a linked Milim thread. This starts idle work, steers a compatible active run, or queues a durable follow-up with the destination's own settings, then returns asynchronously through the mailbox. When this run depends on the reply, pass the returned exchange_id to linked_thread_wait. Destinations: {destinations}"
-            ),
-        }));
-        if let Some(origin_run_id) = origin_run_id {
-            registry.register(Arc::new(LinkedThreadWaitTool {
-                control,
-                origin_thread_id,
-                origin_run_id,
-                grants,
-            }));
-        }
-    }
-}
-
-struct LinkedThreadListTool {
-    control: Arc<crate::control::RunManager>,
-    origin_thread_id: String,
-    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
-}
-
-#[async_trait]
-impl Tool for LinkedThreadListTool {
-    fn name(&self) -> &str {
-        "linked_thread_list"
-    }
-
-    fn description(&self) -> &str {
-        "List the linked-thread grants frozen for this run and the origin thread's mailbox states."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({ "type": "object", "properties": {}, "additionalProperties": false })
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn concurrency(&self) -> milim_tools::ToolConcurrency {
-        milim_tools::ToolConcurrency::Parallel
-    }
-
-    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
-        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
-    async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
-        self.control
-            .linked_thread_list(&self.origin_thread_id, &self.grants)
-    }
-}
-
-struct LinkedThreadReadTool {
-    control: Arc<crate::control::RunManager>,
-    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
-}
-
-#[derive(Deserialize)]
-struct LinkedThreadReadArgs {
-    target_thread_id: String,
-    #[serde(default)]
-    after_seq: Option<u64>,
-    #[serde(default = "default_linked_thread_read_limit")]
-    limit: usize,
-}
-
-fn default_linked_thread_read_limit() -> usize {
-    20
-}
-
-#[async_trait]
-impl Tool for LinkedThreadReadTool {
-    fn name(&self) -> &str {
-        "linked_thread_read"
-    }
-
-    fn description(&self) -> &str {
-        "Read canonical visible user/assistant messages from a linked thread up to this run's frozen sequence. Hidden prompts, reasoning, tool ledgers, and account-runtime history are excluded."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_thread_id": { "type": "string" },
-                "after_seq": { "type": "integer", "minimum": 0 },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
-            },
-            "required": ["target_thread_id"],
-            "additionalProperties": false
-        })
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn concurrency(&self) -> milim_tools::ToolConcurrency {
-        milim_tools::ToolConcurrency::Parallel
-    }
-
-    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
-        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: LinkedThreadReadArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid linked_thread_read arguments: {error}"))
-        })?;
-        self.control.linked_thread_read(
-            &self.grants,
-            args.target_thread_id.trim(),
-            args.after_seq,
-            args.limit,
-        )
-    }
-}
-
-struct LinkedThreadSendTool {
-    state: AppState,
-    control: Arc<crate::control::RunManager>,
-    origin_thread_id: String,
-    origin_run_id: Option<String>,
-    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
-    description: String,
-}
-
-#[derive(Deserialize)]
-struct LinkedThreadSendArgs {
-    target_thread_id: String,
-    message: String,
-}
-
-#[async_trait]
-impl Tool for LinkedThreadSendTool {
-    fn name(&self) -> &str {
-        "linked_thread_send"
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_thread_id": { "type": "string" },
-                "message": { "type": "string", "minLength": 1 }
-            },
-            "required": ["target_thread_id", "message"],
-            "additionalProperties": false
-        })
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-
-    fn concurrency(&self) -> milim_tools::ToolConcurrency {
-        milim_tools::ToolConcurrency::Exclusive
-    }
-
-    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
-        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: LinkedThreadSendArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid linked_thread_send arguments: {error}"))
-        })?;
-        self.control
-            .linked_thread_send(
-                self.state.clone(),
-                &self.origin_thread_id,
-                self.origin_run_id.as_deref(),
-                &self.grants,
-                args.target_thread_id.trim(),
-                &args.message,
-            )
-            .await
-    }
-}
-
-struct LinkedThreadWaitTool {
-    control: Arc<crate::control::RunManager>,
-    origin_thread_id: String,
-    origin_run_id: String,
-    grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
-}
-
-#[derive(Deserialize)]
-struct LinkedThreadWaitArgs {
-    exchange_id: String,
-    #[serde(default = "default_linked_thread_wait_ms")]
-    timeout_ms: u64,
-}
-
-fn default_linked_thread_wait_ms() -> u64 {
-    DEFAULT_LINKED_THREAD_WAIT_MS
-}
-
-#[async_trait]
-impl Tool for LinkedThreadWaitTool {
-    fn name(&self) -> &str {
-        "linked_thread_wait"
-    }
-
-    fn description(&self) -> &str {
-        "Wait for a specific linked_thread_send exchange only when this run depends on its reply. The wait is bounded, may be repeated after a timeout, and never discards a late reply."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "exchange_id": { "type": "string", "minLength": 1 },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 100,
-                    "maximum": crate::control::MAX_LINKED_THREAD_WAIT_MS,
-                    "default": DEFAULT_LINKED_THREAD_WAIT_MS
-                }
-            },
-            "required": ["exchange_id"],
-            "additionalProperties": false
-        })
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn deadline_for_call(&self, args: &Value) -> Option<Duration> {
-        let wait_ms = args
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_LINKED_THREAD_WAIT_MS)
-            .min(crate::control::MAX_LINKED_THREAD_WAIT_MS);
-        Some(Duration::from_millis(wait_ms) + TOOL_WAIT_GRACE)
-    }
-
-    fn waits_on_other_runs(&self) -> bool {
-        true
-    }
-
-    fn concurrency(&self) -> milim_tools::ToolConcurrency {
-        milim_tools::ToolConcurrency::Parallel
-    }
-
-    fn environment_policy(&self) -> milim_tools::ProcessEnvironmentPolicy {
-        milim_tools::ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: LinkedThreadWaitArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid linked_thread_wait arguments: {error}"))
-        })?;
-        self.control
-            .linked_thread_wait(
-                &self.origin_thread_id,
-                &self.origin_run_id,
-                &self.grants,
-                args.exchange_id.trim(),
-                args.timeout_ms,
-            )
-            .await
-    }
-}
-
-pub(crate) struct MemoryRegisterTool {
-    pub(crate) store: Arc<milim_memory::MemoryStore>,
-    pub(crate) context: AgentMemoryContext,
-}
-
-struct ListAgentsTool {
-    store: Arc<milim_agents::AgentStore>,
-}
-
-#[async_trait]
-impl Tool for ListAgentsTool {
-    fn name(&self) -> &str {
-        "list_agents"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn description(&self) -> &str {
-        "List reusable Milim Agents and compact tool/skill capability summaries. System prompts are never returned."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
-        let agents = self
-            .store
-            .list()?
-            .into_iter()
-            .map(|agent| {
-                json!({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "description": agent.description,
-                    "avatar": agent.avatar,
-                    "tools": {
-                        "mode": agent.tool_mode,
-                        "count": agent.enabled_tools.len(),
-                        "names": agent.enabled_tools,
-                    },
-                    "skills": {
-                        "mode": agent.skill_mode,
-                        "count": agent.enabled_skills.len(),
-                        "names": agent.enabled_skills,
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        Ok(json!({ "agents": agents }))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemoryRegisterArgs {
-    #[serde(default)]
-    scope: Option<String>,
-    content: String,
-    #[serde(default)]
-    title: Option<String>,
-}
-
-#[async_trait]
-impl Tool for MemoryRegisterTool {
-    fn name(&self) -> &str {
-        "memory_register"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-
-    fn description(&self) -> &str {
-        "Save concise durable context to Personal or Project memory. Use this only for facts, decisions, preferences, and project context likely to help future turns."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["personal", "project"],
-                    "description": "Where to store the memory. Defaults to project when a workspace folder exists, otherwise personal."
-                },
-                "content": { "type": "string", "description": "One or two sentences with the useful durable context." },
-                "title": { "type": "string", "description": "Optional short human-readable title." }
-            },
-            "required": ["content"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: MemoryRegisterArgs = serde_json::from_value(args).map_err(|e| {
-            Error::InvalidRequest(format!("invalid memory_register arguments: {e}"))
-        })?;
-        let content = trim_required_tool_arg(args.content, "content")?;
-        let title = args
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                content
-                    .lines()
-                    .next()
-                    .unwrap_or("Memory")
-                    .chars()
-                    .take(80)
-                    .collect()
-            });
-        let requested_scope = args
-            .scope
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_else(|| {
-                if self.context.project_locator.is_some() {
-                    "project".to_string()
-                } else {
-                    "personal".to_string()
-                }
-            });
-
-        let (scope_kind, locator, label) = match requested_scope.as_str() {
-            "project" => {
-                let locator = self.context.project_locator.clone().ok_or_else(|| {
-                    Error::InvalidRequest(
-                        "project memory requires an active project folder".to_string(),
-                    )
-                })?;
-                let label = self
-                    .context
-                    .project_label
-                    .clone()
-                    .unwrap_or_else(|| locator.clone());
-                ("project".to_string(), locator, label)
-            }
-            "personal" => (
-                "global".to_string(),
-                "personal".to_string(),
-                "Personal".to_string(),
-            ),
-            _ => {
-                return Err(Error::InvalidRequest(
-                    "memory_register scope must be personal or project".to_string(),
-                ))
-            }
-        };
-
-        let registration = self
-            .store
-            .register(
-                &self.context.model,
-                milim_memory::MemoryScopeInput {
-                    kind: scope_kind,
-                    label,
-                    locator,
-                },
-                milim_memory::MemoryNodeInput {
-                    kind: "fact".to_string(),
-                    title,
-                    body: content,
-                    confidence: 0.85,
-                    source: "agent".to_string(),
-                },
-                Vec::new(),
-                milim_memory::MemoryEventInput {
-                    thread_id: self.context.thread_id.clone().unwrap_or_default(),
-                    message_id: self.context.message_id.clone().unwrap_or_default(),
-                    summary: String::new(),
-                },
-            )
-            .await?;
-        Ok(json!({
-            "ok": true,
-            "memory": registration.node,
-            "scope": registration.scope,
-            "memory_notice": registration.notice
-        }))
     }
 }
 
@@ -2908,1327 +2792,6 @@ fn child_registry_for_policy(
     }
 }
 
-fn child_thread_parent_id(context: &AgentMemoryContext) -> milim_core::Result<String> {
-    context
-        .thread_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(ToString::to_string)
-        .ok_or_else(|| {
-            Error::InvalidRequest("child threads require a parent thread id".to_string())
-        })
-}
-
-fn child_thread_title(title: Option<String>, prompt: &str) -> String {
-    title
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| prompt.chars().take(80).collect())
-}
-
-fn worker_run_event_name(status: milim_agents::WorkerRunStatus) -> &'static str {
-    match status {
-        milim_agents::WorkerRunStatus::Proposed => "proposed",
-        milim_agents::WorkerRunStatus::Running => "started",
-        milim_agents::WorkerRunStatus::Done | milim_agents::WorkerRunStatus::Partial => "done",
-        milim_agents::WorkerRunStatus::Stopped | milim_agents::WorkerRunStatus::Error => "error",
-    }
-}
-
-fn worker_run_notice(run: &milim_agents::WorkerRun, workers: &[milim_agents::Worker]) -> Value {
-    json!({ "event": worker_run_event_name(run.status), "run": run, "workers": workers, "message": run.error })
-}
-
-struct DelegateWorkersTool {
-    state: AppState,
-    supervisor: Arc<ThreadSupervisor>,
-    context: AgentMemoryContext,
-    child_tools: ToolRegistry,
-    allow_write_review: bool,
-    auto_approve_workers: bool,
-    run_context: RunContext,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct DelegateWorkerTaskArgs {
-    prompt: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    access: Option<milim_agents::WorkerAccess>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DelegateWorkersArgs {
-    tasks: Vec<DelegateWorkerTaskArgs>,
-}
-
-fn worker_model_is_available(available: &[Model], model: &str) -> bool {
-    match crate::providers::provider_model_route(model) {
-        Some((provider_id, model_id)) => available.iter().any(|candidate| {
-            candidate.id == model_id && candidate.provider_id.as_deref() == Some(&provider_id)
-        }),
-        None => available.iter().any(|candidate| candidate.id == model),
-    }
-}
-
-fn account_runtime_worker_target(model: &str) -> Option<(&'static str, &str)> {
-    let model = model.trim();
-    for (adapter, prefix) in [
-        ("codex", "codex:"),
-        ("claude", "claude:"),
-        ("opencode", "opencode:"),
-        ("pi", "pi:"),
-    ] {
-        if model
-            .get(..prefix.len())
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
-        {
-            let runtime_model = model.get(prefix.len()..)?.trim();
-            return (!runtime_model.is_empty()).then_some((adapter, runtime_model));
-        }
-    }
-    None
-}
-
-fn resolve_account_runtime_worker_model(requested: &str, preferred_model: &str) -> Option<String> {
-    let requested = requested.trim();
-    if account_runtime_worker_target(requested).is_some() {
-        return Some(requested.to_string());
-    }
-    let (adapter, _) = account_runtime_worker_target(preferred_model)?;
-    (!requested.is_empty() && !requested.contains(':')).then(|| format!("{adapter}:{requested}"))
-}
-
-fn resolve_worker_model(
-    available: &[Model],
-    requested: &str,
-    preferred_model: &str,
-) -> milim_core::Result<String> {
-    let requested = requested.trim();
-    if worker_model_is_available(available, requested) {
-        return Ok(requested.to_string());
-    }
-    if requested.contains('/') || requested.starts_with("provider:") {
-        return Err(Error::InvalidRequest(format!(
-            "worker model '{requested}' is not available"
-        )));
-    }
-
-    let (preferred_provider, preferred_id) =
-        match crate::providers::provider_model_route(preferred_model) {
-            Some((provider_id, model_id)) => (Some(provider_id), model_id),
-            None => (None, preferred_model.trim().to_string()),
-        };
-    if let Some((namespace, _)) = preferred_id.split_once('/') {
-        let model_id = format!("{namespace}/{requested}");
-        if let Some(provider_id) = preferred_provider.as_deref() {
-            let routed = crate::providers::provider_model_id(provider_id, &model_id);
-            if worker_model_is_available(available, &routed) {
-                return Ok(routed);
-            }
-        } else if worker_model_is_available(available, &model_id) {
-            return Ok(model_id);
-        }
-    }
-
-    let mut matches = available
-        .iter()
-        .filter(|candidate| {
-            candidate
-                .id
-                .rsplit_once('/')
-                .is_some_and(|(_, name)| name == requested)
-        })
-        .map(|candidate| candidate.id.clone())
-        .collect::<Vec<_>>();
-    matches.sort();
-    matches.dedup();
-    match matches.as_slice() {
-        [model] => Ok(model.clone()),
-        [] => Err(Error::InvalidRequest(format!(
-            "worker model '{requested}' is not available"
-        ))),
-        _ => Err(Error::InvalidRequest(format!(
-            "worker model '{requested}' is ambiguous; use a full provider/model id"
-        ))),
-    }
-}
-
-async fn resolve_worker_plan(
-    state: &AppState,
-    run_context: &RunContext,
-    parent_model: &str,
-    worker_model: Option<&str>,
-    tasks: Vec<DelegateWorkerTaskArgs>,
-) -> milim_core::Result<(Vec<milim_agents::WorkerPlanTask>, Vec<Option<String>>)> {
-    if !(1..=4).contains(&tasks.len()) {
-        return Err(Error::InvalidRequest(
-            "delegate_workers requires 1 to 4 independent tasks".to_string(),
-        ));
-    }
-    let mut available = None;
-    let mut plan = Vec::with_capacity(tasks.len());
-    let mut system_prompts = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let prompt = trim_required_tool_arg(task.prompt, "tasks[].prompt")?;
-        let preferred_model = worker_model
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(parent_model.trim());
-        let requested_model = task
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(preferred_model);
-        let model = if let Some(model) =
-            resolve_account_runtime_worker_model(requested_model, preferred_model)
-        {
-            model
-        } else {
-            if available.is_none() {
-                available = Some(service_for_run(state, run_context).list_models().await?);
-            }
-            resolve_worker_model(
-                available.as_deref().unwrap_or_default(),
-                requested_model,
-                preferred_model,
-            )?
-        };
-        let agent_id = trim_optional_agent_id(task.agent_id);
-        let agent_snapshot = if let Some(agent_id) = agent_id.as_deref() {
-            let store = state
-                .agents
-                .as_ref()
-                .ok_or_else(|| Error::InvalidRequest("named agents are not enabled".to_string()))?;
-            let agent = store
-                .get(agent_id)?
-                .ok_or_else(|| Error::ModelNotFound(format!("agent {agent_id}")))?;
-            Some(milim_agents::WorkerAgentSnapshot {
-                id: agent.id,
-                name: agent.name,
-                description: agent.description,
-                system_prompt: agent.system_prompt,
-                tool_mode: agent.tool_mode,
-                enabled_tools: agent.enabled_tools,
-                skill_mode: agent.skill_mode,
-                enabled_skills: agent.enabled_skills,
-                avatar: agent.avatar,
-            })
-        } else {
-            None
-        };
-        let system_prompt = agent_snapshot.as_ref().and_then(|agent| {
-            (!agent.system_prompt.trim().is_empty()).then(|| agent.system_prompt.clone())
-        });
-        let title = child_thread_title(task.title, &prompt);
-        let account_runtime = account_runtime_worker_target(&model).is_some();
-        plan.push(milim_agents::WorkerPlanTask {
-            id: uuid::Uuid::new_v4().to_string(),
-            title,
-            prompt,
-            role: task.role,
-            agent_id,
-            agent_snapshot,
-            model,
-            access: if account_runtime {
-                milim_agents::WorkerAccess::ReadOnly
-            } else {
-                task.access.unwrap_or_default()
-            },
-        });
-        system_prompts.push(system_prompt);
-    }
-    Ok((plan, system_prompts))
-}
-
-#[cfg(test)]
-mod worker_model_tests {
-    use super::*;
-
-    fn provider_model(provider_id: &str, model_id: &str) -> Model {
-        let mut model = Model::local(model_id, 0);
-        model.provider_id = Some(provider_id.to_string());
-        model
-    }
-
-    #[test]
-    fn resolves_worker_model_aliases_without_guessing_invalid_ids() {
-        let available = vec![
-            provider_model("openrouter", "openai/gpt-5.4"),
-            Model::local("anthropic/claude-sonnet", 0),
-        ];
-
-        assert_eq!(
-            resolve_worker_model(&available, "openai/gpt-5.4", "unused").unwrap(),
-            "openai/gpt-5.4"
-        );
-        assert_eq!(
-            resolve_worker_model(&available, "provider:openrouter:openai/gpt-5.4", "unused")
-                .unwrap(),
-            "provider:openrouter:openai/gpt-5.4"
-        );
-        assert_eq!(
-            resolve_worker_model(&available, "gpt-5.4", "openai/parent").unwrap(),
-            "openai/gpt-5.4"
-        );
-        assert_eq!(
-            resolve_worker_model(&available, "gpt-5.4", "provider:openrouter:openai/gpt-5.4")
-                .unwrap(),
-            "provider:openrouter:openai/gpt-5.4"
-        );
-        assert_eq!(
-            resolve_worker_model(&available, "claude-sonnet", "local-parent").unwrap(),
-            "anthropic/claude-sonnet"
-        );
-
-        let namespace_preferred = vec![
-            Model::local("openai/shared", 0),
-            Model::local("other/shared", 0),
-        ];
-        assert_eq!(
-            resolve_worker_model(&namespace_preferred, "shared", "openai/parent").unwrap(),
-            "openai/shared"
-        );
-
-        assert!(
-            resolve_worker_model(&namespace_preferred, "shared", "local-parent")
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous")
-        );
-        assert!(resolve_worker_model(&available, "missing", "local-parent")
-            .unwrap_err()
-            .to_string()
-            .contains("not available"));
-        assert!(
-            resolve_worker_model(&available, "openai/missing", "local-parent")
-                .unwrap_err()
-                .to_string()
-                .contains("not available")
-        );
-    }
-
-    #[test]
-    fn account_runtime_workers_inherit_runtime_without_reusing_provider_routing() {
-        assert_eq!(
-            resolve_account_runtime_worker_model("codex:gpt-5.6", "codex:gpt-5.6"),
-            Some("codex:gpt-5.6".to_string())
-        );
-        assert_eq!(
-            resolve_account_runtime_worker_model("gpt-5.5", "codex:gpt-5.6"),
-            Some("codex:gpt-5.5".to_string())
-        );
-        assert_eq!(
-            resolve_account_runtime_worker_model(
-                "provider:openrouter:openai/gpt-5.6",
-                "codex:gpt-5.6"
-            ),
-            None
-        );
-        assert_eq!(
-            account_runtime_worker_target("pi:openai-codex/gpt-5.3-codex"),
-            Some(("pi", "openai-codex/gpt-5.3-codex"))
-        );
-    }
-
-    #[tokio::test]
-    async fn account_runtime_worker_plan_freezes_inherited_runtime_as_read_only() {
-        let state = AppState::new(
-            Arc::new(milim_inference::test_backend::TestBackend::new()),
-            milim_core::config::ServerConfiguration::default(),
-        );
-        let (tasks, _) = resolve_worker_plan(
-            &state,
-            &RunContext {
-                workspace: None,
-                privacy_mode: crate::privacy::PrivacyMode::Off,
-            },
-            "opencode:openai/gpt-5.6",
-            None,
-            vec![DelegateWorkerTaskArgs {
-                prompt: "Inspect the code.".to_string(),
-                title: None,
-                role: None,
-                agent_id: None,
-                model: None,
-                access: Some(milim_agents::WorkerAccess::WriteReview),
-            }],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(tasks[0].model, "opencode:openai/gpt-5.6");
-        assert_eq!(tasks[0].access, milim_agents::WorkerAccess::ReadOnly);
-    }
-
-    #[test]
-    fn account_runtime_worker_request_uses_a_fresh_guarded_session() {
-        let spec = ChildRunSpec {
-            parent_id: "parent".to_string(),
-            title: "Worker".to_string(),
-            model: "claude:sonnet".to_string(),
-            agent_id: None,
-            system_prompt: Some("Inspect the implementation.".to_string()),
-            prompt: "Find the bug.".to_string(),
-            run_id: Some("run".to_string()),
-            runtime: milim_agents::WorkerRuntime::Managed,
-            access: milim_agents::WorkerAccess::ReadOnly,
-            worktree_path: None,
-            account_profile_id: Some("work".to_string()),
-            base_prompt: None,
-            environment: None,
-        };
-        let (adapter, request) = account_worker_harness_request(
-            &spec,
-            &RunContext {
-                workspace: None,
-                privacy_mode: crate::privacy::PrivacyMode::Off,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(adapter, "claude");
-        assert_eq!(request.model, "sonnet");
-        assert_eq!(request.native_session_id, None);
-        assert_eq!(request.persist_session, Some(false));
-        assert_eq!(request.tool_approval_policy.as_deref(), Some("guarded"));
-        assert!(!request.interactive_tool_approval);
-        assert_eq!(
-            request
-                .milim_context
-                .as_ref()
-                .and_then(|value| value.pointer("/tool_context/delegation_policy"))
-                .and_then(Value::as_str),
-            Some("off")
-        );
-        assert_eq!(
-            request
-                .milim_context
-                .as_ref()
-                .and_then(|value| value.get("tool_mode"))
-                .and_then(Value::as_str),
-            Some("none")
-        );
-        assert!(request.prompt.contains("Do not delegate more work"));
-
-        let mut codex_spec = spec;
-        codex_spec.model = "codex:gpt-5.6".to_string();
-        let (adapter, request) = account_worker_harness_request(
-            &codex_spec,
-            &RunContext {
-                workspace: None,
-                privacy_mode: crate::privacy::PrivacyMode::Off,
-            },
-        )
-        .unwrap();
-        assert_eq!(adapter, "codex");
-        assert_eq!(request.prompt, "Find the bug.");
-        assert!(request
-            .developer_instructions
-            .as_deref()
-            .is_some_and(|instructions| instructions.contains("Do not delegate more work")));
-    }
-
-    #[tokio::test]
-    async fn account_runtime_worker_events_normalize_into_the_existing_worker_stream() {
-        use crate::account_runtime_events::{HarnessEvent, HarnessEventKind};
-        use serde_json::Map;
-
-        let mut delta = Map::new();
-        delta.insert("text".to_string(), Value::String("done".to_string()));
-        let stream: AccountHarnessStream = Box::pin(futures::stream::iter(vec![
-            HarnessEvent::new(HarnessEventKind::TextDelta, delta),
-            HarnessEvent::new(HarnessEventKind::TurnCompleted, Map::new()),
-        ]));
-        let events = account_worker_events(stream).collect::<Vec<_>>().await;
-
-        assert!(matches!(
-            events.first(),
-            Some(milim_agents::AgentEvent::Token { text }) if text == "done"
-        ));
-        assert!(matches!(
-            events.get(1),
-            Some(milim_agents::AgentEvent::Final { content }) if content == "done"
-        ));
-        assert!(matches!(
-            events.get(2),
-            Some(milim_agents::AgentEvent::Done { iterations: 1, .. })
-        ));
-    }
-}
-
-fn worker_specs(
-    run: &milim_agents::WorkerRun,
-    system_prompts: Vec<Option<String>>,
-) -> Vec<ChildRunSpec> {
-    run.tasks
-        .iter()
-        .cloned()
-        .zip(system_prompts)
-        .map(|(task, system_prompt)| {
-            let context = run
-                .context
-                .as_deref()
-                .filter(|context| !context.trim().is_empty())
-                .map(parent_context_block);
-            let system_prompt = [context.as_deref(), system_prompt.as_deref()]
-                .into_iter()
-                .flatten()
-                .filter(|value| !value.trim().is_empty())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            ChildRunSpec {
-                parent_id: run.parent_thread_id.clone(),
-                title: task.title,
-                model: task.model,
-                agent_id: task.agent_id,
-                system_prompt: (!system_prompt.is_empty()).then_some(system_prompt),
-                prompt: task.prompt,
-                run_id: Some(run.id.clone()),
-                runtime: run.runtime,
-                access: task.access,
-                worktree_path: None,
-                account_profile_id: None,
-                base_prompt: None,
-                environment: None,
-            }
-        })
-        .collect()
-}
-
-/// Frame the delegating chat's request as background. Without the framing a
-/// Worker reads the parent's goal ("implement X") as its own assignment and
-/// ignores the narrower delegated task in its user message.
-fn parent_context_block(context: &str) -> String {
-    format!(
-        "<parent_context>\nBackground from the chat that delegated this task. Use it to \
-         understand the goal, but do not carry out the parent's request yourself: your \
-         assignment is only the delegated task in the user message.\n\n{}\n</parent_context>",
-        context.trim()
-    )
-}
-
-/// Give a native Worker the same leading context as a native tool-agent run:
-/// the base prompt built from the Worker's own tools, and an environment
-/// snapshot of the folder it works in (its review worktree when it has one).
-fn add_native_worker_context(
-    spec: &mut ChildRunSpec,
-    tools: &ToolRegistry,
-    workspace: Option<&FsPath>,
-) {
-    if tools.is_empty() {
-        return;
-    }
-    spec.base_prompt = Some(crate::agent_prompt::base_system_prompt(tools, false));
-    spec.environment =
-        Some(crate::workspace_context::RunEnvironment::capture(workspace, &spec.model).render());
-}
-
-fn account_worker_harness_request(
-    spec: &ChildRunSpec,
-    run_context: &RunContext,
-) -> milim_core::Result<(String, HarnessRunRequest)> {
-    let (adapter, model) = account_runtime_worker_target(&spec.model).ok_or_else(|| {
-        Error::InvalidRequest(format!(
-            "worker model '{}' is not an account runtime",
-            spec.model
-        ))
-    })?;
-    let mut instructions = vec![
-        "You are a Milim Worker. Complete only the delegated task and return a concise final report. Do not delegate more work. Your workspace access is read-only."
-            .to_string(),
-    ];
-    if let Some(system_prompt) = spec
-        .system_prompt
-        .as_deref()
-        .filter(|prompt| !prompt.trim().is_empty())
-    {
-        instructions.insert(0, system_prompt.to_string());
-    }
-    let instructions = instructions.join("\n\n");
-    let (prompt, developer_instructions) = if adapter == "codex" {
-        (spec.prompt.clone(), Some(instructions))
-    } else {
-        (
-            format!("System instructions:\n{instructions}\n\n{}", spec.prompt),
-            None,
-        )
-    };
-    Ok((
-        adapter.to_string(),
-        HarnessRunRequest {
-            prompt,
-            developer_instructions,
-            images: Vec::new(),
-            model: model.to_string(),
-            cwd: spec
-                .worktree_path
-                .clone()
-                .or_else(|| run_context.workspace_text()),
-            reasoning_effort: None,
-            native_session_id: None,
-            persist_session: Some(false),
-            tool_approval_policy: Some("guarded".to_string()),
-            tool_approval_grant: false,
-            interactive_tool_approval: false,
-            plan_mode: false,
-            allow_session_recovery: false,
-            account_profile_id: spec.account_profile_id.clone(),
-            milim_context: Some(json!({
-                "tool_context": {
-                    "parent_model": spec.model,
-                    "workspace": run_context.workspace_text(),
-                    "privacy_mode": run_context.privacy_mode.as_str(),
-                    "tool_approval_policy": "guarded",
-                    "delegation_policy": "off",
-                },
-                "tool_mode": "none",
-                "skill_mode": "auto",
-            })),
-        },
-    ))
-}
-
-fn account_worker_agent_stream(
-    state: &AppState,
-    run_context: &RunContext,
-    spec: ChildRunSpec,
-) -> milim_core::Result<crate::threads::ChildAgentStream> {
-    let (adapter, request) = account_worker_harness_request(&spec, run_context)?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HOST,
-        HeaderValue::from_str(&format!("127.0.0.1:{}", state.config.port))
-            .map_err(|error| Error::Other(format!("invalid Worker host header: {error}")))?,
-    );
-    let stream =
-        account_harness_stream(state, &headers, &adapter, request).map_err(|error| error.0)?;
-    Ok(Box::pin(account_worker_events(stream)))
-}
-
-fn account_worker_events(
-    mut stream: AccountHarnessStream,
-) -> impl futures::Stream<Item = milim_agents::AgentEvent> + Send {
-    async_stream::stream! {
-        let mut content = String::new();
-        let mut usage = Usage::new(0, 0);
-        let mut terminal = false;
-        while let Some(event) = stream.next().await {
-            let value = serde_json::to_value(event).unwrap_or_else(|error| {
-                json!({"type":"turn_failed","message":format!("serialize Worker harness event: {error}")})
-            });
-            if let Some(next_usage) = value
-                .get("usage")
-                .filter(|value| !value.is_null())
-                .and_then(|value| serde_json::from_value::<Usage>(value.clone()).ok())
-            {
-                usage = next_usage;
-                yield milim_agents::AgentEvent::UsageDelta { usage: next_usage };
-            }
-            match value.get("type").and_then(Value::as_str).unwrap_or_default() {
-                "text_delta" => {
-                    if let Some(text) = value.get("text").and_then(Value::as_str) {
-                        content.push_str(text);
-                        yield milim_agents::AgentEvent::Token { text: text.to_string() };
-                    }
-                }
-                "reasoning_delta" => {
-                    if let Some(text) = value.get("text").and_then(Value::as_str) {
-                        yield milim_agents::AgentEvent::Reasoning { text: text.to_string() };
-                    }
-                }
-                "tool_started" => {
-                    let call_id = value.get("id").and_then(Value::as_str).map(str::to_string);
-                    let name = value.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
-                    let arguments = value
-                        .get("arguments")
-                        .or_else(|| value.get("input"))
-                        .map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string()))
-                        .unwrap_or_else(|| "{}".to_string());
-                    yield milim_agents::AgentEvent::ToolCall {
-                        call_id,
-                        name,
-                        arguments,
-                        mcp_app: None,
-                    };
-                }
-                "tool_finished" => {
-                    let call_id = value.get("id").and_then(Value::as_str).map(str::to_string);
-                    let name = value.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
-                    let result = value
-                        .get("result")
-                        .or_else(|| value.get("output"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    yield milim_agents::AgentEvent::ToolResult {
-                        call_id,
-                        name,
-                        result,
-                        mcp_app: None,
-                        mcp_app_result: None,
-                    };
-                }
-                "turn_completed" => {
-                    if content.trim().is_empty() {
-                        content = value
-                            .get("content")
-                            .or_else(|| value.get("text"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                    }
-                    yield milim_agents::AgentEvent::Final { content: content.clone() };
-                    yield milim_agents::AgentEvent::Done {
-                        iterations: 1,
-                        stopped_at_limit: false,
-                        usage,
-                    };
-                    terminal = true;
-                    break;
-                }
-                "turn_failed" | "turn_cancelled" => {
-                    let message = value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("account-runtime Worker failed")
-                        .to_string();
-                    yield milim_agents::AgentEvent::Error { message };
-                    terminal = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        if !terminal {
-            yield milim_agents::AgentEvent::Error {
-                message: "account-runtime Worker ended without a terminal event".to_string(),
-            };
-        }
-    }
-}
-
-fn managed_worker_context(workspace: Option<&FsPath>, base: Option<&str>) -> Option<String> {
-    let mut sections = Vec::new();
-    if let Some(base) = base.filter(|value| !value.trim().is_empty()) {
-        sections.push(base.to_string());
-    }
-    if let Some(workspace) = workspace {
-        let branch = git_text(workspace, &["branch", "--show-current"]);
-        sections.push(format!(
-            "Workspace: {}{}",
-            workspace.display(),
-            branch
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("\nBranch: {value}"))
-                .unwrap_or_default(),
-        ));
-        let context = crate::workspace_context::resolve(Some(workspace));
-        if let Some(instructions) = crate::workspace_context::formatted(&context, None) {
-            sections.push(instructions);
-        }
-    }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
-}
-
-pub(crate) async fn start_managed_worker_run(
-    state: &AppState,
-    supervisor: &ThreadSupervisor,
-    run: &milim_agents::WorkerRun,
-    tools: ToolRegistry,
-) -> milim_core::Result<(milim_agents::WorkerRun, Vec<milim_agents::Worker>)> {
-    if run.status != milim_agents::WorkerRunStatus::Proposed {
-        return Err(Error::InvalidRequest(
-            "worker run is not awaiting approval".to_string(),
-        ));
-    }
-    let run_context = RunContext::from_worker_run(run)?;
-    let service = service_for_run(state, &run_context);
-    if run
-        .tasks
-        .iter()
-        .any(|task| task.agent_id.is_some() && task.agent_snapshot.is_none())
-    {
-        return Err(Error::InvalidRequest(
-            "this proposed Worker plan predates frozen Agent snapshots; create a new proposal"
-                .to_string(),
-        ));
-    }
-    let prompts = run
-        .tasks
-        .iter()
-        .map(|task| {
-            task.agent_snapshot.as_ref().and_then(|agent| {
-                (!agent.system_prompt.trim().is_empty()).then(|| agent.system_prompt.clone())
-            })
-        })
-        .collect();
-    let running = supervisor
-        .store()
-        .update_worker_run_status(&run.id, milim_agents::WorkerRunStatus::Running, None)?
-        .ok_or_else(|| Error::ModelNotFound(format!("worker run {}", run.id)))?;
-    let mut workers = Vec::with_capacity(running.tasks.len());
-    for mut spec in worker_specs(&running, prompts) {
-        if let Some((adapter, _)) = account_runtime_worker_target(&spec.model) {
-            spec.account_profile_id = state
-                .control
-                .as_ref()
-                .map(|control| control.thread_account_profile(&spec.parent_id, adapter));
-        }
-        let worker_tools = if spec.access == milim_agents::WorkerAccess::WriteReview {
-            match create_worker_worktree(run_context.workspace.clone()).await {
-                Some(path) => {
-                    spec.worktree_path = Some(path.to_string_lossy().to_string());
-                    tools.scoped_to_workspace(&path)
-                }
-                None => {
-                    spec.access = milim_agents::WorkerAccess::ReadOnly;
-                    tools.read_only()
-                }
-            }
-        } else {
-            tools.read_only()
-        };
-        if account_runtime_worker_target(&spec.model).is_some() {
-            let state = state.clone();
-            let run_context = run_context.clone();
-            let factory: crate::threads::ChildStreamFactory =
-                Arc::new(move |spec| account_worker_agent_stream(&state, &run_context, spec));
-            workers.push(supervisor.spawn_stream(factory, spec)?);
-        } else {
-            let workspace = spec
-                .worktree_path
-                .as_deref()
-                .map(PathBuf::from)
-                .or_else(|| run_context.workspace.clone());
-            add_native_worker_context(&mut spec, &worker_tools, workspace.as_deref());
-            workers.push(supervisor.spawn(service.clone(), worker_tools, spec)?);
-        }
-    }
-    Ok((running, workers))
-}
-
-async fn create_worker_worktree(folder: Option<PathBuf>) -> Option<PathBuf> {
-    let folder = folder?;
-    tokio::task::spawn_blocking(move || {
-        let status = workspace_git_status_blocking(Some(folder));
-        if !status.is_repo {
-            return None;
-        }
-        let root = PathBuf::from(status.root.as_deref()?);
-        let checkpoint =
-            workspace_git_checkpoint_action(&root, &status, Some("worker-run-base".to_string()))
-                .checkpoint?;
-        let worktree_root = milim_core::paths::Paths::resolve()
-            .root()
-            .join("runtime")
-            .join("hot-swap");
-        let created =
-            workspace_git_create_retry_worktree_action(&root, Some(checkpoint), &worktree_root);
-        created
-            .ok
-            .then_some(created.worktree)
-            .flatten()
-            .map(PathBuf::from)
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-pub(crate) fn schedule_worker_run_deadline(supervisor: Arc<ThreadSupervisor>, run_id: String) {
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS)).await;
-        let still_running = supervisor
-            .worker_run(&run_id)
-            .ok()
-            .flatten()
-            .is_some_and(|run| run.status == milim_agents::WorkerRunStatus::Running);
-        if still_running {
-            let _ = supervisor.stop_run(&run_id, "worker run exceeded the five-minute deadline");
-        }
-    });
-}
-
-#[async_trait]
-impl Tool for DelegateWorkersTool {
-    fn name(&self) -> &str {
-        "delegate_workers"
-    }
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-    fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
-        Some(Duration::from_millis(MAX_CHILD_THREAD_WAIT_MS) + TOOL_WAIT_GRACE)
-    }
-    fn waits_on_other_runs(&self) -> bool {
-        true
-    }
-    fn description(&self) -> &str {
-        "Delegate 1 to 4 genuinely independent tasks as one Worker Run. Do not delegate short or sequential work. Ask mode proposes a frozen plan unless tool approval is Open; Open and Auto start eligible workers immediately."
-    }
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object", "properties": { "tasks": { "type": "array", "minItems": 1, "maxItems": 4,
-                "items": { "type": "object", "properties": {
-                    "prompt": {"type":"string"}, "title":{"type":"string"}, "role":{"type":"string"},
-                    "agent_id":{"type":["string","null"]}, "model":{"type":"string"},
-                    "access":{"type":"string","enum":["read_only","write_review"]}
-                }, "required":["prompt"], "additionalProperties":false }
-            } }, "required":["tasks"], "additionalProperties":false
-        })
-    }
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: DelegateWorkersArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid delegate_workers arguments: {error}"))
-        })?;
-        let parent_id = child_thread_parent_id(&self.context)?;
-        let (mut tasks, _) = resolve_worker_plan(
-            &self.state,
-            &self.run_context,
-            &self.context.model,
-            self.context.worker_model.as_deref(),
-            args.tasks,
-        )
-        .await?;
-        let delegation_policy = if self.auto_approve_workers {
-            milim_agents::DelegationPolicy::Auto
-        } else {
-            self.context.delegation_policy
-        };
-        if !self.allow_write_review
-            || (!self.auto_approve_workers
-                && delegation_policy != milim_agents::DelegationPolicy::Ask)
-        {
-            for task in &mut tasks {
-                task.access = milim_agents::WorkerAccess::ReadOnly;
-            }
-        }
-        let worker_context = managed_worker_context(
-            self.run_context.workspace.as_deref(),
-            self.context.worker_context.as_deref(),
-        );
-        let run = self.supervisor.store().create_worker_run_with_origin(
-            &parent_id,
-            self.context.message_id.as_deref(),
-            delegation_policy,
-            milim_agents::WorkerRuntime::Managed,
-            tasks,
-            worker_context.as_deref(),
-            self.run_context.workspace_text().as_deref(),
-            self.run_context.privacy_mode.as_str(),
-        )?;
-        if delegation_policy == milim_agents::DelegationPolicy::Ask {
-            return Ok(
-                json!({ "ok": true, "run": run, "workers": [], "worker_run_notice": worker_run_notice(&run, &[]) }),
-            );
-        }
-        let (mut run, _) = start_managed_worker_run(
-            &self.state,
-            &self.supervisor,
-            &run,
-            self.child_tools.clone(),
-        )
-        .await?;
-        run = self
-            .supervisor
-            .wait_run(&run.id, MAX_CHILD_THREAD_WAIT_MS)
-            .await?
-            .unwrap_or(run);
-        if run.status == milim_agents::WorkerRunStatus::Running {
-            run = self
-                .supervisor
-                .stop_run(&run.id, "worker run exceeded the five-minute deadline")?
-                .unwrap_or(run);
-        }
-        let workers = self.supervisor.workers_for_run(&run.id)?;
-        Ok(
-            json!({ "ok": true, "run": run, "workers": workers, "worker_run_notice": worker_run_notice(&run, &workers) }),
-        )
-    }
-}
-
-pub(crate) fn register_schedule_tools(
-    reg: &mut ToolRegistry,
-    store: Arc<milim_automation::ScheduleStore>,
-    workspace: Option<PathBuf>,
-    privacy: &str,
-) {
-    reg.register(Arc::new(ScheduleCreateTool {
-        store: store.clone(),
-        workspace: workspace.map(|path| path.to_string_lossy().to_string()),
-        privacy: privacy.to_string(),
-    }));
-    reg.register(Arc::new(ScheduleUpdateTool {
-        store: store.clone(),
-    }));
-    reg.register(Arc::new(ScheduleListTool {
-        store: store.clone(),
-    }));
-    reg.register(Arc::new(ScheduleDeleteTool { store }));
-}
-
-struct ScheduleCreateTool {
-    store: Arc<milim_automation::ScheduleStore>,
-    workspace: Option<String>,
-    privacy: String,
-}
-
-struct ScheduleUpdateTool {
-    store: Arc<milim_automation::ScheduleStore>,
-}
-
-struct ScheduleListTool {
-    store: Arc<milim_automation::ScheduleStore>,
-}
-
-struct ScheduleDeleteTool {
-    store: Arc<milim_automation::ScheduleStore>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleCreateToolArgs {
-    name: String,
-    cron: String,
-    prompt: String,
-    #[serde(default)]
-    attachments: Vec<milim_automation::ScheduleAttachment>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    model: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleUpdateToolArgs {
-    id: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    cron: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    attachments: Option<Vec<milim_automation::ScheduleAttachment>>,
-    #[serde(default)]
-    agent_id: Option<Value>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleListToolArgs {
-    #[serde(default)]
-    enabled_only: bool,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ScheduleDeleteToolArgs {
-    id: String,
-}
-
-pub(crate) fn trim_required_tool_arg(value: String, name: &str) -> milim_core::Result<String> {
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return Err(Error::InvalidRequest(format!("{name} is required")));
-    }
-    Ok(value)
-}
-
-fn trim_optional_agent_id(agent_id: Option<String>) -> Option<String> {
-    agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn find_schedule(
-    store: &milim_automation::ScheduleStore,
-    id: &str,
-) -> milim_core::Result<milim_automation::Schedule> {
-    store
-        .list()?
-        .into_iter()
-        .find(|schedule| schedule.id == id)
-        .ok_or_else(|| Error::ModelNotFound(format!("schedule {id}")))
-}
-
-#[async_trait]
-impl Tool for ScheduleCreateTool {
-    fn name(&self) -> &str {
-        "schedule_create"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-
-    fn description(&self) -> &str {
-        "Create a cron automation that runs a saved agent prompt. Use this when the user asks to schedule, automate, run periodically, or create a cron from chat. Cron expressions must use six fields: sec min hour day month dow."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Short human-readable automation name." },
-                "cron": { "type": "string", "description": "Six-field cron expression: sec min hour day month dow." },
-                "prompt": { "type": "string", "description": "Self-contained prompt to run each time the automation fires." },
-                "attachments": {
-                    "type": "array",
-                    "description": "Optional file attachments whose text content should be included when the automation runs.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "mime": { "type": "string" },
-                            "size": { "type": "integer" },
-                            "content": { "type": "string" },
-                            "dataUrl": { "type": "string" },
-                            "truncated": { "type": "boolean" },
-                            "sourcePath": { "type": "string" }
-                        },
-                        "required": ["name"],
-                        "additionalProperties": false
-                    }
-                },
-                "agent_id": { "type": ["string", "null"], "description": "Optional named agent id. Omit for the default agent." },
-                "model": { "type": "string", "description": "Model id for unattended runs." },
-                "enabled": { "type": "boolean", "description": "Whether the automation should start enabled. Defaults to true." }
-            },
-            "required": ["name", "cron", "prompt", "model"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: ScheduleCreateToolArgs = serde_json::from_value(args).map_err(|e| {
-            Error::InvalidRequest(format!("invalid schedule_create arguments: {e}"))
-        })?;
-        let name = trim_required_tool_arg(args.name, "name")?;
-        let cron = trim_required_tool_arg(args.cron, "cron")?;
-        let prompt = trim_required_tool_arg(args.prompt, "prompt")?;
-        let model = provider_schedule_model(trim_required_tool_arg(args.model, "model")?)?;
-        let schedule = self.store.create_with_run_context(
-            &name,
-            &cron,
-            trim_optional_agent_id(args.agent_id),
-            &model,
-            &prompt,
-            args.attachments,
-            args.enabled,
-            self.workspace.clone(),
-            &self.privacy,
-            "local",
-        )?;
-        Ok(json!({ "ok": true, "schedule": schedule }))
-    }
-}
-
-#[async_trait]
-impl Tool for ScheduleUpdateTool {
-    fn name(&self) -> &str {
-        "schedule_update"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-
-    fn description(&self) -> &str {
-        "Update an existing cron automation by id. Use null agent_id to clear the named agent and omit fields that should stay unchanged."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Schedule id to update." },
-                "name": { "type": "string" },
-                "cron": { "type": "string", "description": "Six-field cron expression: sec min hour day month dow." },
-                "prompt": { "type": "string" },
-                "attachments": {
-                    "type": "array",
-                    "description": "Replacement file attachments for the automation.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "mime": { "type": "string" },
-                            "size": { "type": "integer" },
-                            "content": { "type": "string" },
-                            "dataUrl": { "type": "string" },
-                            "truncated": { "type": "boolean" },
-                            "sourcePath": { "type": "string" }
-                        },
-                        "required": ["name"],
-                        "additionalProperties": false
-                    }
-                },
-                "agent_id": { "type": ["string", "null"], "description": "Named agent id, or null to clear." },
-                "model": { "type": "string", "description": "Model id for unattended runs." },
-                "enabled": { "type": "boolean" }
-            },
-            "required": ["id"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: ScheduleUpdateToolArgs = serde_json::from_value(args).map_err(|e| {
-            Error::InvalidRequest(format!("invalid schedule_update arguments: {e}"))
-        })?;
-        let id = trim_required_tool_arg(args.id, "id")?;
-        let current = find_schedule(&self.store, &id)?;
-        let name = args
-            .name
-            .map(|value| trim_required_tool_arg(value, "name"))
-            .transpose()?
-            .unwrap_or_else(|| current.name.clone());
-        let cron = args
-            .cron
-            .map(|value| trim_required_tool_arg(value, "cron"))
-            .transpose()?
-            .unwrap_or_else(|| current.cron.clone());
-        let prompt = args
-            .prompt
-            .map(|value| trim_required_tool_arg(value, "prompt"))
-            .transpose()?
-            .unwrap_or_else(|| current.prompt.clone());
-        let model = args
-            .model
-            .map(|value| trim_required_tool_arg(value, "model"))
-            .transpose()?
-            .unwrap_or_else(|| current.model.clone());
-        let model = provider_schedule_model(model)?;
-        let attachments = args
-            .attachments
-            .unwrap_or_else(|| current.attachments.clone());
-        let agent_id = match args.agent_id {
-            None => current.agent_id.clone(),
-            Some(Value::Null) => None,
-            Some(Value::String(value)) => trim_optional_agent_id(Some(value)),
-            Some(_) => {
-                return Err(Error::InvalidRequest(
-                    "agent_id must be a string or null".to_string(),
-                ))
-            }
-        };
-        let schedule = self.store.update(milim_automation::ScheduleUpdate {
-            id: &id,
-            name: &name,
-            cron: &cron,
-            agent_id,
-            model: &model,
-            prompt: &prompt,
-            attachments,
-            enabled: args.enabled.unwrap_or(current.enabled),
-            workspace: current.workspace,
-            privacy: current.privacy,
-            timezone_mode: current.timezone_mode,
-            created_unix: current.created_unix,
-            last_run: current.last_run,
-        })?;
-        Ok(json!({ "ok": true, "schedule": schedule }))
-    }
-}
-
-#[async_trait]
-impl Tool for ScheduleListTool {
-    fn name(&self) -> &str {
-        "schedule_list"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn description(&self) -> &str {
-        "List saved cron automations."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "enabled_only": { "type": "boolean", "description": "Only return enabled schedules." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
-            },
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: ScheduleListToolArgs = serde_json::from_value(args).map_err(|error| {
-            Error::InvalidRequest(format!("invalid schedule_list arguments: {error}"))
-        })?;
-        let mut schedules = self.store.list()?;
-        if args.enabled_only {
-            schedules.retain(|schedule| schedule.enabled);
-        }
-        if let Some(limit) = args.limit {
-            schedules.truncate(limit.clamp(1, 50));
-        }
-        Ok(json!({ "ok": true, "schedules": schedules }))
-    }
-}
-
-#[async_trait]
-impl Tool for ScheduleDeleteTool {
-    fn name(&self) -> &str {
-        "schedule_delete"
-    }
-
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::Mutating
-    }
-
-    fn description(&self) -> &str {
-        "Delete a saved cron automation by id."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Schedule id to delete." }
-            },
-            "required": ["id"],
-            "additionalProperties": false
-        })
-    }
-
-    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
-        let args: ScheduleDeleteToolArgs = serde_json::from_value(args).map_err(|e| {
-            Error::InvalidRequest(format!("invalid schedule_delete arguments: {e}"))
-        })?;
-        let id = trim_required_tool_arg(args.id, "id")?;
-        let deleted = self.store.delete(&id)?;
-        if !deleted {
-            return Err(Error::ModelNotFound(format!("schedule {id}")));
-        }
-        Ok(json!({ "ok": true, "deleted": true, "id": id }))
-    }
-}
-
 /// `POST /agents/run` — run the tool-use loop server-side and return the final
 /// message plus the tool steps taken.
 pub(crate) async fn agents_run(
@@ -4238,82 +2801,67 @@ pub(crate) async fn agents_run(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
+    let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
+    let enabled_skills = string_list_extra(&req, "enabled_skills");
+    http_native_run(
+        &st,
+        req,
+        "all",
+        &[],
+        &skill_mode,
+        &enabled_skills,
+        Default::default(),
+    )
+    .await
+}
 
-    let run_context = RunContext::from_request(&st, &req).map_err(ApiError)?;
-    let service = service_for_run(&st, &run_context);
+/// Run the tool-use loop for one HTTP agent request, as SSE when the caller
+/// asked to stream and as a single JSON response otherwise.
+async fn http_native_run(
+    st: &AppState,
+    req: ChatCompletionRequest,
+    tool_mode: &str,
+    enabled_tools: &[String],
+    skill_mode: &str,
+    enabled_skills: &[String],
+    instructions: crate::workspace_context::InstructionLayers,
+) -> Result<Response, ApiError> {
+    let run_context = RunContext::from_request(st, &req).map_err(ApiError)?;
+    let service = service_for_run(st, &run_context);
     let model = req.model.clone();
     let want_stream = req.wants_stream();
     let reasoning_effort = req.reasoning_effort;
-    let mut agent_config = agent_run_config_from_request(&req);
-    let tool_policy = tool_run_policy_from_request(&req);
-    if want_stream
-        && tool_policy.approval == ToolApprovalPolicy::Review
-        && tool_policy.interactive_approval
-        && !tool_policy.approval_granted
-    {
-        agent_config.approval_broker = Some(st.tool_approvals.clone());
-    }
     let run_id = gen_id("agentrun");
-    agent_config.interceptor = crate::user_hooks::interceptor(
-        run_context.workspace(),
-        &run_id,
-        string_extra(&req, "thread_id").as_deref(),
-    );
-    let memory = memory_context_from_request(&req, model.clone());
-    let skill_mode = string_extra(&req, "skill_mode").unwrap_or_else(|| "auto".to_string());
-    let enabled_skills = string_list_extra(&req, "enabled_skills");
-    let workspace_unavailable =
-        desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref());
-    let skills_resolved = bool_extra(&req, "skills_resolved");
-    let mut messages = req.messages;
-    if !skills_resolved {
-        let query = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user")
-            .map(ChatMessage::text_content)
-            .unwrap_or_default();
-        let skill_messages = crate::agent_skill_context(
-            &st,
-            &skill_mode,
-            &enabled_skills,
-            &query,
-            run_context.workspace(),
-        )
-        .messages();
-        let insert_at = messages
-            .iter()
-            .position(|message| message.role != "system")
-            .unwrap_or(messages.len());
-        messages.splice(insert_at..insert_at, skill_messages);
-    }
-    add_workspace_instructions_for(&mut messages, run_context.workspace.as_deref());
-    add_workspace_notice_if_needed(&mut messages, workspace_unavailable);
-    let mut registry = agent_registry_with_memory(&st, Some(memory), &tool_policy, &run_context);
-    register_skill_tools(
-        &mut registry,
-        &st,
-        &skill_mode,
-        &enabled_skills,
-        run_context.workspace(),
-    );
-    add_native_run_context(
-        &mut messages,
-        &registry,
-        &run_context,
-        &model,
-        tool_policy.plan_mode,
-    );
+    let thread_id = string_extra(&req, "thread_id");
+    let config = agent_run_config_from_request(&req);
+    let spec = NativeRunSpec {
+        kind: NativeRunKind::Http,
+        model: &model,
+        run_id: &run_id,
+        thread_id: thread_id.as_deref(),
+        run_context: &run_context,
+        policy: tool_run_policy_from_request(&req),
+        streamed: want_stream,
+        tool_mode,
+        enabled_tools,
+        skill_mode,
+        enabled_skills,
+        skills_resolved: bool_extra(&req, "skills_resolved"),
+        instructions,
+        memory: memory_context_from_request(&req, model.clone()),
+        messages: req.messages,
+        turn_context: Vec::new(),
+    };
+    let run = build_native_run(st, spec, config);
 
     if want_stream {
-        let tools = std::sync::Arc::new(registry);
         let stream = milim_agents::run_agent_stream_with_config(
             service,
-            tools,
+            Arc::new(run.tools),
             model,
-            messages,
+            run.messages,
             reasoning_effort,
-            agent_config,
+            run.config,
         );
         return Ok(Sse::new(agent_sse(stream))
             .keep_alive(KeepAlive::default())
@@ -4322,11 +2870,11 @@ pub(crate) async fn agents_run(
 
     let outcome = milim_agents::run_agent_with_config(
         service.as_ref(),
-        &registry,
+        &run.tools,
         &model,
-        messages,
+        run.messages,
         reasoning_effort,
-        agent_config,
+        run.config,
     )
     .await
     .map_err(ApiError)?;
@@ -4346,12 +2894,19 @@ pub(crate) async fn agents_run(
 pub(crate) type ControlAgentStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = milim_agents::AgentEvent> + Send>>;
 
+/// A canonical thread turn through milim's tool loop. `instructions` are the
+/// run's frozen instruction layers; `agent` contributes its tool and skill
+/// selection. `messages` is the replayed thread history; `turn_context` is
+/// this turn's own context (linked-thread mail, preview runtime), which
+/// travels with the turn rather than in the cached prompt prefix. Returns the
+/// stream and the per-turn context message as sent, for byte-stable replay.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn control_agent_stream(
     st: &AppState,
     agent: &milim_agents::AgentDef,
     model: &str,
-    mut messages: Vec<ChatMessage>,
+    messages: Vec<ChatMessage>,
+    turn_context: Vec<ChatMessage>,
     workspace: Option<&str>,
     privacy: &str,
     approval_mode: &str,
@@ -4364,44 +2919,36 @@ pub(crate) fn control_agent_stream(
     thread_id: &str,
     message_id: &str,
     linked_thread_grants: Vec<crate::control::FrozenLinkedThreadGrantV1>,
+    instructions: crate::workspace_context::InstructionLayers,
     reasoning_effort: Option<ReasoningEffort>,
     sampling: SamplingParams,
     run_limits: Option<&crate::control::RunLimitsV1>,
     pricing: Option<milim_core::api::openai::ModelPricing>,
     context_window_tokens: Option<u32>,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
-) -> milim_core::Result<ControlAgentStream> {
+) -> milim_core::Result<(ControlAgentStream, Option<String>)> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
     let service = service_for_run(st, &run_context);
-    let approval = match approval_mode {
-        "review" => ToolApprovalPolicy::Review,
-        "open" => ToolApprovalPolicy::Open,
-        _ => ToolApprovalPolicy::Guarded,
-    };
-    let tool_policy = ToolRunPolicy {
+    let approval = ToolApprovalPolicy::from_requested(Some(approval_mode));
+    let policy = ToolRunPolicy {
         approval,
-        approval_granted: false,
         interactive_approval: approval == ToolApprovalPolicy::Review,
         sandbox_enabled: sandbox,
         computer_use_enabled: computer_use,
-        preview_tools_enabled: false,
-        experimental_hashline_patch: false,
         plan_mode,
+        ..Default::default()
     };
-    let mut agent_config = milim_agents::AgentRunConfig::default();
-    if tool_policy.interactive_approval {
-        agent_config.approval_broker = Some(st.tool_approvals.clone());
-    }
-    agent_config.step_hook = Some(step_hook);
-    agent_config.interceptor =
-        crate::user_hooks::interceptor(run_context.workspace(), message_id, Some(thread_id));
-    agent_config.sampling = sampling;
-    agent_config.context_window_tokens = context_window_tokens;
+    let mut config = milim_agents::AgentRunConfig {
+        step_hook: Some(step_hook),
+        sampling,
+        context_window_tokens,
+        ..Default::default()
+    };
     if let Some(limits) = run_limits {
         if let Some(steps) = limits.max_steps {
-            agent_config.max_iterations = steps as usize;
+            config.max_iterations = steps as usize;
         }
-        agent_config.limits = milim_agents::AgentRunLimits {
+        config.limits = milim_agents::AgentRunLimits {
             max_duration: limits
                 .max_seconds
                 .map(|seconds| std::time::Duration::from_secs(u64::from(seconds))),
@@ -4409,32 +2956,6 @@ pub(crate) fn control_agent_stream(
             pricing,
         };
     }
-    let query = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .map(ChatMessage::text_content)
-        .unwrap_or_default();
-    let mut prefixed = Vec::new();
-    if !agent.system_prompt.trim().is_empty() {
-        prefixed.push(ChatMessage::text("system", agent.system_prompt.clone()));
-    }
-    prefixed.extend(
-        crate::agent_skill_context(
-            st,
-            &agent.skill_mode,
-            &agent.enabled_skills,
-            &query,
-            run_context.workspace(),
-        )
-        .messages(),
-    );
-    prefixed.append(&mut messages);
-    add_workspace_instructions_for(&mut prefixed, run_context.workspace());
-    add_workspace_notice_if_needed(
-        &mut prefixed,
-        desktop_workspace_unavailable_for(st, run_context.workspace()),
-    );
     let memory = AgentMemoryContext {
         enabled: memory_enabled,
         model: model.to_string(),
@@ -4452,33 +2973,37 @@ pub(crate) fn control_agent_stream(
             _ => milim_agents::DelegationPolicy::Ask,
         },
         worker_model: (!worker_model.trim().is_empty()).then(|| worker_model.to_string()),
-        worker_context: Some(query),
+        worker_context: None,
         linked_thread_grants,
     };
-    let mut registry = agent_registry_for_mode_with_context(
-        st,
-        &agent.tool_mode,
-        &agent.enabled_tools,
-        Some(memory),
-        &tool_policy,
-        &run_context,
-    );
-    register_skill_tools(
-        &mut registry,
-        st,
-        &agent.skill_mode,
-        &agent.enabled_skills,
-        run_context.workspace(),
-    );
-    add_native_run_context(&mut prefixed, &registry, &run_context, model, plan_mode);
-    Ok(Box::pin(milim_agents::run_agent_stream_with_config(
+    let spec = NativeRunSpec {
+        kind: NativeRunKind::Control,
+        model,
+        run_id: message_id,
+        thread_id: Some(thread_id),
+        run_context: &run_context,
+        policy,
+        streamed: true,
+        tool_mode: &agent.tool_mode,
+        enabled_tools: &agent.enabled_tools,
+        skill_mode: &agent.skill_mode,
+        enabled_skills: &agent.enabled_skills,
+        skills_resolved: false,
+        instructions,
+        memory,
+        messages,
+        turn_context,
+    };
+    let run = build_native_run(st, spec, config);
+    let stream: ControlAgentStream = Box::pin(milim_agents::run_agent_stream_with_config(
         service,
-        Arc::new(registry),
+        Arc::new(run.tools),
         model.to_string(),
-        prefixed,
+        run.messages,
         reasoning_effort,
-        agent_config,
-    )))
+        run.config,
+    ));
+    Ok((stream, run.turn_context))
 }
 
 /// `GET /agents` — list named agents.
@@ -4565,149 +3090,24 @@ pub(crate) async fn agent_run_by_id(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&st, &headers, peer_addr(peer))?;
-    let run_context = RunContext::from_request(&st, &req).map_err(ApiError)?;
-    let service = service_for_run(&st, &run_context);
     let store = agents_store(&st)?;
     let agent = store
         .get(&id)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::ModelNotFound(format!("agent {id}"))))?;
-
-    let want_stream = req.wants_stream();
-    let requested_model = req.model.clone();
-    let reasoning_effort = req.reasoning_effort;
-    let mut agent_config = agent_run_config_from_request(&req);
-    let tool_policy = tool_run_policy_from_request(&req);
-    if want_stream
-        && tool_policy.approval == ToolApprovalPolicy::Review
-        && tool_policy.interactive_approval
-        && !tool_policy.approval_granted
-    {
-        agent_config.approval_broker = Some(st.tool_approvals.clone());
-    }
-    let run_id = gen_id("agentrun");
-    agent_config.interceptor = crate::user_hooks::interceptor(
-        run_context.workspace(),
-        &run_id,
-        string_extra(&req, "thread_id").as_deref(),
-    );
-    let mut memory = memory_context_from_request(&req, requested_model.clone());
-    let mut messages = Vec::new();
-    if !agent.system_prompt.is_empty() {
-        messages.push(ChatMessage::text("system", agent.system_prompt.clone()));
-    }
-    let skill_query = req
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(ChatMessage::text_content)
-        .unwrap_or_default();
-    let skills = if bool_extra(&req, "skills_resolved") {
-        crate::AgentSkillContext::default()
-    } else {
-        crate::agent_skill_context(
-            &st,
-            &agent.skill_mode,
-            &agent.enabled_skills,
-            &skill_query,
-            run_context.workspace(),
-        )
-    };
-    messages.extend(skills.messages());
-    // Workers cannot call load_skill, so they inherit the Agent prompt and
-    // explicitly loaded skill bodies but not the skill index.
-    let resolved_role = [
-        Some(agent.system_prompt.as_str()),
-        skills.explicit.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|text| !text.trim().is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n");
-    if !resolved_role.is_empty() {
-        memory.worker_context = Some(
-            [
-                memory.worker_context.as_deref(),
-                Some(resolved_role.as_str()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        );
-    }
-    messages.extend(req.messages);
-    add_workspace_instructions_for(&mut messages, run_context.workspace.as_deref());
-    let model = requested_model;
-    let memory = AgentMemoryContext {
-        model: model.clone(),
-        ..memory
-    };
-    add_workspace_notice_if_needed(
-        &mut messages,
-        desktop_workspace_unavailable_for(&st, run_context.workspace.as_deref()),
-    );
-    let mut registry = agent_registry_for_mode_with_context(
+    http_native_run(
         &st,
+        req,
         &agent.tool_mode,
         &agent.enabled_tools,
-        Some(memory),
-        &tool_policy,
-        &run_context,
-    );
-    register_skill_tools(
-        &mut registry,
-        &st,
         &agent.skill_mode,
         &agent.enabled_skills,
-        run_context.workspace(),
-    );
-    add_native_run_context(
-        &mut messages,
-        &registry,
-        &run_context,
-        &model,
-        tool_policy.plan_mode,
-    );
-
-    if want_stream {
-        let tools = std::sync::Arc::new(registry);
-        let stream = milim_agents::run_agent_stream_with_config(
-            service,
-            tools,
-            model,
-            messages,
-            reasoning_effort,
-            agent_config,
-        );
-        return Ok(Sse::new(agent_sse(stream))
-            .keep_alive(KeepAlive::default())
-            .into_response());
-    }
-
-    let outcome = milim_agents::run_agent_with_config(
-        service.as_ref(),
-        &registry,
-        &model,
-        messages,
-        reasoning_effort,
-        agent_config,
+        crate::workspace_context::InstructionLayers {
+            agent: agent.system_prompt.clone(),
+            ..Default::default()
+        },
     )
     .await
-    .map_err(ApiError)?;
-
-    Ok(Json(AgentRunResponse {
-        id: run_id,
-        object: "agent.run",
-        model,
-        message: outcome.message,
-        steps: outcome.steps,
-        iterations: outcome.iterations,
-        stopped_at_limit: outcome.stopped_at_limit,
-    })
-    .into_response())
 }
 
 /// `PUT /agents/{id}` — update (upsert) a named agent.

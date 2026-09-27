@@ -6,7 +6,7 @@ title: Privacy and security
 summary: Local and remote data boundaries, Google Workspace access, privacy modes, redaction, blocking, bearer auth, and CORS boundaries.
 group: Local data
 order: 70
-updated: 2026-09-26
+updated: 2026-09-27
 ---
 
 Privacy settings are easiest to reason about as a routing question: what stays local, what goes to a provider, and which gate runs before a remote send.
@@ -48,7 +48,7 @@ Each desktop run snapshots its selected privacy mode and canonical workspace whe
 
 Schedules persist their own privacy and workspace boundary. New desktop schedules inherit the active thread's values, migrated schedules remain explicitly Privacy Off, and every occurrence freezes that saved context before it enters the canonical run path.
 
-Canonical runs keep a local privacy-processed ledger for their lifetime. The resolved model request is transformed and committed before provider execution; a failed pre-request commit prevents the call, and a failed post-response or tool-result commit prevents another model step. Privacy Block rejects detected text before any request artifact is written. Redact persists the redacted form. Independently of the selected privacy mode, credential-shaped text and fields such as authorization, API keys, bearer tokens, device keys, refresh tokens, and client secrets are replaced before ledger persistence. Attachment bodies are not duplicated: the ledger stores identity, digest, metadata, and a durable reference.
+Canonical runs keep a local privacy-processed ledger for their lifetime. The resolved model request is transformed and committed before provider execution; a failed pre-request commit prevents the call, and a failed post-response or tool-result commit prevents another model step. Privacy Block rejects detected text before any request artifact is written. Redact persists the redacted form. Independently of the selected privacy mode, the ledger replaces credential spans with `[REDACTED_CREDENTIAL]` before persistence: `sk-`, `sk-proj-`, and `sk-ant-` style keys, `Authorization` values, `Bearer` tokens, the values of credential-named `key=value` and `"key": "value"` pairs (API keys, access, refresh, and auth tokens, device keys, secrets, and passwords), GitHub, Slack, AWS, and Google key shapes, and PEM private keys. Only the span is replaced, so the surrounding text survives; shell variables such as `$TOKEN` and ordinary words such as "task-list" are left alone. Later steps of a run are rebuilt from an exact in-memory copy of what was sent rather than from the masked ledger. Attachment bodies are not duplicated: the ledger stores identity, digest, metadata, and a durable reference.
 
 ## Data boundary
 

@@ -71,6 +71,11 @@ pub struct DeltaEvent {
     pub reasoning: Option<String>,
     /// Streamed tool-call fragments.
     pub tool_calls: Vec<DeltaToolCall>,
+    /// Opaque continuation data for the assistant turn (see
+    /// `ChatMessage::provider_state`). An adapter sends the complete value
+    /// for the turn, normally once just before `Done`; a later value
+    /// replaces an earlier one.
+    pub provider_state: Option<serde_json::Value>,
 }
 
 impl DeltaEvent {
@@ -84,7 +89,10 @@ impl DeltaEvent {
 
     /// True if this delta carries nothing.
     pub fn is_empty(&self) -> bool {
-        self.content.is_none() && self.reasoning.is_none() && self.tool_calls.is_empty()
+        self.content.is_none()
+            && self.reasoning.is_none()
+            && self.tool_calls.is_empty()
+            && self.provider_state.is_none()
     }
 }
 
@@ -100,14 +108,20 @@ pub enum StreamEvent {
 
 /// Map a provider's raw stop reason onto the normalized finish reasons every
 /// backend reports on [`StreamEvent::Done`]: `stop`, `length`, `tool_calls`,
-/// `content_filter`, or `error`. A missing or unrecognized reason is `stop`.
+/// `content_filter`, `context_window_exceeded`, or `error`. A missing or
+/// unrecognized reason is `stop`.
 pub fn normalize_finish_reason(raw: Option<&str>) -> &'static str {
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return "stop";
     };
     match raw.to_ascii_lowercase().as_str() {
         // OpenAI `length`, Anthropic `max_tokens`, Gemini `MAX_TOKENS`.
-        "length" | "max_tokens" | "max_output_tokens" | "model_context_window_exceeded" => "length",
+        "length" | "max_tokens" | "max_output_tokens" => "length",
+        // The prompt filled the context window: continuing would overflow
+        // again, so the agent loop compacts instead.
+        "model_context_window_exceeded" | "context_window_exceeded" | "context_length_exceeded" => {
+            "context_window_exceeded"
+        }
         "tool_calls" | "tool_use" | "function_call" => "tool_calls",
         "content_filter" | "refusal" | "safety" | "recitation" | "blocklist"
         | "prohibited_content" | "spii" | "image_safety" | "language" => "content_filter",
@@ -172,6 +186,7 @@ pub trait ModelService: Send + Sync {
         let mut tools = ToolCallAccumulator::default();
         let mut finish_reason = "stop".to_string();
         let mut usage = Usage::default();
+        let mut provider_state = None;
 
         while let Some(ev) = stream.next().await {
             match ev? {
@@ -184,6 +199,9 @@ pub trait ModelService: Send + Sync {
                     }
                     for tc in d.tool_calls {
                         tools.push(tc);
+                    }
+                    if d.provider_state.is_some() {
+                        provider_state = d.provider_state;
                     }
                 }
                 StreamEvent::Done {
@@ -214,6 +232,7 @@ pub trait ModelService: Send + Sync {
             } else {
                 Some(reasoning)
             },
+            provider_state,
         };
 
         Ok(CompletionOutput {
@@ -251,7 +270,13 @@ impl ToolCallAccumulator {
             entry.id = Some(id);
         }
         if let Some(name) = d.function.name {
-            entry.name.push_str(&name);
+            // Some servers repeat the full name (or a growing prefix of it) on
+            // every chunk; only a genuine continuation is appended.
+            if name.starts_with(entry.name.as_str()) {
+                entry.name = name;
+            } else {
+                entry.name.push_str(&name);
+            }
         }
         if let Some(args) = d.function.arguments {
             entry.arguments.push_str(&args);
@@ -322,6 +347,10 @@ mod tests {
             (Some("max_tokens"), "length"),
             (Some("MAX_TOKENS"), "length"),
             (Some("length"), "length"),
+            (
+                Some("model_context_window_exceeded"),
+                "context_window_exceeded",
+            ),
             (Some("tool_use"), "tool_calls"),
             (Some("tool_calls"), "tool_calls"),
             (Some("refusal"), "content_filter"),
@@ -333,6 +362,43 @@ mod tests {
         ] {
             assert_eq!(normalize_finish_reason(raw), expected, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn accumulator_keeps_names_that_servers_repeat_on_every_chunk() {
+        let fragment = |name: &str, arguments: &str| DeltaToolCall {
+            index: 0,
+            id: Some("call_abc".into()),
+            kind: Some("function".into()),
+            function: DeltaFunction {
+                name: Some(name.into()),
+                arguments: Some(arguments.into()),
+            },
+        };
+        let mut acc = ToolCallAccumulator::default();
+        acc.push(fragment("get_weather", "{\"loc"));
+        acc.push(fragment("get_weather", "ation\":\"NYC\"}"));
+        let calls = acc.finish();
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"location\":\"NYC\"}");
+
+        // A growing prefix replaces, a genuine fragment appends.
+        let mut acc = ToolCallAccumulator::default();
+        acc.push(fragment("get_", ""));
+        acc.push(fragment("get_wea", ""));
+        acc.push(fragment("ther", "{}"));
+        assert_eq!(acc.finish()[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn tool_call_fragments_without_an_index_still_parse() {
+        let fragment: DeltaToolCall = serde_json::from_value(serde_json::json!({
+            "id": "call_1",
+            "function": { "name": "list_dir", "arguments": "{}" }
+        }))
+        .unwrap();
+        assert_eq!(fragment.index, 0);
+        assert_eq!(fragment.function.name.as_deref(), Some("list_dir"));
     }
 
     #[test]

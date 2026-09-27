@@ -263,17 +263,33 @@ impl RunManager {
             .into_iter()
             .find(|turn| turn.id == queue_id)
             .ok_or_else(|| Error::NotFound(format!("queued turn {queue_id}")))?;
-        let accepted = serde_json::from_str::<AcceptedTurnV1>(&queued.request_json)
+        let mut accepted = serde_json::from_str::<AcceptedTurnV1>(&queued.request_json)
             .map_err(|error| Error::Other(format!("stored queued turn is invalid: {error}")))?;
         if !self.store.control_remove_queued_turn(queue_id)? {
             return Err(Error::NotFound(format!("queued turn {queue_id}")));
         }
-        let is_mailbox = accepted.mailbox_origin.is_some();
-        let run_id = match self.start_turn(state, thread_id.clone(), accepted) {
+        let mailbox_exchange_id = accepted
+            .mailbox_origin
+            .as_ref()
+            .map(|origin| origin.exchange_id.clone());
+        let started = self
+            .refresh_queued_turn_config(&state, &thread_id, &mut accepted)
+            .and_then(|()| self.start_turn(state, thread_id.clone(), accepted));
+        let run_id = match started {
             Ok(run_id) => run_id,
             Err(error) => {
-                if !is_mailbox {
-                    let _ = self.store.control_enqueue_turn(&queued);
+                match mailbox_exchange_id {
+                    // The sender is waiting on this exchange; fail it rather
+                    // than leave it queued with no turn behind it.
+                    Some(exchange_id) => {
+                        let _ = self.fail_mailbox_exchange_by_id(
+                            &exchange_id,
+                            "The linked thread could not start its queued turn.",
+                        );
+                    }
+                    None => {
+                        let _ = self.store.control_enqueue_turn(&queued);
+                    }
                 }
                 return Err(error);
             }
@@ -291,6 +307,24 @@ impl RunManager {
             );
         }
         Ok(run_id)
+    }
+
+    /// A queued turn runs with the thread's settings as they are when it
+    /// starts, not when it was queued, so a model, approval, or privacy
+    /// change made while it waited applies to it. Its attachments are kept.
+    fn refresh_queued_turn_config(
+        &self,
+        state: &AppState,
+        thread_id: &str,
+        accepted: &mut AcceptedTurnV1,
+    ) -> Result<()> {
+        let thread = self
+            .store
+            .control_thread(thread_id)?
+            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
+        let attachments = std::mem::take(&mut accepted.config.attachments);
+        accepted.config = self.resolve_turn_config(state, &thread, attachments, "sending")?;
+        Ok(())
     }
 
     pub(super) fn drain_queue(self: &Arc<Self>, state: AppState, thread_id: String) {

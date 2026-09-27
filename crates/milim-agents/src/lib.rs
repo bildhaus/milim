@@ -79,10 +79,14 @@ pub struct AgentRunConfig {
     pub sampling: SamplingParams,
     pub limits: AgentRunLimits,
     /// The model's context window. When known, older tool outputs are elided
-    /// and old turns summarized before a step would overflow it.
+    /// and old turns summarized before a step would overflow it. Either way,
+    /// a prompt the provider rejects as too long is compacted and retried
+    /// once, and its size bounds the window for the rest of the run.
     pub context_window_tokens: Option<u32>,
     /// How long an interactive approval may wait before it is denied.
-    /// `None` waits indefinitely.
+    /// `None` waits indefinitely. A step's approvals are requested together
+    /// and waited on concurrently; that wait does not count against
+    /// `limits.max_duration`.
     pub approval_timeout: Option<Duration>,
     /// User hooks around turns, tool calls, and the final answer.
     pub interceptor: Option<Arc<dyn ToolInterceptor>>,
@@ -129,7 +133,12 @@ pub struct ContextCompaction {
     pub summarized_messages: usize,
     pub estimated_tokens_before: usize,
     pub estimated_tokens_after: usize,
+    /// The effective window: the configured one, or what a provider's
+    /// context-length rejection showed. 0 when unknown.
     pub context_window_tokens: u32,
+    /// Why summarizing older turns failed; tool results were elided instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_error: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -148,6 +157,9 @@ pub trait AgentStepHook: std::fmt::Debug + Send + Sync {
 
     async fn commit_model_request(&self, step: usize, request: &CompletionRequest) -> Result<()>;
 
+    /// `provider_state` is the adapter's opaque continuation data for the
+    /// turn (see `ChatMessage::provider_state`); persist it byte-exact.
+    #[allow(clippy::too_many_arguments)]
     async fn commit_model_response(
         &self,
         step: usize,
@@ -156,6 +168,7 @@ pub trait AgentStepHook: std::fmt::Debug + Send + Sync {
         tool_calls: &[ToolCall],
         finish_reason: &str,
         usage: Usage,
+        provider_state: Option<&Value>,
     ) -> Result<()>;
 
     async fn commit_tool_result(
@@ -745,173 +758,81 @@ pub async fn run_agent(
     .await
 }
 
-/// Run the tool-use loop with explicit loop configuration.
+/// Run the tool-use loop with explicit loop configuration. This is the
+/// streamed loop collected into one outcome: the same retries, context
+/// management, hooks, and limits apply.
 pub async fn run_agent_with_config(
     service: &dyn ModelService,
     tools: &ToolRegistry,
     model: &str,
-    mut messages: Vec<ChatMessage>,
+    messages: Vec<ChatMessage>,
     reasoning_effort: Option<ReasoningEffort>,
     config: AgentRunConfig,
 ) -> Result<AgentOutcome> {
-    let core_tools = tools_to_core(tools);
-    let max_iterations = config.max_iterations();
+    let events = agent_loop(
+        service,
+        tools,
+        model.to_string(),
+        messages,
+        reasoning_effort,
+        config,
+    );
+    futures::pin_mut!(events);
     let mut steps = Vec::new();
-    let mut budget = limits::RunBudget::new(config.limits.clone());
-    let mut stop_continuations = 0;
-    if let Some(interceptor) = config.interceptor.as_ref() {
-        let turn = interceptor.before_turn(&messages).await;
-        if let Some(reason) = turn.block {
-            return Err(Error::InvalidRequest(blocked_turn_message(&reason)));
-        }
-        messages.extend(intercept::context_message(&turn.context));
-    }
-
-    let mut iteration = 0;
-    loop {
-        if let Some(reason) = budget.reason() {
-            return Ok(AgentOutcome {
-                message: ChatMessage::text("assistant", reason),
-                steps,
-                iterations: iteration,
-                stopped_at_limit: true,
-            });
-        }
-        let req = CompletionRequest {
-            model: model.to_string(),
-            messages: messages.clone(),
-            tools: core_tools.clone(),
-            tool_choice: None,
-            response_format: None,
-            prompt: None,
-            suffix: None,
-            sampling: config.sampling.clone(),
-            reasoning_effort,
-        };
-        let out = complete_with_retry(service, req, config.initial_stream_retry_backoff).await?;
-        iteration += 1;
-        budget.record(out.usage);
-        let truncated = normalize_finish_reason(&out.finish_reason) == "length";
-
-        let calls = out.message.tool_calls.clone().unwrap_or_default();
-        if let Some(reason) = budget.reason() {
-            return Ok(AgentOutcome {
-                message: ChatMessage::text("assistant", reason),
-                steps,
-                iterations: iteration,
-                stopped_at_limit: true,
-            });
-        }
-        if calls.is_empty() {
-            if let Some(interceptor) = config.interceptor.as_ref() {
-                let content = out.message.text_content();
-                let stop = interceptor.on_stop(&content, stop_continuations).await;
-                if let Some(feedback) = stop.continue_with.filter(|_| {
-                    stop_continuations < intercept::MAX_STOP_CONTINUATIONS
-                        && iteration < max_iterations
-                }) {
-                    stop_continuations += 1;
-                    if !content.is_empty() {
-                        messages.push(ChatMessage::text("assistant", content));
-                    }
-                    messages.push(intercept::stop_feedback_message(&feedback));
-                    continue;
-                }
+    // Every announced call gets one result, in call order.
+    let mut arguments = std::collections::VecDeque::new();
+    let mut answer = None;
+    while let Some(event) = events.next().await {
+        match event {
+            LoopEvent::Event(AgentEvent::ToolCall {
+                arguments: call_arguments,
+                ..
+            }) => arguments.push_back(call_arguments),
+            LoopEvent::Event(AgentEvent::ToolResult {
+                name,
+                result,
+                mcp_app,
+                mcp_app_result,
+                ..
+            }) => steps.push(ToolStep {
+                name,
+                arguments: arguments.pop_front().unwrap_or_default(),
+                result,
+                mcp_app,
+                mcp_app_result,
+            }),
+            LoopEvent::Event(AgentEvent::Done {
+                iterations,
+                stopped_at_limit,
+                ..
+            }) => {
+                return Ok(AgentOutcome {
+                    // A run that stops to wait for a worker plan decision
+                    // has no final answer yet.
+                    message: answer.unwrap_or_else(|| ChatMessage::text("assistant", "")),
+                    steps,
+                    iterations,
+                    stopped_at_limit,
+                });
             }
-            return Ok(AgentOutcome {
-                message: out.message,
-                steps,
-                iterations: iteration,
-                stopped_at_limit: false,
-            });
-        }
-        if iteration >= max_iterations {
-            return Ok(AgentOutcome {
-                message: limit_message(max_iterations),
-                steps,
-                iterations: iteration,
-                stopped_at_limit: true,
-            });
-        }
-
-        // Record the assistant's tool-call turn, then execute each call.
-        messages.push(out.message);
-        let mut pending_images: Vec<ChatMessage> = Vec::new();
-        for call in calls {
-            if let Some(reason) = budget.reason() {
+            LoopEvent::Event(_) => {}
+            LoopEvent::Answer(message) => answer = Some(message),
+            LoopEvent::Limited {
+                reason, iterations, ..
+            } => {
                 return Ok(AgentOutcome {
                     message: ChatMessage::text("assistant", reason),
                     steps,
-                    iterations: iteration,
+                    iterations,
                     stopped_at_limit: true,
                 });
             }
-            let arguments = prepare_tool_arguments(
-                tools,
-                &call.function.name,
-                &call.function.arguments,
-                truncated,
-            );
-            let denial = match (config.interceptor.as_ref(), &arguments) {
-                (Some(interceptor), Ok(args)) => {
-                    match interceptor
-                        .before_tool(&intercepted_call(&call, args))
-                        .await
-                        .decision
-                    {
-                        ToolDecision::Deny(reason) => Some(reason),
-                        ToolDecision::Continue | ToolDecision::Approve => None,
-                    }
-                }
-                _ => None,
-            };
-            let hook_args = arguments.as_ref().ok().cloned();
-            let executed = match (denial, arguments) {
-                (Some(reason), _) => denied_tool_call(tools, &call.function.name, Some(&reason)),
-                (None, Ok(args)) => execute_tool_call(tools, &call.function.name, args).await,
-                (None, Err(message)) => tool_error_result(tools, &call.function.name, message),
-            };
-            let visible = executed.visible;
-            let mut model_content = tool_output::model_tool_content(
-                executed.model_text.as_deref(),
-                &visible,
-                None,
-                call.id.as_deref(),
-            );
-            if let (Some(interceptor), Some(args), true) = (
-                config.interceptor.as_ref(),
-                hook_args.as_ref(),
-                executed.attempted,
-            ) {
-                let after = interceptor
-                    .after_tool(&intercepted_call(&call, args), &visible)
-                    .await;
-                model_content = intercept::with_feedback(model_content, &after.feedback);
-            }
-            steps.push(ToolStep {
-                name: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
-                result: visible.clone(),
-                mcp_app: executed.ui,
-                mcp_app_result: executed.app_result,
-            });
-            messages.push(ChatMessage {
-                role: "tool".to_string(),
-                content: Some(Content::Text(model_content)),
-                name: None,
-                tool_calls: None,
-                tool_call_id: call.id.clone(),
-                reasoning_content: None,
-            });
-            if let Some(uri) = executed.image_uri {
-                pending_images.push(image_user_message(&call.function.name, uri));
-            }
+            LoopEvent::Failed { error, .. } => return Err(error),
         }
-        // Image results ride in follow-up user messages, pushed after every
-        // tool reply (OpenAI requires each tool_call_id answered before any
-        // other role appears).
-        messages.extend(pending_images);
     }
+    Err(Error::Other(
+        "agent loop ended without a terminal event".into(),
+    ))
 }
 
 /// A streamed event from [`run_agent_stream`].
@@ -925,6 +846,10 @@ pub enum AgentEvent {
     Token { text: String },
     /// A chunk of non-answer reasoning/thinking text.
     Reasoning { text: String },
+    /// Harness-authored text shown to the user, such as a run-limit stop.
+    /// It is not model output: consumers display it but must never replay
+    /// it to a model as assistant text.
+    Notice { text: String },
     /// Usage for one completed model request inside the agent loop.
     UsageDelta { usage: Usage },
     /// The agent decided to call a tool.
@@ -952,6 +877,8 @@ pub enum AgentEvent {
         reason: Option<String>,
     },
     /// A retryable provider failure; the step is retried after `delay_ms`.
+    /// A prompt rejected as too long for the context window is retried once
+    /// after compacting older context (reason `context window exceeded`).
     /// Text and reasoning streamed by the failed attempt are discarded; the
     /// byte counts let consumers drop what they already accumulated.
     ProviderRetry {
@@ -968,6 +895,10 @@ pub enum AgentEvent {
         summarized_messages: usize,
         estimated_tokens_before: usize,
         estimated_tokens_after: usize,
+        /// Why summarizing older turns failed; tool results were elided
+        /// instead.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_error: Option<String>,
     },
     /// The result of executing a tool.
     ToolResult {
@@ -1058,11 +989,95 @@ pub fn run_agent_stream_with_config(
     config: AgentRunConfig,
 ) -> impl Stream<Item = AgentEvent> + Send {
     async_stream::stream! {
-        let core_tools = tools_to_core(&tools);
+        let events = agent_loop(
+            service.as_ref(),
+            tools.as_ref(),
+            model,
+            messages,
+            reasoning_effort,
+            config,
+        );
+        futures::pin_mut!(events);
+        while let Some(event) = events.next().await {
+            match event {
+                LoopEvent::Event(event) => yield event,
+                LoopEvent::Answer(message) => {
+                    yield AgentEvent::Final { content: message.text_content() };
+                }
+                LoopEvent::Limited { reason, iterations, usage } => {
+                    yield AgentEvent::Notice { text: format!("\n\n{reason} {CONTINUE_HINT}") };
+                    yield AgentEvent::Done { iterations, stopped_at_limit: true, usage };
+                }
+                LoopEvent::Failed { message, .. } => yield AgentEvent::Error { message },
+            }
+        }
+    }
+}
+
+/// Appended to a run-limit notice in streamed runs.
+const CONTINUE_HINT: &str = "Send Continue to start another bounded run in this thread.";
+
+/// One item from [`agent_loop`]: a public event, or a terminal outcome that
+/// the streaming and collecting entry points present differently.
+// Items move straight through, like `AgentEvent`s themselves; boxing the
+// common `Event` variant would only add an allocation per streamed token.
+#[allow(clippy::large_enum_variant)]
+enum LoopEvent {
+    Event(AgentEvent),
+    /// The model's final answer, followed by `Done` (streamed as
+    /// [`AgentEvent::Final`]).
+    Answer(ChatMessage),
+    /// A run limit stopped the loop (streamed as a notice, then `Done`).
+    Limited {
+        reason: String,
+        iterations: usize,
+        usage: Usage,
+    },
+    /// The run failed. `message` is what the stream shows; `error` keeps the
+    /// underlying error for callers that return it.
+    Failed {
+        error: Error,
+        message: String,
+    },
+}
+
+impl LoopEvent {
+    fn failed(error: Error) -> Self {
+        Self::Failed {
+            message: error.to_string(),
+            error,
+        }
+    }
+}
+
+/// One tool call of a step, validated and on its way through approval.
+struct PreparedCall {
+    call: ToolCall,
+    arguments: std::result::Result<Value, String>,
+    approved: bool,
+    denial: Option<String>,
+}
+
+/// The tool-use loop shared by [`run_agent_stream_with_config`] and
+/// [`run_agent_with_config`].
+fn agent_loop<'a>(
+    service: &'a dyn ModelService,
+    tools: &'a ToolRegistry,
+    model: String,
+    messages: Vec<ChatMessage>,
+    reasoning_effort: Option<ReasoningEffort>,
+    config: AgentRunConfig,
+) -> impl Stream<Item = LoopEvent> + Send + 'a {
+    async_stream::stream! {
+        let core_tools = tools_to_core(tools);
         let max_iterations = config.max_iterations();
         let retry_backoff = config.initial_stream_retry_backoff;
         let output_scope = config.step_hook.as_ref().and_then(|hook| hook.output_scope());
         let mut messages = messages;
+        // The user request that started this run. Compaction never
+        // summarizes it.
+        let mut anchor = messages.iter().rposition(|message| message.role == "user");
+        let mut window = context::ContextWindow::new(config.context_window_tokens);
         let mut total_usage = Usage::default();
         let mut budget = limits::RunBudget::new(config.limits.clone());
         // Model-visible notes queued for the next step. They are appended
@@ -1074,20 +1089,21 @@ pub fn run_agent_stream_with_config(
 
         if let Some(hook) = config.step_hook.as_ref() {
             if let Err(e) = hook.commit_tool_catalog(&tools.execution_specs()).await {
-                yield AgentEvent::Error { message: e.to_string() };
+                yield LoopEvent::failed(e);
                 return;
             }
         }
 
-        yield AgentEvent::Start { model: model.clone() };
+        yield LoopEvent::Event(AgentEvent::Start { model: model.clone() });
 
         if let Some(interceptor) = config.interceptor.as_ref() {
             let turn = interceptor.before_turn(&messages).await;
             for activity in turn.activity {
-                yield AgentEvent::Hook(activity);
+                yield LoopEvent::Event(AgentEvent::Hook(activity));
             }
             if let Some(reason) = turn.block {
-                yield AgentEvent::Error { message: blocked_turn_message(&reason) };
+                let message = blocked_turn_message(&reason);
+                yield LoopEvent::Failed { error: Error::InvalidRequest(message.clone()), message };
                 return;
             }
             pending_notes.extend(intercept::context_message(&turn.context));
@@ -1097,202 +1113,245 @@ pub fn run_agent_stream_with_config(
         loop {
             let step = iteration + 1;
             if let Some(reason) = budget.reason() {
-                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
-                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
                 return;
             }
             if let Some(hook) = config.step_hook.as_ref() {
                 if let Err(e) = hook.prepare_model_step(step, &mut messages).await {
-                    yield AgentEvent::Error { message: e.to_string() };
+                    yield LoopEvent::failed(e);
                     return;
                 }
             }
             messages.append(&mut pending_notes);
 
-            // Context management runs on the exact messages about to be
-            // committed and sent, so the ledger stays byte-exact.
-            if let Some(window) = config.context_window_tokens.filter(|window| *window > 0) {
-                let limit = |share: f64| (f64::from(window) * share) as usize;
-                let before = context::estimate_tokens(&messages, &core_tools);
-                if before > limit(context::PRUNE_THRESHOLD) {
-                    let elided = context::elide_old_tool_results(&mut messages);
-                    let mut after = context::estimate_tokens(&messages, &core_tools);
-                    let mut summarized = 0;
-                    if after > limit(context::SUMMARIZE_THRESHOLD) && budget.reason().is_none() {
-                        if let Some(span) = context::summary_span(&messages) {
-                            if let Ok((summary, usage)) =
-                                summarize_messages(&service, &model, &messages[span.clone()], &config.sampling).await
-                            {
-                                budget.record(usage);
-                                add_usage(&mut total_usage, usage);
-                                yield AgentEvent::UsageDelta { usage };
-                                // Mid-run system context (steering, injected
-                                // notes) survives the summary verbatim.
-                                let kept_system = messages[span.clone()]
-                                    .iter()
-                                    .filter(|message| message.role == "system")
-                                    .cloned()
-                                    .collect::<Vec<_>>();
-                                summarized = span.len() - kept_system.len();
-                                messages.splice(
-                                    span,
-                                    std::iter::once(context::summary_message(&summary)).chain(kept_system),
-                                );
-                                after = context::estimate_tokens(&messages, &core_tools);
-                            }
-                        }
-                    }
-                    if elided > 0 || summarized > 0 {
-                        let compaction = ContextCompaction {
-                            elided_tool_results: elided,
-                            summarized_messages: summarized,
-                            estimated_tokens_before: before,
-                            estimated_tokens_after: after,
-                            context_window_tokens: window,
-                        };
-                        if let Some(hook) = config.step_hook.as_ref() {
-                            if let Err(e) = hook.commit_context_compaction(step, &compaction).await {
-                                yield AgentEvent::Error { message: e.to_string() };
-                                return;
-                            }
-                        }
-                        yield AgentEvent::ContextCompacted {
-                            elided_tool_results: elided,
-                            summarized_messages: summarized,
-                            estimated_tokens_before: before,
-                            estimated_tokens_after: after,
-                        };
-                    }
-                }
-            }
-
-            let req = CompletionRequest {
-                model: model.clone(),
-                messages: messages.clone(),
-                tools: core_tools.clone(),
-                tool_choice: None,
-                response_format: None,
-                prompt: None,
-                suffix: None,
-                sampling: config.sampling.clone(),
-                reasoning_effort,
-            };
-            if let Some(reason) = budget.reason() {
-                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
-                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
-                return;
-            }
-            if let Some(hook) = config.step_hook.as_ref() {
-                if let Err(e) = hook.commit_model_request(step, &req).await {
-                    yield AgentEvent::Error { message: e.to_string() };
-                    return;
-                }
-            }
-
             // One model step. A retryable failure, whether opening the stream
-            // or in the middle of it before any tool call has started,
-            // discards the partial turn and retries the same request.
+            // or in the middle of it, discards the partial turn and retries
+            // the same request. A prompt the provider rejects as too long is
+            // compacted once, regardless of thresholds, and sent again.
             let started_at_ms = approval_now_ms();
             let step_started = Instant::now();
             let mut attempts: u32 = 0;
+            let mut overflow: Option<Error> = None;
+            let mut recovered_overflow = false;
+            let mut request_estimate;
             let mut content;
             let mut reasoning;
             let mut step_usage;
             let mut finish_reason;
             let mut tool_acc;
             let mut first_token_ms;
-            loop {
-                attempts += 1;
-                content = String::new();
-                reasoning = String::new();
-                step_usage = Usage::default();
-                finish_reason = "stream_ended".to_string();
-                tool_acc = ToolCallAccumulator::default();
-                first_token_ms = None;
-                let mut saw_done = false;
-                let attempt_started = Instant::now();
-                let failure = match service.stream(req.clone()).await {
-                    Err(error) => Some(error),
-                    Ok(mut stream) => {
-                        let mut failure = None;
-                        while let Some(ev) = stream.next().await {
-                            match ev {
-                                Ok(StreamEvent::Delta(d)) => {
-                                    if first_token_ms.is_none() && !d.is_empty() {
-                                        first_token_ms = Some(elapsed_ms(attempt_started));
+            let mut provider_state: Option<Value>;
+            'request: loop {
+                // Context management runs on the exact messages about to be
+                // committed and sent, so the ledger stays byte-exact.
+                let forced = overflow.is_some();
+                let compacted = compact_context(
+                    service,
+                    &model,
+                    &mut messages,
+                    &mut anchor,
+                    &core_tools,
+                    &window,
+                    forced,
+                    budget.reason().is_none(),
+                    &config.sampling,
+                    retry_backoff,
+                )
+                .await;
+                if let Some(compacted) = &compacted {
+                    if let Some(usage) = compacted.usage {
+                        budget.record(usage);
+                        add_usage(&mut total_usage, usage);
+                        yield LoopEvent::Event(AgentEvent::UsageDelta { usage });
+                    }
+                    let compaction = compacted.record();
+                    if let Some(hook) = config.step_hook.as_ref() {
+                        if let Err(e) = hook.commit_context_compaction(step, &compaction).await {
+                            yield LoopEvent::failed(e);
+                            return;
+                        }
+                    }
+                    yield LoopEvent::Event(AgentEvent::ContextCompacted {
+                        elided_tool_results: compaction.elided_tool_results,
+                        summarized_messages: compaction.summarized_messages,
+                        estimated_tokens_before: compaction.estimated_tokens_before,
+                        estimated_tokens_after: compaction.estimated_tokens_after,
+                        summary_error: compaction.summary_error,
+                    });
+                }
+                if let Some(error) = overflow.take() {
+                    if !compacted.as_ref().is_some_and(Compacted::shrank) {
+                        yield LoopEvent::Failed {
+                            message: format!("The conversation no longer fits this model's context window and there is no older context left to compact: {error}"),
+                            error,
+                        };
+                        return;
+                    }
+                    recovered_overflow = true;
+                }
+
+                let req = CompletionRequest {
+                    model: model.clone(),
+                    messages: messages.clone(),
+                    tools: core_tools.clone(),
+                    tool_choice: None,
+                    response_format: None,
+                    prompt: None,
+                    suffix: None,
+                    sampling: config.sampling.clone(),
+                    reasoning_effort,
+                };
+                if let Some(reason) = budget.reason() {
+                    yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
+                    return;
+                }
+                if let Some(hook) = config.step_hook.as_ref() {
+                    if let Err(e) = hook.commit_model_request(step, &req).await {
+                        yield LoopEvent::failed(e);
+                        return;
+                    }
+                }
+                request_estimate = context::estimate_tokens(&req.messages, &core_tools);
+
+                let mut request_attempts: u32 = 0;
+                loop {
+                    attempts += 1;
+                    request_attempts += 1;
+                    content = String::new();
+                    reasoning = String::new();
+                    provider_state = None;
+                    step_usage = Usage::default();
+                    finish_reason = String::new();
+                    tool_acc = ToolCallAccumulator::default();
+                    first_token_ms = None;
+                    let mut saw_done = false;
+                    let attempt_started = Instant::now();
+                    let mut failure = match service.stream(req.clone()).await {
+                        Err(error) => Some(error),
+                        Ok(mut stream) => {
+                            let mut failure = None;
+                            while let Some(ev) = stream.next().await {
+                                match ev {
+                                    Ok(StreamEvent::Delta(d)) => {
+                                        if first_token_ms.is_none() && !d.is_empty() {
+                                            first_token_ms = Some(elapsed_ms(attempt_started));
+                                        }
+                                        if let Some(c) = d.content {
+                                            content.push_str(&c);
+                                            yield LoopEvent::Event(AgentEvent::Token { text: c });
+                                        }
+                                        if let Some(r) = d.reasoning {
+                                            reasoning.push_str(&r);
+                                            yield LoopEvent::Event(AgentEvent::Reasoning { text: r });
+                                        }
+                                        for tc in d.tool_calls {
+                                            tool_acc.push(tc);
+                                        }
+                                        if d.provider_state.is_some() {
+                                            provider_state = d.provider_state;
+                                        }
                                     }
-                                    if let Some(c) = d.content {
-                                        content.push_str(&c);
-                                        yield AgentEvent::Token { text: c };
+                                    Ok(StreamEvent::Done { usage, finish_reason: reason }) => {
+                                        saw_done = true;
+                                        step_usage = usage;
+                                        finish_reason = reason;
+                                        add_usage(&mut total_usage, usage);
+                                        yield LoopEvent::Event(AgentEvent::UsageDelta { usage });
                                     }
-                                    if let Some(r) = d.reasoning {
-                                        reasoning.push_str(&r);
-                                        yield AgentEvent::Reasoning { text: r };
+                                    Err(e) => {
+                                        failure = Some(e);
+                                        break;
                                     }
-                                    for tc in d.tool_calls {
-                                        tool_acc.push(tc);
-                                    }
-                                }
-                                Ok(StreamEvent::Done { usage, finish_reason: reason }) => {
-                                    saw_done = true;
-                                    step_usage = usage;
-                                    finish_reason = reason;
-                                    add_usage(&mut total_usage, usage);
-                                    yield AgentEvent::UsageDelta { usage };
-                                }
-                                Err(e) => {
-                                    failure = Some(e);
-                                    break;
                                 }
                             }
+                            failure
                         }
-                        failure
+                    };
+                    // A stream that ends without its completion event was cut
+                    // off; what it produced is incomplete.
+                    if failure.is_none() && !saw_done {
+                        failure = Some(Error::Other(retry::STREAM_ENDED_EARLY.into()));
                     }
-                };
-                let Some(error) = failure else {
-                    break;
-                };
-                let message = error.to_string();
-                let retry = (attempts <= retry::MAX_PROVIDER_RETRIES && tool_acc.is_empty())
-                    .then(|| retry::retryable(&message))
-                    .flatten();
-                let Some(retry) = retry else {
-                    let message = if attempts > 1 {
-                        format!("{message} (gave up after {attempts} attempts)")
-                    } else {
-                        message
+                    let overflowed = match &failure {
+                        Some(error) => retry::context_overflow(&error.to_string()),
+                        None => retry::context_overflow_finish(&finish_reason),
                     };
-                    yield AgentEvent::Error { message };
-                    return;
-                };
-                if saw_done {
-                    budget.record(step_usage);
-                }
-                let delay = retry::backoff_delay(retry_backoff, attempts, retry.retry_after);
-                if budget.remaining_time().is_some_and(|remaining| delay >= remaining) {
-                    yield AgentEvent::Error {
-                        message: format!("{message} (not retried: the run time limit would pass during the {}ms backoff)", delay.as_millis()),
+                    if overflowed {
+                        let error = failure.unwrap_or_else(|| {
+                            Error::Inference(format!(
+                                "the model's context window filled up (finish reason `{finish_reason}`)"
+                            ))
+                        });
+                        if recovered_overflow {
+                            yield LoopEvent::Failed {
+                                message: format!("The conversation no longer fits this model's context window, even after compacting older context: {error}"),
+                                error,
+                            };
+                            return;
+                        }
+                        if saw_done {
+                            budget.record(step_usage);
+                        }
+                        window.lower(window.estimate(&req.messages, &core_tools));
+                        yield LoopEvent::Event(AgentEvent::ProviderRetry {
+                            attempt: attempts,
+                            delay_ms: 0,
+                            reason: "context window exceeded".into(),
+                            discarded_content_bytes: content.len(),
+                            discarded_reasoning_bytes: reasoning.len(),
+                        });
+                        overflow = Some(error);
+                        continue 'request;
+                    }
+                    let Some(error) = failure else {
+                        break 'request;
                     };
-                    return;
-                }
-                yield AgentEvent::ProviderRetry {
-                    attempt: attempts,
-                    delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                    reason: retry.reason,
-                    discarded_content_bytes: content.len(),
-                    discarded_reasoning_bytes: reasoning.len(),
-                };
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
-                }
-                if let Some(reason) = budget.reason() {
-                    yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
-                    yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
-                    return;
+                    // Tool calls are neither announced nor run until their
+                    // stream completes, so a partial step of any kind is
+                    // discarded and retried.
+                    let message = error.to_string();
+                    let retry = (request_attempts <= retry::MAX_PROVIDER_RETRIES)
+                        .then(|| retry::retryable(&message))
+                        .flatten();
+                    let Some(retry) = retry else {
+                        let message = if request_attempts > 1 {
+                            format!("{message} (gave up after {request_attempts} attempts)")
+                        } else {
+                            message
+                        };
+                        yield LoopEvent::Failed { error, message };
+                        return;
+                    };
+                    if saw_done {
+                        budget.record(step_usage);
+                    }
+                    let delay = retry::backoff_delay(retry_backoff, request_attempts, retry.retry_after);
+                    if budget.remaining_time().is_some_and(|remaining| delay >= remaining) {
+                        yield LoopEvent::Failed {
+                            message: format!("{message} (not retried: the run time limit would pass during the {}ms backoff)", delay.as_millis()),
+                            error,
+                        };
+                        return;
+                    }
+                    yield LoopEvent::Event(AgentEvent::ProviderRetry {
+                        attempt: attempts,
+                        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        reason: retry.reason,
+                        discarded_content_bytes: content.len(),
+                        discarded_reasoning_bytes: reasoning.len(),
+                    });
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    if let Some(reason) = budget.reason() {
+                        yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
+                        return;
+                    }
                 }
             }
             iteration += 1;
             budget.record(step_usage);
+            window.calibrate(request_estimate, step_usage.prompt_tokens);
             let finish_reason = normalize_finish_reason(&finish_reason);
             let truncated = finish_reason == "length";
 
@@ -1306,10 +1365,11 @@ pub fn run_agent_stream_with_config(
                         &calls,
                         &finish_reason,
                         step_usage,
+                        provider_state.as_ref(),
                     )
                     .await
                 {
-                    yield AgentEvent::Error { message: e.to_string() };
+                    yield LoopEvent::failed(e);
                     return;
                 }
                 let timing = ModelStepTiming {
@@ -1323,8 +1383,7 @@ pub fn run_agent_stream_with_config(
             }
             if calls.is_empty() {
                 if let Some(reason) = budget.reason() {
-                    yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
-                    yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                    yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
                     return;
                 }
                 // A cut-off answer continues in another step instead of
@@ -1339,6 +1398,7 @@ pub fn run_agent_stream_with_config(
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                            provider_state,
                         });
                     }
                     pending_notes.push(ChatMessage::text("user", LENGTH_RECOVERY_NOTE));
@@ -1347,7 +1407,7 @@ pub fn run_agent_stream_with_config(
                 if let Some(interceptor) = config.interceptor.as_ref() {
                     let stop = interceptor.on_stop(&content, stop_continuations).await;
                     for activity in stop.activity {
-                        yield AgentEvent::Hook(activity);
+                        yield LoopEvent::Event(AgentEvent::Hook(activity));
                     }
                     if let Some(feedback) = stop.continue_with.filter(|_| {
                         stop_continuations < intercept::MAX_STOP_CONTINUATIONS && iteration < max_iterations
@@ -1361,19 +1421,27 @@ pub fn run_agent_stream_with_config(
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                                provider_state,
                             });
                         }
                         pending_notes.push(intercept::stop_feedback_message(&feedback));
                         continue;
                     }
                 }
-                yield AgentEvent::Final { content };
-                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage };
+                yield LoopEvent::Answer(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(Content::Text(content)),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                    provider_state,
+                });
+                yield LoopEvent::Event(AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage });
                 return;
             }
             if let Some(reason) = budget.reason().or_else(|| (iteration >= max_iterations).then(|| limit_message_text(max_iterations))) {
-                yield AgentEvent::Token { text: format!("\n\n{reason} Send Continue to start another bounded run in this thread.") };
-                yield AgentEvent::Done { iterations: iteration, stopped_at_limit: true, usage: total_usage };
+                yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
                 return;
             }
             let unparseable = truncated
@@ -1395,21 +1463,24 @@ pub fn run_agent_stream_with_config(
                 tool_calls: Some(calls.clone()),
                 tool_call_id: None,
                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                provider_state,
             });
 
-            let mut pending_images: Vec<ChatMessage> = Vec::new();
+            // Announce every call, and every approval the step needs, before
+            // waiting on any of them.
             let mut prepared_calls = Vec::new();
+            let mut approvals = Vec::new();
             for call in calls {
-                yield AgentEvent::ToolCall {
+                yield LoopEvent::Event(AgentEvent::ToolCall {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     arguments: call.function.arguments.clone(),
                     mcp_app: tools.ui(&call.function.name),
-                };
+                });
                 // Invalid calls are answered with an error and never run, so
                 // they need no approval.
                 let arguments = prepare_tool_arguments(
-                    tools.as_ref(),
+                    tools,
                     &call.function.name,
                     &call.function.arguments,
                     truncated,
@@ -1419,9 +1490,12 @@ pub fn run_agent_stream_with_config(
                 if let (Some(interceptor), Ok(args), None) =
                     (config.interceptor.as_ref(), &arguments, budget.reason())
                 {
-                    let interception = interceptor.before_tool(&intercepted_call(&call, args)).await;
+                    let other_names = tools.other_names(&call.function.name);
+                    let interception = interceptor
+                        .before_tool(&intercepted_call(&call, &other_names, args))
+                        .await;
                     for activity in interception.activity {
-                        yield AgentEvent::Hook(activity);
+                        yield LoopEvent::Event(AgentEvent::Hook(activity));
                     }
                     match interception.decision {
                         ToolDecision::Continue => {}
@@ -1429,61 +1503,82 @@ pub fn run_agent_stream_with_config(
                         ToolDecision::Deny(reason) => denial = Some(reason),
                     }
                 }
-                let approved = if budget.reason().is_some() || denial.is_some() {
-                    false
-                } else if let Ok(args) = &arguments {
+                let mut approved = budget.reason().is_none() && denial.is_none();
+                if let (true, Ok(args)) = (approved, &arguments) {
                     let effect = tools
                         .effect_for_call(&call.function.name, args)
                         .unwrap_or(ToolEffect::Unknown);
                     let environment_policy = tools
                         .environment_policy(&call.function.name)
                         .unwrap_or(ProcessEnvironmentPolicy::HostShellInherited);
-                    match config.approval_broker.as_ref() {
-                        Some(broker) if effect != ToolEffect::ReadOnly && !hook_approved => {
-                            let mut pending = broker.request();
-                            yield AgentEvent::ToolApprovalRequired {
-                                approval_id: pending.id.clone(),
-                                call_id: call.id.clone(),
-                                name: call.function.name.clone(),
-                                arguments: call.function.arguments.clone(),
-                                effect,
-                                environment_policy,
-                            };
-                            let decision = match config.approval_timeout {
-                                Some(timeout) => tokio::time::timeout(timeout, pending.wait()).await.ok(),
-                                None => Some(pending.wait().await),
-                            };
-                            match decision {
-                                Some(decision) => {
-                                    let _ = pending.deliver();
-                                    pending.acknowledge();
-                                    yield AgentEvent::ToolApprovalResolved {
-                                        approval_id: pending.id.clone(),
-                                        call_id: call.id.clone(),
-                                        decision: if decision.approved { "approve" } else { "deny" },
-                                        reason: None,
-                                    };
-                                    decision.approved
-                                }
-                                None => {
-                                    pending.fail(APPROVAL_TIMEOUT_MESSAGE);
-                                    denial = Some(APPROVAL_TIMEOUT_MESSAGE.to_string());
-                                    yield AgentEvent::ToolApprovalResolved {
-                                        approval_id: pending.id.clone(),
-                                        call_id: call.id.clone(),
-                                        decision: "deny",
-                                        reason: Some("timed_out".into()),
-                                    };
-                                    false
-                                }
-                            }
-                        }
-                        _ => true,
+                    if let Some(broker) = config
+                        .approval_broker
+                        .as_ref()
+                        .filter(|_| effect != ToolEffect::ReadOnly && !hook_approved)
+                    {
+                        let pending = broker.request();
+                        yield LoopEvent::Event(AgentEvent::ToolApprovalRequired {
+                            approval_id: pending.id.clone(),
+                            call_id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            effect,
+                            environment_policy,
+                        });
+                        approvals.push((prepared_calls.len(), pending));
+                        approved = false;
                     }
-                } else {
-                    true
-                };
-                prepared_calls.push((call, arguments, approved, denial));
+                }
+                prepared_calls.push(PreparedCall { call, arguments, approved, denial });
+            }
+            if !approvals.is_empty() {
+                // The decisions are awaited together, in whatever order the
+                // person answers them. Each one is acknowledged as soon as it
+                // arrives, since its resolver waits for that acknowledgement;
+                // the calls still run in call order below. Time spent waiting
+                // for a person does not count against the run time limit.
+                budget.pause_clock();
+                let approval_timeout = config.approval_timeout;
+                let count = approvals.len();
+                let mut decisions = futures::stream::iter(approvals.into_iter().map(
+                    |(index, mut pending): (usize, PendingApproval)| async move {
+                        let decision = match approval_timeout {
+                            Some(timeout) => tokio::time::timeout(timeout, pending.wait()).await.ok(),
+                            None => Some(pending.wait().await),
+                        };
+                        if decision.is_some() {
+                            let _ = pending.deliver();
+                            pending.acknowledge();
+                        }
+                        (index, pending, decision)
+                    },
+                ))
+                .buffer_unordered(count);
+                while let Some((index, pending, decision)) = decisions.next().await {
+                    let prepared = &mut prepared_calls[index];
+                    match decision {
+                        Some(decision) => {
+                            prepared.approved = decision.approved;
+                            yield LoopEvent::Event(AgentEvent::ToolApprovalResolved {
+                                approval_id: pending.id.clone(),
+                                call_id: prepared.call.id.clone(),
+                                decision: if decision.approved { "approve" } else { "deny" },
+                                reason: None,
+                            });
+                        }
+                        None => {
+                            pending.fail(APPROVAL_TIMEOUT_MESSAGE);
+                            prepared.denial = Some(APPROVAL_TIMEOUT_MESSAGE.to_string());
+                            yield LoopEvent::Event(AgentEvent::ToolApprovalResolved {
+                                approval_id: pending.id.clone(),
+                                call_id: prepared.call.id.clone(),
+                                decision: "deny",
+                                reason: Some("timed_out".into()),
+                            });
+                        }
+                    }
+                }
+                budget.resume_clock();
             }
             // Calls enter the fixed registry pipeline in model order. The
             // pipeline's fair exclusive barriers prevent mutating/command/MCP
@@ -1492,21 +1587,21 @@ pub fn run_agent_stream_with_config(
             // each tool checks its deadline before entering the pipeline.
             // `buffered` preserves result order
             // and one failure remains an independent model-visible result.
-            let executions = futures::stream::iter(prepared_calls.into_iter().map(|(call, arguments, approved, denial)| {
-                let tools = tools.clone();
+            let executions = futures::stream::iter(prepared_calls.into_iter().map(|prepared| {
                 let budget = &budget;
                 async move {
+                    let PreparedCall { call, arguments, approved, denial } = prepared;
                     let started = Instant::now();
                     let executed = if let Some(reason) = budget.reason() {
-                        let mut skipped = denied_tool_call(tools.as_ref(), &call.function.name, None);
+                        let mut skipped = denied_tool_call(tools, &call.function.name, None);
                         skipped.visible = json!({ "skipped": true, "error": reason });
                         skipped
                     } else if !approved {
-                        denied_tool_call(tools.as_ref(), &call.function.name, denial.as_deref())
+                        denied_tool_call(tools, &call.function.name, denial.as_deref())
                     } else {
                         match arguments {
-                            Ok(args) => execute_tool_call(tools.as_ref(), &call.function.name, args).await,
-                            Err(message) => tool_error_result(tools.as_ref(), &call.function.name, message),
+                            Ok(args) => execute_tool_call(tools, &call.function.name, args).await,
+                            Err(message) => tool_error_result(tools, &call.function.name, message),
                         }
                     };
                     (call, executed, elapsed_ms(started))
@@ -1515,19 +1610,24 @@ pub fn run_agent_stream_with_config(
             .buffered(if config.limits.max_duration.is_some() { 1 } else { 4 })
             .collect::<Vec<_>>()
             .await;
-            for (call, executed, duration_ms) in executions {
+            // The step's results share one model-visible budget.
+            let model_contents = tool_output::model_tool_contents(
+                executions.iter().map(|(call, executed, _)| {
+                    (executed.model_text.as_deref(), &executed.visible, call.id.as_deref())
+                }),
+                output_scope.as_deref(),
+            );
+            let mut pending_images: Vec<ChatMessage> = Vec::new();
+            for ((call, executed, duration_ms), mut model_content) in executions.into_iter().zip(model_contents) {
                 let visible = executed.visible;
-                let mut model_content = tool_output::model_tool_content(
-                    executed.model_text.as_deref(),
-                    &visible,
-                    output_scope.as_deref(),
-                    call.id.as_deref(),
-                );
                 if let (Some(interceptor), true) = (config.interceptor.as_ref(), executed.attempted) {
                     let args = tool_output::parse_tool_arguments(&call.function.arguments).unwrap_or(Value::Null);
-                    let after = interceptor.after_tool(&intercepted_call(&call, &args), &visible).await;
+                    let other_names = tools.other_names(&call.function.name);
+                    let after = interceptor
+                        .after_tool(&intercepted_call(&call, &other_names, &args), &visible)
+                        .await;
                     for activity in after.activity {
-                        yield AgentEvent::Hook(activity);
+                        yield LoopEvent::Event(AgentEvent::Hook(activity));
                     }
                     model_content = intercept::with_feedback(model_content, &after.feedback);
                 }
@@ -1542,7 +1642,7 @@ pub fn run_agent_stream_with_config(
                         )
                         .await
                     {
-                        yield AgentEvent::Error { message: e.to_string() };
+                        yield LoopEvent::failed(e);
                         return;
                     }
                     if executed.attempted {
@@ -1557,24 +1657,24 @@ pub fn run_agent_stream_with_config(
                             .await;
                     }
                 }
-                yield AgentEvent::ToolResult {
+                yield LoopEvent::Event(AgentEvent::ToolResult {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     result: visible.clone(),
                     mcp_app: executed.ui,
                     mcp_app_result: executed.app_result,
-                };
+                });
                 if let Some(ev) = executed.memory_event {
-                    yield ev;
+                    yield LoopEvent::Event(ev);
                 }
                 if let Some(ev) = executed.child_event {
-                    yield ev;
+                    yield LoopEvent::Event(ev);
                 }
                 if let Some(ev) = executed.worker_event {
                     let waiting_for_approval = matches!(&ev, AgentEvent::WorkerRunProposed { .. });
-                    yield ev;
+                    yield LoopEvent::Event(ev);
                     if waiting_for_approval {
-                        yield AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage };
+                        yield LoopEvent::Event(AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage });
                         return;
                     }
                 }
@@ -1585,6 +1685,7 @@ pub fn run_agent_stream_with_config(
                     tool_calls: None,
                     tool_call_id: call.id.clone(),
                     reasoning_content: None,
+                    provider_state: None,
                 });
                 if let Some(uri) = executed.image_uri {
                     pending_images.push(image_user_message(&call.function.name, uri));
@@ -1600,10 +1701,15 @@ pub fn run_agent_stream_with_config(
     }
 }
 
-fn intercepted_call<'a>(call: &'a ToolCall, arguments: &'a Value) -> InterceptedCall<'a> {
+fn intercepted_call<'a>(
+    call: &'a ToolCall,
+    other_names: &'a [String],
+    arguments: &'a Value,
+) -> InterceptedCall<'a> {
     InterceptedCall {
         call_id: call.id.as_deref(),
         name: &call.function.name,
+        other_names,
         arguments,
     }
 }
@@ -1668,14 +1774,110 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Condense a span of the conversation with one request to the run's own
-/// backend. The span is rendered as a transcript so the request carries no
-/// tool-call pairing of its own.
-async fn summarize_messages(
-    service: &SharedService,
+/// What one compaction pass changed before a model request.
+struct Compacted {
+    elided: usize,
+    summarized: usize,
+    estimated_before: usize,
+    estimated_after: usize,
+    window: Option<usize>,
+    /// Usage of the summary request, when it succeeded.
+    usage: Option<Usage>,
+    summary_error: Option<String>,
+}
+
+impl Compacted {
+    fn shrank(&self) -> bool {
+        self.elided > 0 || self.summarized > 0
+    }
+
+    fn record(&self) -> ContextCompaction {
+        ContextCompaction {
+            elided_tool_results: self.elided,
+            summarized_messages: self.summarized,
+            estimated_tokens_before: self.estimated_before,
+            estimated_tokens_after: self.estimated_after,
+            context_window_tokens: self
+                .window
+                .map_or(0, |tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
+            summary_error: self.summary_error.clone(),
+        }
+    }
+}
+
+/// Keep `messages` inside the context window. Above
+/// [`context::PRUNE_THRESHOLD`] older tool results are elided; still above
+/// [`context::SUMMARIZE_THRESHOLD`], older turns are summarized with one
+/// extra request to the run's model. `force` (after the provider rejected
+/// the prompt as too long) does both regardless of thresholds, keeping less
+/// recent context. A failed summary falls back to eliding every older tool
+/// result and is reported, never silent. `None` when nothing was done.
+#[allow(clippy::too_many_arguments)]
+async fn compact_context(
+    service: &dyn ModelService,
     model: &str,
-    span: &[ChatMessage],
+    messages: &mut Vec<ChatMessage>,
+    anchor: &mut Option<usize>,
+    tools: &[Tool],
+    window: &context::ContextWindow,
+    force: bool,
+    may_summarize: bool,
     sampling: &SamplingParams,
+    backoff: Duration,
+) -> Option<Compacted> {
+    let tokens = window.tokens();
+    let over = |estimate: usize, share: f64| {
+        tokens.is_some_and(|tokens| estimate > (tokens as f64 * share) as usize)
+    };
+    let before = window.estimate(messages, tools);
+    if !force && !over(before, context::PRUNE_THRESHOLD) {
+        return None;
+    }
+    let retain = if force {
+        context::RETAIN_FORCED
+    } else {
+        context::RETAIN
+    };
+    let mut elided = context::elide_old_tool_results(messages, retain.tool_results);
+    let mut after = window.estimate(messages, tools);
+    let mut summarized = 0;
+    let mut usage = None;
+    let mut summary_error = None;
+    if may_summarize && (force || over(after, context::SUMMARIZE_THRESHOLD)) {
+        if let Some(plan) = context::summary_span(messages, *anchor, retain.turns) {
+            let transcript = context::summary_transcript(messages, &plan, tokens);
+            match summarize_messages(service, model, &transcript, sampling, backoff).await {
+                Ok((summary, summary_usage)) => {
+                    usage = Some(summary_usage);
+                    summarized = context::apply_summary(messages, &plan, anchor, &summary);
+                }
+                Err(error) => {
+                    summary_error = Some(error.to_string());
+                    elided += context::elide_old_tool_results(messages, 0);
+                }
+            }
+            after = window.estimate(messages, tools);
+        }
+    }
+    (elided > 0 || summarized > 0 || summary_error.is_some()).then_some(Compacted {
+        elided,
+        summarized,
+        estimated_before: before,
+        estimated_after: after,
+        window: tokens,
+        usage,
+        summary_error,
+    })
+}
+
+/// Condense a transcript of older conversation with one request to the
+/// run's own backend, under the same retry policy as model steps.
+async fn summarize_messages(
+    service: &dyn ModelService,
+    model: &str,
+    transcript: &str,
+    sampling: &SamplingParams,
+    backoff: Duration,
 ) -> Result<(String, Usage)> {
     let req = CompletionRequest {
         model: model.to_string(),
@@ -1683,10 +1885,7 @@ async fn summarize_messages(
             ChatMessage::text("system", context::SUMMARY_INSTRUCTIONS),
             ChatMessage::text(
                 "user",
-                format!(
-                    "Summarize this earlier part of the session:\n\n{}",
-                    context::transcript(span)
-                ),
+                format!("Summarize this earlier part of the session:\n\n{transcript}"),
             ),
         ],
         tools: Vec::new(),
@@ -1694,10 +1893,10 @@ async fn summarize_messages(
         response_format: None,
         prompt: None,
         suffix: None,
-        sampling: sampling.clone(),
+        sampling: summary_sampling(sampling),
         reasoning_effort: None,
     };
-    let out = service.complete(req).await?;
+    let out = complete_with_retry(service, req, backoff).await?;
     let summary = out.message.text_content();
     if summary.trim().is_empty() {
         return Err(Error::Inference("context summary was empty".into()));
@@ -1705,16 +1904,28 @@ async fn summarize_messages(
     Ok((summary, out.usage))
 }
 
-fn limit_message(max_iterations: usize) -> ChatMessage {
-    ChatMessage::text("assistant", limit_message_text(max_iterations))
+/// Output floor for the summary request when the run caps output tokens.
+const SUMMARY_MIN_OUTPUT_TOKENS: u32 = 4_096;
+
+/// Sampling for the summary request: provider defaults plus the run's
+/// prompt-cache key. The run's stop sequences never cut the summary short,
+/// and a run output cap is raised to at least [`SUMMARY_MIN_OUTPUT_TOKENS`].
+fn summary_sampling(run: &SamplingParams) -> SamplingParams {
+    SamplingParams {
+        max_tokens: run
+            .max_tokens
+            .map(|max_tokens| max_tokens.max(SUMMARY_MIN_OUTPUT_TOKENS)),
+        prompt_cache_key: run.prompt_cache_key.clone(),
+        ..SamplingParams::default()
+    }
 }
 
 fn limit_message_text(max_iterations: usize) -> String {
     format!("Agent stopped after reaching the iteration limit ({max_iterations} model turns).")
 }
 
-/// Non-streaming model call under the same retry policy as the streamed
-/// loop, without progress events.
+/// Non-streaming model call under the same retry policy as model steps,
+/// without progress events.
 async fn complete_with_retry(
     service: &dyn ModelService,
     req: CompletionRequest,
@@ -1948,6 +2159,7 @@ fn image_user_message(tool: &str, data_uri: String) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        provider_state: None,
     }
 }
 
@@ -2183,6 +2395,7 @@ mod tests {
             _tool_calls: &[ToolCall],
             _finish_reason: &str,
             _usage: Usage,
+            _provider_state: Option<&Value>,
         ) -> Result<()> {
             if self.fail_response {
                 Err(Error::Other("post-response ledger commit failed".into()))
@@ -2292,6 +2505,7 @@ mod tests {
                     pricing: Some(milim_core::api::openai::ModelPricing {
                         prompt: Some("0.01".into()),
                         completion: Some("0.01".into()),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -2317,8 +2531,14 @@ mod tests {
                 AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. }
             )));
             assert!(events.iter().any(
-                |event| matches!(event, AgentEvent::Token { text } if text.contains(expected))
+                |event| matches!(event, AgentEvent::Notice { text } if text.contains(expected) && text.contains(CONTINUE_HINT))
             ));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Token { text } if text.contains(CONTINUE_HINT))),
+                "limit text is never streamed as model output"
+            );
             assert!(matches!(
                 events.last(),
                 Some(AgentEvent::Done {
@@ -2331,12 +2551,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn time_limit_after_approval_skips_the_tool() {
+    async fn approval_wait_does_not_count_against_the_time_limit() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
         let broker = Arc::new(ToolApprovalBroker::default());
         let events = run_agent_stream_with_config(
-            Arc::new(LoopingToolBackend),
-            Arc::new(mutating_registry("missing_tool")),
-            "test-loop".into(),
+            ScriptedBackend::new(vec![tool_step(&[("call-1", "write", "{}")], "tool_calls")]),
+            Arc::new(registry),
+            "scripted".into(),
             vec![ChatMessage::text("user", "continue")],
             None,
             AgentRunConfig {
@@ -2349,25 +2572,29 @@ mod tests {
             },
         );
         futures::pin_mut!(events);
-        let mut skipped = false;
+        let mut results = Vec::new();
+        let mut done = None;
         while let Some(event) = events.next().await {
             match event {
                 AgentEvent::ToolApprovalRequired { approval_id, .. } => {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    broker.resolve(&approval_id, true);
+                    // A person answers well after the run time limit.
+                    let broker = broker.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        broker.resolve(&approval_id, true);
+                    });
                 }
-                AgentEvent::ToolResult { result, .. } => skipped = result["skipped"] == true,
+                AgentEvent::ToolResult { result, .. } => results.push(result),
                 AgentEvent::Done {
                     stopped_at_limit, ..
-                } => assert!(stopped_at_limit),
+                } => done = Some(stopped_at_limit),
                 AgentEvent::Error { message } => panic!("{message}"),
                 _ => {}
             }
         }
-        assert!(
-            skipped,
-            "an approval after the deadline must not authorize execution"
-        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the approved tool runs");
+        assert_ne!(results[0]["skipped"], true);
+        assert_eq!(done, Some(false));
     }
 
     #[tokio::test]
@@ -2698,6 +2925,7 @@ mod tests {
                 AgentEvent::Start { .. } => "start",
                 AgentEvent::Token { .. } => "token",
                 AgentEvent::Reasoning { .. } => "reasoning",
+                AgentEvent::Notice { .. } => "notice",
                 AgentEvent::UsageDelta { .. } => "usage_delta",
                 AgentEvent::ToolCall { .. } => "tool_call",
                 AgentEvent::ToolResult { .. } => "tool_result",
@@ -2909,12 +3137,6 @@ mod tests {
         })
     }
 
-    fn mutating_registry(name: &'static str) -> ToolRegistry {
-        let mut registry = ToolRegistry::new();
-        registry.register(recording_tool(name, &Arc::new(AtomicUsize::new(0))));
-        registry
-    }
-
     struct WriteTool {
         runs: Arc<AtomicUsize>,
     }
@@ -3082,6 +3304,7 @@ mod tests {
             _tool_calls: &[ToolCall],
             _finish_reason: &str,
             _usage: Usage,
+            _provider_state: Option<&Value>,
         ) -> Result<()> {
             Ok(())
         }
@@ -3502,24 +3725,69 @@ mod tests {
             .any(|event| matches!(event, AgentEvent::Final { content } if content == "done")));
         assert_eq!(backend.requests().len(), 2);
 
-        // Once a tool call has started streaming, the error is final.
-        let backend = ScriptedBackend::new(vec![Script::Events(vec![
-            Ok(StreamEvent::Delta(DeltaEvent {
-                tool_calls: vec![DeltaToolCall {
-                    index: 0,
-                    id: Some("call-1".into()),
-                    kind: Some("function".into()),
-                    function: DeltaFunction {
-                        name: Some("write".into()),
-                        arguments: Some("{".into()),
-                    },
-                }],
-                ..Default::default()
-            })),
-            Err(Error::Upstream(
-                "error decoding response body: connection closed".into(),
-            )),
-        ])]);
+        // Tool calls only run once their stream completes, so a partial
+        // call is discarded and the step retried like partial text.
+        let runs = Arc::new(AtomicUsize::new(0));
+        let backend = ScriptedBackend::new(vec![
+            Script::Events(vec![
+                Ok(StreamEvent::Delta(DeltaEvent {
+                    content: Some("let me write".into()),
+                    tool_calls: vec![DeltaToolCall {
+                        index: 0,
+                        id: Some("call-1".into()),
+                        kind: Some("function".into()),
+                        function: DeltaFunction {
+                            name: Some("write".into()),
+                            arguments: Some(r#"{"path": "a"#.into()),
+                        },
+                    }],
+                    ..Default::default()
+                })),
+                Err(Error::Upstream(
+                    "error decoding response body: connection closed".into(),
+                )),
+            ]),
+            tool_step(&[("call-2", "write", r#"{"path": "a.rs"}"#)], "tool_calls"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            write_registry(&runs),
+            vec![ChatMessage::text("user", "hi")],
+            AgentRunConfig::default(),
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderRetry {
+                attempt: 1,
+                discarded_content_bytes: 12,
+                ..
+            }
+        )));
+        let calls = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCall { call_id, .. } => call_id.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls, vec!["call-2"], "the partial call is never announced");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        let replayed = &backend.requests()[2].messages;
+        assert_eq!(
+            replayed[1].tool_calls.as_ref().unwrap()[0].id.as_deref(),
+            Some("call-2")
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn streams_without_a_completion_event_are_retried() {
+        let backend = ScriptedBackend::new(vec![
+            Script::Events(vec![Ok(StreamEvent::Delta(DeltaEvent::text("cut")))]),
+            text_step("whole answer", "stop"),
+        ]);
         let events = run_scripted(
             backend.clone(),
             ToolRegistry::new(),
@@ -3527,8 +3795,38 @@ mod tests {
             AgentRunConfig::default(),
         )
         .await;
-        assert_eq!(backend.requests().len(), 1);
-        assert!(matches!(events.last(), Some(AgentEvent::Error { .. })));
+        assert_eq!(backend.requests().len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderRetry {
+                discarded_content_bytes: 3,
+                reason,
+                ..
+            } if reason == "incomplete stream"
+        )));
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Final { content } if content == "whole answer")
+        ));
+
+        // A stream that never completes gives up like any other failure.
+        let backend = ScriptedBackend::new(
+            (0..6)
+                .map(|_| Script::Events(vec![Ok(StreamEvent::Delta(DeltaEvent::text("x")))]))
+                .collect(),
+        );
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            vec![ChatMessage::text("user", "hi")],
+            AgentRunConfig::default(),
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 5);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Error { message })
+                if message.contains(retry::STREAM_ENDED_EARLY) && message.contains("gave up after 5 attempts")
+        ));
     }
 
     fn long_conversation(turns: usize) -> Vec<ChatMessage> {
@@ -3552,6 +3850,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 reasoning_content: None,
+                provider_state: None,
             });
             messages.push(ChatMessage {
                 role: "tool".into(),
@@ -3560,6 +3859,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some(id),
                 reasoning_content: None,
+                provider_state: None,
             });
         }
         messages
@@ -4049,5 +4349,624 @@ mod tests {
         assert_eq!(tools[0].0, 1);
         assert_eq!(tools[0].2, "echo");
         assert!(!tools[0].3);
+    }
+
+    const CONTEXT_OVERFLOW: &str = "x chat/completions -> 400 Bad Request: This model's maximum context length is 1000 tokens. However, your messages resulted in 3000 tokens (context_length_exceeded)";
+
+    fn is_summary_text(message: &ChatMessage) -> bool {
+        message.role == "system"
+            && message
+                .text_content()
+                .starts_with("Summary of the earlier conversation")
+    }
+
+    #[tokio::test]
+    async fn context_length_errors_force_compaction_and_retry_once() {
+        let backend = ScriptedBackend::new(vec![
+            Script::OpenError(CONTEXT_OVERFLOW.into()),
+            text_step("- read sixteen files", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let hook = Arc::new(RecordingHook::default());
+        // No configured window: the rejection alone drives compaction.
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].messages.len(), 34);
+        assert!(requests[1].tools.is_empty(), "the summary request");
+        let sent = &requests[2].messages;
+        assert_eq!(sent[1].text_content(), "the original task");
+        assert!(is_summary_text(&sent[2]));
+        assert!(sent[2].text_content().contains("- read sixteen files"));
+        // Forced compaction keeps only the last two turns, and only the
+        // latest turn's results verbatim.
+        assert_eq!(sent.len(), 3 + 4);
+        assert_eq!(sent[4].text_content(), context::elided_stub("read"));
+        assert!(sent.last().unwrap().text_content().starts_with("15:"));
+        assert_tool_pairing(sent);
+
+        let retry = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ProviderRetry { reason, delay_ms: 0, .. } if reason == "context window exceeded"))
+            .expect("the rejected step is retried");
+        let compacted = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ContextCompacted {
+                        summarized_messages: 28,
+                        ..
+                    }
+                )
+            })
+            .expect("the compaction is reported");
+        assert!(retry < compacted);
+        let compactions = hook.compactions.lock().unwrap().clone();
+        assert_eq!(compactions.len(), 1);
+        assert!(
+            compactions[0].context_window_tokens > 0,
+            "the rejected prompt size becomes the window"
+        );
+        let committed = hook.committed_requests.lock().unwrap().clone();
+        assert_eq!(
+            committed.len(),
+            2,
+            "the compacted request is committed again"
+        );
+        assert_eq!(committed[1], serde_json::to_string(sent).unwrap());
+        assert_eq!(hook.model_timings.lock().unwrap()[0].1.attempts, 2);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                iterations: 1,
+                stopped_at_limit: false,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_context_window_finish_reason_discards_the_step_and_compacts() {
+        let backend = ScriptedBackend::new(vec![
+            Script::Events(vec![
+                Ok(StreamEvent::Delta(DeltaEvent::text("partial"))),
+                Ok(StreamEvent::Done {
+                    finish_reason: "model_context_window_exceeded".into(),
+                    usage: Usage::new(5, 1),
+                }),
+            ]),
+            text_step("- summary", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig::default(),
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderRetry {
+                discarded_content_bytes: 7,
+                reason,
+                ..
+            } if reason == "context window exceeded"
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Final { content } if content == "done")));
+    }
+
+    #[tokio::test]
+    async fn context_length_errors_fail_clearly_when_compaction_cannot_help() {
+        // Still too long after one compaction.
+        let backend = ScriptedBackend::new(vec![
+            Script::OpenError(CONTEXT_OVERFLOW.into()),
+            text_step("- summary", "stop"),
+            Script::OpenError(CONTEXT_OVERFLOW.into()),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig::default(),
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 3);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Error { message })
+                if message.contains("even after compacting older context") && message.contains("context_length_exceeded")
+        ));
+
+        // Nothing older to compact.
+        let backend = ScriptedBackend::new(vec![Script::OpenError(CONTEXT_OVERFLOW.into())]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            vec![ChatMessage::text("user", "a very long paste")],
+            AgentRunConfig::default(),
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Error { message }) if message.contains("no older context left to compact")
+        ));
+    }
+
+    #[tokio::test]
+    async fn real_prompt_counts_calibrate_the_context_estimate() {
+        // By chars/4 the conversation is ~1.3k tokens, far under 60% of the
+        // 4k window; the provider reports 3.5k, so the next step compacts.
+        let backend = ScriptedBackend::new(vec![Script::Events(vec![
+            Ok(StreamEvent::Delta(DeltaEvent {
+                tool_calls: vec![DeltaToolCall {
+                    index: 0,
+                    id: Some("call-new".into()),
+                    kind: Some("function".into()),
+                    function: DeltaFunction {
+                        name: Some("read".into()),
+                        arguments: Some("{}".into()),
+                    },
+                }],
+                ..Default::default()
+            })),
+            Ok(StreamEvent::Done {
+                finish_reason: "tool_calls".into(),
+                usage: Usage::new(3_500, 1),
+            }),
+        ])]);
+        let hook = Arc::new(RecordingHook::default());
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(8),
+            AgentRunConfig {
+                context_window_tokens: Some(4_000),
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2, "no summary was needed");
+        assert!(tool_messages(&requests[0])
+            .iter()
+            .all(|text| text.len() > 600));
+        let compactions = hook.compactions.lock().unwrap().clone();
+        assert_eq!(compactions.len(), 1);
+        assert!(compactions[0].estimated_tokens_before >= 3_500);
+        assert_eq!(compactions[0].elided_tool_results, 3);
+        assert_eq!(tool_messages(&requests[1])[0], context::elided_stub("read"));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ContextCompacted { .. })));
+    }
+
+    #[tokio::test]
+    async fn summaries_use_their_own_sampling_and_the_retry_policy() {
+        let backend = ScriptedBackend::new(vec![
+            Script::OpenError("x chat/completions -> 503 Service Unavailable: busy".into()),
+            text_step("- read sixteen files", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig {
+                context_window_tokens: Some(1_000),
+                sampling: SamplingParams {
+                    max_tokens: Some(64),
+                    stop: vec!["END".into()],
+                    temperature: Some(1.5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3, "the summary was retried once");
+        for summary in &requests[..2] {
+            assert!(summary.tools.is_empty());
+            assert!(summary.sampling.stop.is_empty());
+            assert_eq!(summary.sampling.max_tokens, Some(SUMMARY_MIN_OUTPUT_TOKENS));
+            assert_eq!(summary.sampling.temperature, None);
+        }
+        assert_eq!(requests[2].sampling.stop, vec!["END".to_string()]);
+        assert_eq!(requests[2].sampling.max_tokens, Some(64));
+        assert!(requests[2].messages.iter().any(is_summary_text));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextCompacted {
+                summarized_messages: 24,
+                summary_error: None,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_falls_back_to_elision_and_is_reported() {
+        let backend = ScriptedBackend::new(vec![
+            Script::OpenError("x chat/completions -> 400 Bad Request: unsupported".into()),
+            text_step("done", "stop"),
+        ]);
+        let hook = Arc::new(RecordingHook::default());
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig {
+                context_window_tokens: Some(1_000),
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2);
+        let tools = tool_messages(&requests[1]);
+        assert!(tools[..15]
+            .iter()
+            .all(|text| *text == context::elided_stub("read")));
+        assert!(tools[15].starts_with("15:"));
+        let compaction = hook.compactions.lock().unwrap()[0].clone();
+        assert_eq!(compaction.elided_tool_results, 15);
+        assert_eq!(compaction.summarized_messages, 0);
+        assert!(compaction.summary_error.as_deref().unwrap().contains("400"));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextCompacted {
+                summary_error: Some(error),
+                elided_tool_results: 15,
+                ..
+            } if error.contains("400")
+        )));
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn later_summaries_fold_earlier_ones_and_keep_the_run_request() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(RecordingTool {
+            name: "read",
+            runs: runs.clone(),
+            result: json!({ "content": "z".repeat(3_000) }),
+            model_text: None,
+        }));
+        // Earlier exchanges in the thread, then this run's request.
+        let mut messages = long_conversation(16);
+        messages.splice(
+            1..2,
+            [
+                ChatMessage::text("user", "an old question"),
+                ChatMessage::text("assistant", "an old answer"),
+                ChatMessage::text("user", "the original task"),
+            ],
+        );
+        let backend = ScriptedBackend::new(vec![
+            text_step("- first summary", "stop"),
+            tool_step(&[("call-new", "read", "{}")], "tool_calls"),
+            text_step("- second summary", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            messages,
+            AgentRunConfig {
+                context_window_tokens: Some(800),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 4);
+        let first_step = &requests[1].messages;
+        assert!(
+            !first_step
+                .iter()
+                .any(|message| message.text_content().contains("an old question")),
+            "stale history is summarized"
+        );
+        assert_eq!(first_step[1].text_content(), "the original task");
+        assert!(is_summary_text(&first_step[2]));
+        assert!(requests[2].messages[1]
+            .text_content()
+            .contains("### earlier summary\n- first summary"));
+        let second_step = &requests[3].messages;
+        let summaries = second_step
+            .iter()
+            .filter(|message| is_summary_text(message))
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 1, "summaries never stack");
+        assert!(summaries[0].text_content().contains("- second summary"));
+        assert!(!summaries[0].text_content().contains("- first summary"));
+        assert_eq!(second_step[1].text_content(), "the original task");
+        assert_tool_pairing(second_step);
+    }
+
+    #[tokio::test]
+    async fn approvals_are_announced_together_and_each_is_acknowledged_when_answered() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let broker = Arc::new(ToolApprovalBroker::default());
+        let events = run_agent_stream_with_config(
+            ScriptedBackend::new(vec![tool_step(
+                &[("call-1", "write", "{}"), ("call-2", "write", "{}")],
+                "tool_calls",
+            )]),
+            Arc::new(registry),
+            "scripted".into(),
+            vec![ChatMessage::text("user", "go")],
+            None,
+            AgentRunConfig {
+                approval_broker: Some(broker.clone()),
+                approval_timeout: Some(Duration::from_secs(5)),
+                ..Default::default()
+            },
+        );
+        futures::pin_mut!(events);
+        let mut order = Vec::new();
+        let mut requested = Vec::new();
+        let mut results = Vec::new();
+        while let Some(event) = events.next().await {
+            match event {
+                AgentEvent::ToolApprovalRequired {
+                    approval_id,
+                    call_id,
+                    ..
+                } => {
+                    order.push(format!("required:{}", call_id.unwrap()));
+                    requested.push(approval_id);
+                    if requested.len() == 2 {
+                        // Both are pending at once; answer only the second.
+                        assert_eq!(
+                            broker.resolve(&requested[1], false),
+                            ApprovalResolve::Resolved
+                        );
+                    }
+                }
+                AgentEvent::ToolApprovalResolved {
+                    call_id, decision, ..
+                } => {
+                    let call_id = call_id.unwrap();
+                    order.push(format!("{decision}:{call_id}"));
+                    if call_id == "call-2" {
+                        // The second answer is acknowledged while the first
+                        // is still open, so its resolver never waits on it.
+                        assert_eq!(
+                            broker.snapshot(&requested[1]).unwrap().state,
+                            ApprovalState::Acknowledged
+                        );
+                        assert_ne!(
+                            broker.snapshot(&requested[0]).unwrap().state,
+                            ApprovalState::Acknowledged
+                        );
+                        assert_eq!(
+                            broker.resolve(&requested[0], true),
+                            ApprovalResolve::Resolved
+                        );
+                    }
+                }
+                AgentEvent::ToolResult { result, .. } => results.push(result),
+                AgentEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            order,
+            vec![
+                "required:call-1",
+                "required:call-2",
+                "deny:call-2",
+                "approve:call-1"
+            ]
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(results[0]["ok"], true);
+        assert_eq!(results[1]["denied"], true);
+        for id in &requested {
+            assert_eq!(
+                broker.snapshot(id).unwrap().state,
+                ApprovalState::Acknowledged
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collected_runs_match_the_streamed_loop() {
+        let script = || {
+            vec![
+                tool_step(&[("call-1", "write", r#"{"path": "a.rs"}"#)], "tool_calls"),
+                Script::Events(vec![
+                    Ok(StreamEvent::Delta(DeltaEvent {
+                        reasoning: Some("checked".into()),
+                        content: Some("all done".into()),
+                        ..Default::default()
+                    })),
+                    Ok(StreamEvent::Done {
+                        finish_reason: "stop".into(),
+                        usage: Usage::new(1, 1),
+                    }),
+                ]),
+            ]
+        };
+        let runs = Arc::new(AtomicUsize::new(0));
+        let streamed = run_scripted(
+            ScriptedBackend::new(script()),
+            write_registry(&runs),
+            vec![ChatMessage::text("user", "write it")],
+            AgentRunConfig::default(),
+        )
+        .await;
+        let backend = ScriptedBackend::new(script());
+        let outcome = run_agent_with_config(
+            backend.as_ref(),
+            &write_registry(&runs),
+            "scripted",
+            vec![ChatMessage::text("user", "write it")],
+            None,
+            AgentRunConfig {
+                initial_stream_retry_backoff: Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(outcome.steps.len(), 1);
+        assert_eq!(outcome.steps[0].name, "write");
+        assert_eq!(outcome.steps[0].arguments, r#"{"path": "a.rs"}"#);
+        assert_eq!(outcome.steps[0].result, tool_results(&streamed)[0]);
+        assert_eq!(outcome.message.text_content(), "all done");
+        assert_eq!(
+            outcome.message.reasoning_content.as_deref(),
+            Some("checked")
+        );
+        assert!(streamed
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Final { content } if content == "all done")));
+        assert!(matches!(
+            streamed.last(),
+            Some(AgentEvent::Done {
+                iterations: 2,
+                stopped_at_limit: false,
+                ..
+            })
+        ));
+        assert_eq!(outcome.iterations, 2);
+        assert!(!outcome.stopped_at_limit);
+        assert_eq!(backend.requests().len(), 2);
+
+        // Limits end the collected run with the plain reason.
+        let outcome = run_agent_with_config(
+            ScriptedBackend::new(script()).as_ref(),
+            &write_registry(&runs),
+            "scripted",
+            vec![ChatMessage::text("user", "write it")],
+            None,
+            AgentRunConfig {
+                max_iterations: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.stopped_at_limit);
+        assert_eq!(outcome.message.text_content(), limit_message_text(1));
+        assert!(outcome.steps.is_empty());
+
+        // Errors keep their kind.
+        let error = run_agent_with_config(
+            ScriptedBackend::new(vec![Script::OpenError(
+                "x chat/completions -> 400 Bad Request: invalid schema".into(),
+            )])
+            .as_ref(),
+            &ToolRegistry::new(),
+            "scripted",
+            vec![ChatMessage::text("user", "hi")],
+            None,
+            AgentRunConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Error::Upstream(message) if message.contains("400")));
+        let error = run_agent_with_config(
+            ScriptedBackend::new(vec![]).as_ref(),
+            &ToolRegistry::new(),
+            "scripted",
+            vec![ChatMessage::text("user", "deploy")],
+            None,
+            AgentRunConfig {
+                interceptor: Some(Arc::new(FakeInterceptor {
+                    turn_block: Some("not today".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRequest(message) if message == blocked_turn_message("not today"))
+        );
+    }
+
+    #[tokio::test]
+    async fn one_step_of_large_results_shares_the_replay_budget() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        for name in ["read_a", "read_b", "read_c"] {
+            registry.register(Arc::new(RecordingTool {
+                name,
+                runs: runs.clone(),
+                result: json!({}),
+                model_text: Some(
+                    (0..1_000)
+                        .map(|line| format!("{name} line {line:04} {}", "x".repeat(30)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            }));
+        }
+        registry.register(Arc::new(RecordingTool {
+            name: "status",
+            runs: runs.clone(),
+            result: json!({"clean": true}),
+            model_text: None,
+        }));
+        let backend = ScriptedBackend::new(vec![tool_step(
+            &[
+                ("call-a", "read_a", "{}"),
+                ("call-b", "read_b", "{}"),
+                ("call-s", "status", "{}"),
+                ("call-c", "read_c", "{}"),
+            ],
+            "tool_calls",
+        )]);
+        let hook = Arc::new(RecordingHook::default());
+        run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "read everything")],
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let sent = tool_messages(&backend.requests()[1]);
+        assert_eq!(*hook.tool_contents.lock().unwrap(), sent);
+        assert_eq!(sent[2], r#"{"clean":true}"#, "small results stay whole");
+        let total = sent.iter().map(String::len).sum::<usize>();
+        assert!(total <= tool_output::STEP_REPLAY_MAX_BYTES, "{total}");
+        for (text, name) in [
+            (&sent[0], "read_a"),
+            (&sent[1], "read_b"),
+            (&sent[3], "read_c"),
+        ] {
+            assert!(text.starts_with(&format!("{name} line 0000")));
+            assert!(text.contains(&format!("{name} line 0999")));
+            assert!(text.contains("omitted"));
+        }
     }
 }

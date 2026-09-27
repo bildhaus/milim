@@ -1,0 +1,39 @@
+diff --git a/src/slugify.js b/src/slugify.js
+index 9167616..3f44382 100644
+--- a/src/slugify.js
++++ b/src/slugify.js
+@@ -1,3 +1,5 @@
++const SEPARATORS = new Set(["-", "_", "."]);
++
+ /**
+  * Convert a title into a URL slug. See docs/SLUGIFY.md for the rules.
+  *
+@@ -6,5 +8,27 @@
+  * @returns {string}
+  */
+ export function slugify(input, options = {}) {
+-  throw new Error("not implemented");
++  if (typeof input !== "string") {
++    throw new TypeError("input must be a string");
++  }
++  const { separator = "-", maxLength = 80 } = options;
++  if (!SEPARATORS.has(separator)) {
++    throw new RangeError("separator must be one of -, _, .");
++  }
++  if (!Number.isInteger(maxLength) || maxLength < 1) {
++    throw new RangeError("maxLength must be a positive integer");
++  }
++  const words = input
++    .normalize("NFKD")
++    .replace(/\p{M}/gu, "")
++    .toLowerCase()
++    .replace(/&/g, " and ")
++    .split(/[^a-z0-9]+/)
++    .filter(Boolean);
++  let slug = words.join(separator);
++  if (slug.length > maxLength) {
++    const cut = slug.lastIndexOf(separator, maxLength);
++    slug = cut > 0 ? slug.slice(0, cut) : slug.slice(0, maxLength);
++  }
++  return slug === "" ? ["n", "a"].join(separator) : slug;
+ }

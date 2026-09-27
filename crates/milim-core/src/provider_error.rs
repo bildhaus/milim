@@ -187,21 +187,31 @@ pub fn classify_provider_error(message: &str) -> ProviderErrorInfo {
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
     use ProviderErrorKind::*;
 
-    // Quota is checked before 429 because OpenAI reports exhausted credit as
-    // `429 insufficient_quota`, which retrying will not fix.
+    // Exhausted credit is checked before 429 because OpenAI reports it as
+    // `429 insufficient_quota` and Anthropic's monthly spend cap as a 429
+    // `rate_limit_error`; retrying will not fix either.
     if status == Some(402)
         || has(&[
             "insufficient_quota",
-            "exceeded your current quota",
-            "quota exceeded",
-            "billing",
             "credit balance",
             "insufficient credit",
             "insufficient balance",
             "payment required",
             "out of credits",
+            "billing_error",
+            "enforced_spend_limit_reached",
+            "reached your api usage limits",
+            "reached your specified api usage limits",
+            "reached your specified workspace api usage limits",
         ])
+        || has_zero_quota_limit(&text)
     {
+        return ProviderErrorInfo::new(Quota, status, None);
+    }
+    // Gemini words its per-minute and per-day 429s as "You exceeded your
+    // current quota, please check your plan and billing details", so this
+    // wording means exhausted quota only outside a 429.
+    if status != Some(429) && has(&["exceeded your current quota", "quota exceeded", "billing"]) {
         return ProviderErrorInfo::new(Quota, status, None);
     }
     if status == Some(413)
@@ -209,13 +219,20 @@ pub fn classify_provider_error(message: &str) -> ProviderErrorInfo {
             "context_length_exceeded",
             "context length",
             "context window",
+            "context limit",
+            "context size",
+            "exceed_context_size",
             "maximum context",
+            "maximum prompt length",
             "prompt is too long",
+            "prompt too long",
             "too many tokens",
             "reduce the length",
             "input is too long",
             "exceeds the model's maximum",
+            "maximum number of tokens allowed",
         ])
+        || (text.contains("input token count") && text.contains("exceeds"))
     {
         return ProviderErrorInfo::new(ContextLength, status, None);
     }
@@ -250,6 +267,7 @@ pub fn classify_provider_error(message: &str) -> ProviderErrorInfo {
             "ratelimit",
             "too many requests",
             "usage limit",
+            "resource_exhausted",
         ])
     {
         return ProviderErrorInfo::new(RateLimited, status, retry_after);
@@ -304,17 +322,31 @@ fn http_status(text: &str) -> Option<u16> {
     None
 }
 
+/// Gemini reports a model the account's tier cannot use at all as an
+/// exceeded quota with `limit: 0`; waiting does not help.
+fn has_zero_quota_limit(text: &str) -> bool {
+    text.contains("quota")
+        && text.match_indices("limit: 0").any(|(index, marker)| {
+            !text[index + marker.len()..].starts_with(|ch: char| ch.is_ascii_digit() || ch == '.')
+        })
+}
+
 fn retry_after_secs(text: &str) -> Option<u64> {
     for marker in [
         "retry after ",
         "retry-after: ",
         "retry-after ",
+        // Gemini's `RetryInfo` detail: `"retryDelay": "12s"`.
+        "retrydelay",
+        // Gemini's message text: "Please retry in 12.3s."
+        "retry in ",
         "try again in ",
     ] {
         let Some(index) = text.find(marker) else {
             continue;
         };
-        let rest = &text[index + marker.len()..];
+        let rest = text[index + marker.len()..]
+            .trim_start_matches(|ch: char| ch == '"' || ch == ':' || ch.is_whitespace());
         let number: String = rest
             .chars()
             .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
@@ -419,6 +451,103 @@ mod tests {
             kind("prompt is too long: 210000 tokens > 200000 maximum"),
             ProviderErrorKind::ContextLength
         );
+    }
+
+    #[test]
+    fn gemini_quota_429s_are_rate_limits_with_their_retry_delay() {
+        let body = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 10, model: gemini-2.5-flash\nPlease retry in 12.345678s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"12s"}]}}"#;
+        let error = upstream_http_error(
+            "Gemini",
+            "streamGenerateContent",
+            "429 Too Many Requests",
+            None,
+            body,
+        );
+        let info = classify_provider_error(&error.to_string());
+        assert_eq!(info.kind, ProviderErrorKind::RateLimited);
+        assert_eq!(info.status, Some(429));
+        assert_eq!(info.retry_after_secs, Some(12));
+        let hint = retry_hint(&error).unwrap();
+        assert!(hint.retryable);
+        assert_eq!(hint.retry_after, Some(Duration::from_secs(12)));
+
+        // Without the detail, the message's own delay is used.
+        let info = classify_provider_error(
+            "Gemini streamGenerateContent -> 429: RESOURCE_EXHAUSTED. Please retry in 7.2s.",
+        );
+        assert_eq!(info.kind, ProviderErrorKind::RateLimited);
+        assert_eq!(info.retry_after_secs, Some(8));
+
+        // A stream error carrying only the status name is still a rate limit.
+        let streamed = upstream_stream_error(
+            "Gemini",
+            "streamGenerateContent",
+            None,
+            Some("RESOURCE_EXHAUSTED"),
+            "You exceeded your current quota, please check your plan and billing details.",
+        );
+        assert_eq!(kind(&streamed.to_string()), ProviderErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn hard_credit_exhaustion_stays_quota_even_as_a_429() {
+        assert_eq!(
+            kind(
+                r#"OpenAI chat/completions -> 429 Too Many Requests: {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#
+            ),
+            ProviderErrorKind::Quota
+        );
+        assert_eq!(
+            kind(
+                r#"anthropic messages -> 429 Too Many Requests: {"type":"error","error":{"type":"rate_limit_error","message":"You have reached your API usage limits: your organization has crossed its monthly API usage threshold.","details":{"error_code":"enforced_spend_limit_reached"}}}"#
+            ),
+            ProviderErrorKind::Quota
+        );
+        assert_eq!(
+            kind("anthropic messages -> 400 Bad Request: You have reached your specified API usage limits. You will regain access on 2026-10-01."),
+            ProviderErrorKind::Quota
+        );
+        // Gemini's zero limit means the tier cannot use the model at all.
+        assert_eq!(
+            kind("Gemini streamGenerateContent -> 429 Too Many Requests: Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.5-pro"),
+            ProviderErrorKind::Quota
+        );
+        assert_eq!(
+            kind("Gemini -> 429 Too Many Requests: Quota exceeded for metric: x, limit: 0.5 per second"),
+            ProviderErrorKind::RateLimited
+        );
+        // Outside a 429, quota wording still means exhausted quota.
+        assert_eq!(
+            kind("Quota exceeded for this billing period"),
+            ProviderErrorKind::Quota
+        );
+    }
+
+    #[test]
+    fn context_length_covers_provider_phrasings() {
+        for message in [
+            // Anthropic
+            "anthropic messages -> 400 Bad Request: prompt is too long: 1000301 tokens > 1000000 maximum",
+            "input length and `max_tokens` exceed context limit: 199000 + 8192 > 200000",
+            // OpenAI
+            r#"OpenAI chat/completions -> 400 Bad Request: {"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130000 tokens.","code":"context_length_exceeded"}}"#,
+            "Your input exceeds the context window of this model.",
+            // Gemini
+            "Gemini generateContent -> 400 Bad Request: The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).",
+            // Local servers and other hosted APIs
+            "llama.cpp chat/completions -> 400 Bad Request: the request exceeds the available context size, try increasing it",
+            r#"{"error":{"type":"exceed_context_size_error","n_prompt_tokens":9000,"n_ctx":8192}}"#,
+            "vLLM -> 400 Bad Request: This model's maximum context length is 32768 tokens. However, you requested 40000 tokens.",
+            "LM Studio: Trying to keep the first 9000 tokens when context the overflows. However, the model is loaded with context length of only 8192 tokens.",
+            "xAI -> 400 Bad Request: This model's maximum prompt length is 131072 but the request contains 150000 tokens.",
+        ] {
+            assert_eq!(kind(message), ProviderErrorKind::ContextLength, "{message}");
+        }
+        let hint = retry_hint(&Error::Upstream(
+            "anthropic messages -> 400 Bad Request: prompt is too long".into(),
+        ))
+        .unwrap();
+        assert!(!hint.retryable);
     }
 
     #[test]

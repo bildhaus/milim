@@ -8,6 +8,13 @@ use serde_json::{Map, Value};
 
 pub(crate) const TOOL_REPLAY_MAX_LINES: usize = 2_000;
 pub(crate) const TOOL_REPLAY_MAX_BYTES: usize = 50 * 1024;
+/// Total model-visible bytes one step's tool results may add, so a step
+/// with many parallel calls cannot flood the context.
+pub(crate) const STEP_REPLAY_MAX_BYTES: usize = 100 * 1024;
+/// Smallest share a result keeps when the step budget cuts it.
+const STEP_REPLAY_MIN_BYTES: usize = 2 * 1024;
+/// Allowance for the omission marker and spill note a cut result gains.
+const TRUNCATION_NOTE_BYTES: usize = 512;
 
 /// Parse streamed tool-call arguments. Empty or whitespace-only arguments are
 /// an empty object; anything else must be valid JSON.
@@ -247,27 +254,76 @@ fn ceil_char_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-/// Build the model-visible content for a tool result: the tool's plain-text
-/// projection verbatim when it has one, otherwise the rendered JSON, cut to
-/// the replay budget. When the output is cut and a tool output root is
-/// registered, the full text is saved there and the model is told where.
-pub(crate) fn model_tool_content(
-    model_text: Option<&str>,
-    visible: &Value,
+/// Build the model-visible content for one step's tool results, in order:
+/// each tool's plain-text projection verbatim when it has one, otherwise
+/// its rendered JSON, cut to the per-result replay budget and to the step's
+/// total [`STEP_REPLAY_MAX_BYTES`]. When an output is cut and a tool output
+/// root is registered, the full text is saved there and the model is told
+/// where.
+pub(crate) fn model_tool_contents<'a>(
+    results: impl IntoIterator<Item = (Option<&'a str>, &'a Value, Option<&'a str>)>,
     scope: Option<&str>,
-    call_id: Option<&str>,
-) -> String {
-    let text = model_text
-        .map(str::to_string)
-        .unwrap_or_else(|| render_tool_value(visible));
-    replay_text(
-        text,
-        milim_tools::tool_output_root(),
-        scope,
-        call_id,
-        TOOL_REPLAY_MAX_LINES,
-        TOOL_REPLAY_MAX_BYTES,
-    )
+) -> Vec<String> {
+    let texts = results
+        .into_iter()
+        .map(|(model_text, visible, call_id)| {
+            let text = model_text
+                .map(str::to_string)
+                .unwrap_or_else(|| render_tool_value(visible));
+            (text, call_id)
+        })
+        .collect::<Vec<_>>();
+    let caps = step_byte_caps(
+        &texts.iter().map(|(text, _)| text.len()).collect::<Vec<_>>(),
+        STEP_REPLAY_MAX_BYTES,
+    );
+    let root = milim_tools::tool_output_root();
+    texts
+        .into_iter()
+        .zip(caps)
+        .map(|((text, call_id), max_bytes)| {
+            replay_text(text, root, scope, call_id, TOOL_REPLAY_MAX_LINES, max_bytes)
+        })
+        .collect()
+}
+
+/// Per-result byte caps that fit one step's results into `budget`. Results
+/// no larger than an equal share of what the smaller ones leave keep the
+/// normal per-result cap; every larger one is cut to that share, so the
+/// largest results give up the most.
+fn step_byte_caps(lengths: &[usize], budget: usize) -> Vec<usize> {
+    let sizes = lengths
+        .iter()
+        .map(|length| (*length).min(TOOL_REPLAY_MAX_BYTES))
+        .collect::<Vec<_>>();
+    if sizes.iter().sum::<usize>() <= budget {
+        return vec![TOOL_REPLAY_MAX_BYTES; sizes.len()];
+    }
+    let mut ascending = sizes.clone();
+    ascending.sort_unstable();
+    let mut remaining = budget;
+    let mut share = 0;
+    for (position, size) in ascending.iter().enumerate() {
+        share = remaining / (ascending.len() - position);
+        if *size > share {
+            break;
+        }
+        remaining -= size;
+    }
+    // Leave room for the omission marker and the spill note of a cut result.
+    let cap = share
+        .saturating_sub(TRUNCATION_NOTE_BYTES)
+        .max(STEP_REPLAY_MIN_BYTES);
+    sizes
+        .iter()
+        .map(|size| {
+            if *size > share {
+                cap
+            } else {
+                TOOL_REPLAY_MAX_BYTES
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn replay_text(
@@ -443,6 +499,59 @@ mod tests {
             "[… 0 lines / {} bytes omitted …]",
             text.len() - 100
         )));
+    }
+
+    #[test]
+    fn step_budget_cuts_the_largest_results_first() {
+        let kib = 1024;
+        // Under budget: every result keeps the normal per-result cap.
+        assert_eq!(
+            step_byte_caps(&[10 * kib, 20 * kib], 100 * kib),
+            vec![TOOL_REPLAY_MAX_BYTES; 2]
+        );
+        // Four full-size results and one small one: the small one is
+        // untouched and the rest share what is left equally.
+        let caps = step_byte_caps(
+            &[80 * kib, 4 * kib, 60 * kib, 50 * kib, 45 * kib],
+            100 * kib,
+        );
+        assert_eq!(caps[1], TOOL_REPLAY_MAX_BYTES);
+        let share = (100 * kib - 4 * kib) / 4;
+        for index in [0, 2, 3, 4] {
+            assert_eq!(caps[index], share - TRUNCATION_NOTE_BYTES);
+        }
+        // Many results never go below the minimum share.
+        assert!(step_byte_caps(&vec![50 * kib; 100], 100 * kib)
+            .iter()
+            .all(|cap| *cap == STEP_REPLAY_MIN_BYTES));
+    }
+
+    #[test]
+    fn step_contents_fit_the_step_budget() {
+        let big = |fill: char| {
+            (0..1_000)
+                .map(|_| fill.to_string().repeat(45))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let texts = [big('a'), big('b'), big('c'), big('d')];
+        let visible = serde_json::Value::Null;
+        let small = "small result".to_string();
+        let contents = model_tool_contents(
+            texts
+                .iter()
+                .map(|text| (Some(text.as_str()), &visible, None))
+                .chain(std::iter::once((Some(small.as_str()), &visible, None))),
+            None,
+        );
+        assert_eq!(contents.len(), 5);
+        assert_eq!(contents[4], small);
+        let total = contents.iter().map(String::len).sum::<usize>();
+        assert!(total <= STEP_REPLAY_MAX_BYTES, "{total}");
+        for (content, fill) in contents[..4].iter().zip(['a', 'b', 'c', 'd']) {
+            assert!(content.starts_with(fill));
+            assert!(content.contains("omitted"), "every large result is cut");
+        }
     }
 
     #[test]

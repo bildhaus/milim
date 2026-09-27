@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -22,7 +23,7 @@ use milim_core::{Error, Result};
 use milim_inference::anthropic::AnthropicBackend;
 use milim_inference::gemini::GeminiBackend;
 use milim_inference::remote::RemoteBackend;
-use milim_inference::{CompletionRequest, EventStream, ModelService, SharedService};
+use milim_inference::{CompletionRequest, EventStream, ModelService, SharedService, StreamEvent};
 use milim_storage::{create_private_file, EncryptedStore};
 use milim_tools::atomic_write;
 
@@ -115,6 +116,10 @@ pub struct ModelCapabilityOverride {
     pub reasoning: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_efforts: Vec<ReasoningEffort>,
+    /// Context window in tokens, replacing the provider-reported or
+    /// built-in value (for example a local server's configured context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -464,12 +469,10 @@ impl ProviderRegistry {
             .ok_or_else(|| {
                 Error::ModelNotFound(format!("model {model} for provider {provider_id}"))
             })?;
-        let sampling = milim_inference::SamplingParams {
-            max_tokens: Some(32),
-            temperature: Some(0.0),
-            ..Default::default()
-        };
-        let base_request = |messages: Vec<ChatMessage>| CompletionRequest {
+        // Probes use request shapes current models accept: no sampling
+        // parameters, no forced tool choice, and room for a model that
+        // thinks by default to finish its answer.
+        let base_request = |messages: Vec<ChatMessage>, max_tokens: u32| CompletionRequest {
             model: model.to_string(),
             messages,
             tools: Vec::new(),
@@ -477,52 +480,69 @@ impl ProviderRegistry {
             response_format: None,
             prompt: None,
             suffix: None,
-            sampling: sampling.clone(),
+            sampling: milim_inference::SamplingParams {
+                max_tokens: Some(max_tokens),
+                ..Default::default()
+            },
             reasoning_effort: None,
         };
 
         let vision = probe_completion(
             backend.as_ref(),
-            base_request(vec![ChatMessage {
-                role: "user".into(),
-                content: Some(Content::Parts(vec![
-                    ContentPart::Text {
-                        text: "Reply with the dominant color of this one-pixel image.".into(),
-                    },
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrl {
-                            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZJAAAAAASUVORK5CYII=".into(),
-                            detail: Some("low".into()),
+            base_request(
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: Some(Content::Parts(vec![
+                        ContentPart::Text {
+                            text: "Reply with the dominant color of this one-pixel image.".into(),
                         },
-                    },
-                ])),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            }]),
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrl {
+                                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZJAAAAAASUVORK5CYII=".into(),
+                                detail: Some("low".into()),
+                            },
+                        },
+                    ])),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    provider_state: None,
+                }],
+                2_048,
+            ),
+            PROBE_TIMEOUT,
             |_| true,
         )
         .await;
 
-        let mut reasoning_request = base_request(vec![ChatMessage::text(
-            "user",
-            "Think briefly, then answer only: 4.",
-        )]);
-        reasoning_request.reasoning_effort = Some(ReasoningEffort::Low);
-        let reasoning = probe_completion(backend.as_ref(), reasoning_request, |output| {
-            output
-                .message
-                .reasoning_content
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
-        })
+        // Reasoning shows up as reasoning deltas, or as continuation data
+        // (thinking blocks, reasoning items) when a provider withholds the
+        // reasoning text itself.
+        let mut reasoning_request = base_request(
+            vec![ChatMessage::text(
+                "user",
+                "How many times does the letter r appear in \"strawberry raspberry\"? \
+                 Reason it through, then answer with the number only.",
+            )],
+            8_192,
+        );
+        reasoning_request.reasoning_effort = Some(ReasoningEffort::High);
+        let reasoning = probe_completion(
+            backend.as_ref(),
+            reasoning_request,
+            REASONING_PROBE_TIMEOUT,
+            |output| output.reasoning,
+        )
         .await;
 
-        let mut tools_request = base_request(vec![ChatMessage::text(
-            "user",
-            "Call the capability probe tool exactly once.",
-        )]);
+        let mut tools_request = base_request(
+            vec![ChatMessage::text(
+                "user",
+                "Call the milim_capability_probe tool exactly once with value \"ok\".",
+            )],
+            2_048,
+        );
         tools_request.tools = vec![Tool {
             kind: "function".into(),
             function: ToolFunction {
@@ -535,17 +555,11 @@ impl ProviderRegistry {
                 })),
             },
         }];
-        tools_request.tool_choice = Some(serde_json::json!({
-            "type": "function",
-            "function": { "name": "milim_capability_probe" }
-        }));
-        tools_request.sampling.max_tokens = Some(256);
-        let tools = probe_completion(backend.as_ref(), tools_request, |output| {
-            output.message.tool_calls.as_ref().is_some_and(|calls| {
-                calls
-                    .iter()
-                    .any(|call| call.function.name == "milim_capability_probe")
-            })
+        let tools = probe_completion(backend.as_ref(), tools_request, PROBE_TIMEOUT, |output| {
+            output
+                .tool_names
+                .iter()
+                .any(|name| name == "milim_capability_probe")
         })
         .await;
 
@@ -558,17 +572,48 @@ impl ProviderRegistry {
     }
 }
 
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const REASONING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// What a capability probe saw in the model's stream.
+#[derive(Debug, Default)]
+struct ProbeOutput {
+    /// Any non-empty reasoning delta, or provider continuation data.
+    reasoning: bool,
+    tool_names: Vec<String>,
+    finish_reason: String,
+}
+
 async fn probe_completion(
     backend: &dyn ModelService,
     request: CompletionRequest,
-    supported: impl FnOnce(&milim_inference::CompletionOutput) -> bool,
+    timeout: std::time::Duration,
+    supported: impl FnOnce(&ProbeOutput) -> bool,
 ) -> CapabilityProbeResult {
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(45),
-        backend.complete(request),
-    )
-    .await
-    {
+    let run = async {
+        let mut stream = backend.stream(request).await?;
+        let mut output = ProbeOutput::default();
+        while let Some(event) = stream.next().await {
+            match event? {
+                StreamEvent::Delta(delta) => {
+                    output.reasoning |= delta
+                        .reasoning
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())
+                        || delta.provider_state.is_some();
+                    output.tool_names.extend(
+                        delta
+                            .tool_calls
+                            .into_iter()
+                            .filter_map(|call| call.function.name),
+                    );
+                }
+                StreamEvent::Done { finish_reason, .. } => output.finish_reason = finish_reason,
+            }
+        }
+        Ok::<_, Error>(output)
+    };
+    match tokio::time::timeout(timeout, run).await {
         Ok(Ok(output)) => {
             let is_supported = supported(&output);
             CapabilityProbeResult {
@@ -664,6 +709,15 @@ fn collect_model_reasoning(
 
 fn apply_model_overrides(provider: &mut Provider) {
     for (model, override_) in provider.model_overrides.clone() {
+        if let Some(window) = override_.context_window.filter(|window| *window > 0) {
+            let fallback = fallback_model_context(provider, &model);
+            let context = provider
+                .model_context
+                .entry(model.clone())
+                .or_insert(fallback);
+            context.context_length = Some(window);
+            context.max_prompt_tokens = None;
+        }
         if override_.image_input.is_some() || override_.tool_use.is_some() {
             let capabilities = provider
                 .model_capabilities
@@ -740,62 +794,118 @@ pub(crate) fn model_context_window(provider: &Provider, model: &str) -> Option<u
     context.max_prompt_tokens.or(context.context_length)
 }
 
+/// Context for a model the provider did not describe: the documented limits
+/// of a known hosted model family, else a conservative default. Local
+/// servers (Ollama, LM Studio, loopback) run whatever context they were
+/// configured with, so they always get the conservative default.
 fn fallback_model_context(provider: &Provider, model: &str) -> ModelContextMetadata {
-    let id = model.to_ascii_lowercase();
-    let context_length = match provider.kind {
-        ProviderKind::Anthropic => Some(200_000),
-        ProviderKind::Gemini => Some(32_768),
-        ProviderKind::OpenAiCompatible => {
-            if id.contains("gpt-4o")
-                || id.contains("gpt-4.1")
-                || id.starts_with("o1")
-                || id.starts_with("o3")
-                || id.contains("/o1")
-                || id.contains("/o3")
-            {
-                Some(128_000)
-            } else if id.contains("gpt-3.5") {
-                Some(16_385)
-            } else {
-                Some(32_768)
-            }
-        }
+    let unknown = |context_length| ModelContextMetadata {
+        context_length: Some(context_length),
+        max_prompt_tokens: None,
+        max_completion_tokens: None,
+    };
+    let known = || known_model_context(model);
+    match provider.kind {
+        ProviderKind::Anthropic => known().unwrap_or_else(|| unknown(200_000)),
+        ProviderKind::Gemini => known().unwrap_or_else(|| unknown(32_768)),
+        ProviderKind::OpenAiCompatible if is_local_provider(provider) => unknown(32_768),
+        ProviderKind::OpenAiCompatible => known().unwrap_or_else(|| unknown(32_768)),
         ProviderKind::Replicate
         | ProviderKind::Fal
         | ProviderKind::BraveSearch
-        | ProviderKind::Tavily => None,
-    };
-    ModelContextMetadata {
-        context_length,
-        max_prompt_tokens: None,
-        max_completion_tokens: None,
+        | ProviderKind::Tavily => ModelContextMetadata::default(),
     }
+}
+
+/// Documented context limits by hosted model family (OpenAI, Gemini, and
+/// Claude model docs), matched on the id after any `vendor/` prefix.
+/// `max_prompt_tokens` is set where the vendor caps input below the window.
+fn known_model_context(model: &str) -> Option<ModelContextMetadata> {
+    let limits = |context: u32, prompt: Option<u32>, output: Option<u32>| {
+        Some(ModelContextMetadata {
+            context_length: Some(context),
+            max_prompt_tokens: prompt,
+            max_completion_tokens: output,
+        })
+    };
+    let lower = model.trim().to_ascii_lowercase();
+    let id = lower.rsplit('/').next().unwrap_or(&lower);
+    let family = |prefix: &str| {
+        id.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', ':', '.', '@']))
+    };
+
+    if let Some(context) = milim_inference::anthropic::claude_context_window(model) {
+        let output = milim_inference::anthropic::claude_max_output_tokens(model);
+        return limits(context, None, output);
+    }
+    // Embedding, image, speech, and live variants have their own, smaller
+    // limits; leave them to the conservative default.
+    if ["embed", "image", "tts", "audio", "live"]
+        .iter()
+        .any(|variant| id.contains(variant))
+    {
+        return None;
+    }
+    // OpenAI GPT-6 and the 1.05M-context GPT-5.x generations.
+    if id.starts_with("gpt-6") || (id.starts_with("gpt-5.6") && !family("gpt-5.6-cyber")) {
+        return limits(1_050_000, Some(922_000), Some(128_000));
+    }
+    if id.starts_with("gpt-5") && id.contains("-chat-latest") {
+        return limits(128_000, None, Some(16_384));
+    }
+    if (family("gpt-5.5") || family("gpt-5.4"))
+        && !family("gpt-5.4-mini")
+        && !family("gpt-5.4-nano")
+    {
+        return limits(1_050_000, None, Some(128_000));
+    }
+    // The rest of GPT-5.x: 400K window, 272K input, 128K output.
+    if family("gpt-5") || id.starts_with("gpt-5.") {
+        return limits(400_000, Some(272_000), Some(128_000));
+    }
+    if family("gpt-4.1") {
+        return limits(1_047_576, None, Some(32_768));
+    }
+    if family("gpt-4o") || family("gpt-4-turbo") || (family("gpt-4") && id.contains("-preview")) {
+        return limits(128_000, None, Some(16_384));
+    }
+    if family("gpt-4-32k") {
+        return limits(32_768, None, Some(8_192));
+    }
+    if family("gpt-4") {
+        return limits(8_192, None, Some(8_192));
+    }
+    if family("gpt-3.5-turbo") {
+        return limits(16_385, None, Some(4_096));
+    }
+    if family("o1-mini") || family("o1-preview") {
+        return limits(128_000, None, Some(65_536));
+    }
+    if family("o1") || family("o3") || family("o4-mini") || family("codex-mini-latest") {
+        return limits(200_000, None, Some(100_000));
+    }
+    if family("gpt-oss-120b") || family("gpt-oss-20b") {
+        return limits(131_072, None, Some(131_072));
+    }
+    // Gemini API models take 1,048,576 input tokens; 2.0 models return up
+    // to 8,192 tokens and later ones up to 65,536.
+    if family("gemini-2.0") || family("gemini-1.5") {
+        return limits(1_048_576, None, Some(8_192));
+    }
+    if id.starts_with("gemini-") {
+        return limits(1_048_576, None, Some(65_536));
+    }
+    if family("gemma-4") {
+        return limits(262_144, None, None);
+    }
+    None
 }
 
 fn fallback_model_reasoning(provider: &Provider, model: &str) -> Option<ModelReasoningMetadata> {
     let id = model.to_ascii_lowercase();
     match provider.kind {
-        ProviderKind::Anthropic => {
-            if id.contains("claude-4")
-                || id.contains("claude-sonnet-4")
-                || id.contains("claude-opus-4")
-            {
-                Some(reasoning_meta(
-                    &[
-                        ReasoningEffort::Low,
-                        ReasoningEffort::Medium,
-                        ReasoningEffort::High,
-                        ReasoningEffort::Xhigh,
-                        ReasoningEffort::Max,
-                    ],
-                    Some(ReasoningEffort::High),
-                    true,
-                    true,
-                ))
-            } else {
-                None
-            }
-        }
+        ProviderKind::Anthropic => milim_inference::anthropic::claude_reasoning_metadata(model),
         ProviderKind::Gemini => {
             if id.contains("gemini-3") {
                 Some(reasoning_meta(
@@ -1356,8 +1466,20 @@ mod tests {
             ProviderKind::Anthropic,
             "https://api.anthropic.com/v1",
         );
-        let meta = fallback_model_reasoning(&anthropic, "claude-sonnet-4-20250514").unwrap();
+        // Claude models follow the adapter's capability table: thinking that
+        // cannot be turned off is mandatory, manual thinking starts off.
+        let meta = fallback_model_reasoning(&anthropic, "claude-opus-5-5").unwrap();
         assert_eq!(meta.mandatory, Some(true));
+        assert!(meta.supported_efforts.contains(&ReasoningEffort::Xhigh));
+        let meta = fallback_model_reasoning(&anthropic, "claude-sonnet-5").unwrap();
+        assert_eq!(meta.mandatory, Some(false));
+        assert!(meta.supported_efforts.contains(&ReasoningEffort::None));
+        let meta = fallback_model_reasoning(&anthropic, "claude-sonnet-4-6").unwrap();
+        assert!(!meta.supported_efforts.contains(&ReasoningEffort::Xhigh));
+        let meta = fallback_model_reasoning(&anthropic, "claude-sonnet-4-20250514").unwrap();
+        assert_eq!(meta.mandatory, Some(false));
+        assert_eq!(meta.default_enabled, Some(false));
+        assert!(fallback_model_reasoning(&anthropic, "claude-3-5-sonnet-20241022").is_none());
 
         let gemini = provider(
             "Gemini",
@@ -1428,6 +1550,7 @@ mod tests {
                 tool_use: Some(true),
                 reasoning: Some(true),
                 supported_efforts: vec![ReasoningEffort::Low, ReasoningEffort::High],
+                context_window: None,
             },
         );
 
@@ -1439,6 +1562,270 @@ mod tests {
             vllm.model_reasoning["qwen"].supported_efforts,
             [ReasoningEffort::Low, ReasoningEffort::High]
         );
+    }
+
+    #[test]
+    fn context_fallback_follows_documented_model_families() {
+        let openai = provider(
+            "OpenAI",
+            ProviderKind::OpenAiCompatible,
+            "https://api.openai.com/v1",
+        );
+        let window = |provider: &Provider, model: &str| model_context_window(provider, model);
+        assert_eq!(window(&openai, "gpt-5"), Some(272_000));
+        assert_eq!(window(&openai, "gpt-5.2-codex"), Some(272_000));
+        assert_eq!(window(&openai, "gpt-5.5"), Some(1_050_000));
+        assert_eq!(window(&openai, "gpt-5.4-mini"), Some(272_000));
+        assert_eq!(window(&openai, "gpt-6-sol"), Some(922_000));
+        assert_eq!(window(&openai, "gpt-5-chat-latest"), Some(128_000));
+        assert_eq!(window(&openai, "gpt-4.1-mini"), Some(1_047_576));
+        assert_eq!(window(&openai, "gpt-4o"), Some(128_000));
+        assert_eq!(window(&openai, "gpt-4"), Some(8_192));
+        assert_eq!(window(&openai, "o3"), Some(200_000));
+        assert_eq!(window(&openai, "o1-mini"), Some(128_000));
+        assert_eq!(window(&openai, "gpt-3.5-turbo"), Some(16_385));
+        assert_eq!(window(&openai, "text-embedding-3-small"), Some(32_768));
+        assert_eq!(window(&openai, "mystery-model"), Some(32_768));
+
+        let openrouter = provider(
+            "OpenRouter",
+            ProviderKind::OpenAiCompatible,
+            "https://openrouter.ai/api/v1",
+        );
+        assert_eq!(window(&openrouter, "openai/gpt-oss-120b"), Some(131_072));
+        assert_eq!(
+            window(&openrouter, "google/gemini-2.5-pro"),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            window(&openrouter, "anthropic/claude-sonnet-4.5"),
+            Some(200_000)
+        );
+
+        // Local servers run whatever context they were started with.
+        let ollama = provider(
+            "Ollama",
+            ProviderKind::OpenAiCompatible,
+            "http://localhost:11434/v1",
+        );
+        assert_eq!(window(&ollama, "gpt-oss:120b"), Some(32_768));
+        assert_eq!(window(&ollama, "gpt-5"), Some(32_768));
+
+        let gemini = provider(
+            "Gemini",
+            ProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com/v1beta",
+        );
+        assert_eq!(window(&gemini, "gemini-3.1-pro-preview"), Some(1_048_576));
+        assert_eq!(window(&gemini, "gemini-2.0-flash"), Some(1_048_576));
+        assert_eq!(window(&gemini, "unknown-gemini-api-model"), Some(32_768));
+
+        let anthropic = provider(
+            "Anthropic",
+            ProviderKind::Anthropic,
+            "https://api.anthropic.com/v1",
+        );
+        assert_eq!(window(&anthropic, "claude-opus-5"), Some(1_000_000));
+        assert_eq!(window(&anthropic, "claude-haiku-4-5"), Some(200_000));
+        assert_eq!(window(&anthropic, "compatible-model"), Some(200_000));
+        assert_eq!(
+            fallback_model_context(&anthropic, "claude-opus-4-1").max_completion_tokens,
+            Some(32_000)
+        );
+    }
+
+    #[test]
+    fn context_window_override_replaces_reported_and_built_in_limits() {
+        let mut lm_studio = provider(
+            "LM Studio",
+            ProviderKind::OpenAiCompatible,
+            "http://localhost:1234/v1",
+        );
+        lm_studio.model_context.insert(
+            "qwen3".into(),
+            ModelContextMetadata {
+                context_length: Some(262_144),
+                max_prompt_tokens: Some(200_000),
+                max_completion_tokens: Some(8_192),
+            },
+        );
+        for model in ["qwen3", "gpt-oss-20b"] {
+            lm_studio.model_overrides.insert(
+                model.into(),
+                ModelCapabilityOverride {
+                    context_window: Some(16_384),
+                    ..Default::default()
+                },
+            );
+        }
+
+        apply_model_overrides(&mut lm_studio);
+
+        assert_eq!(model_context_window(&lm_studio, "qwen3"), Some(16_384));
+        assert_eq!(
+            lm_studio.model_context["qwen3"].max_completion_tokens,
+            Some(8_192)
+        );
+        assert_eq!(
+            model_context_window(&lm_studio, "gpt-oss-20b"),
+            Some(16_384)
+        );
+        assert_eq!(model_context_window(&lm_studio, "other"), Some(32_768));
+    }
+
+    /// Answers capability probes: a tool call when tools are offered,
+    /// reasoning continuation data (with empty reasoning text) when an
+    /// effort is set, plain text otherwise.
+    #[derive(Clone, Default)]
+    struct ProbeBackend {
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait]
+    impl ModelService for ProbeBackend {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        async fn list_models(&self) -> Result<Vec<Model>> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(&self, req: CompletionRequest) -> Result<EventStream> {
+            let delta = if !req.tools.is_empty() {
+                milim_inference::DeltaEvent {
+                    tool_calls: vec![milim_core::api::openai::DeltaToolCall {
+                        index: 0,
+                        id: Some("call_1".into()),
+                        kind: Some("function".into()),
+                        function: milim_core::api::openai::DeltaFunction {
+                            name: Some("milim_capability_probe".into()),
+                            arguments: Some("{}".into()),
+                        },
+                    }],
+                    ..Default::default()
+                }
+            } else if req.reasoning_effort.is_some() {
+                milim_inference::DeltaEvent {
+                    reasoning: Some(String::new()),
+                    provider_state: Some(serde_json::json!({ "anthropic": { "blocks": [] } })),
+                    ..Default::default()
+                }
+            } else {
+                milim_inference::DeltaEvent::text("red")
+            };
+            self.requests.lock().unwrap().push(req);
+            Ok(Box::pin(futures::stream::iter([
+                Ok(StreamEvent::Delta(delta)),
+                Ok(StreamEvent::Done {
+                    finish_reason: "stop".into(),
+                    usage: Default::default(),
+                }),
+            ])))
+        }
+
+        async fn embed(&self, _model: &str, _inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_probes_use_accepted_request_shapes_and_reasoning_deltas() {
+        let root = std::env::temp_dir().join(format!(
+            "milim-provider-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let backend = ProbeBackend::default();
+        let mut cfg = provider(
+            "anthropic",
+            ProviderKind::Anthropic,
+            "https://api.anthropic.com/v1",
+        );
+        cfg.models = vec!["claude-opus-5-5".into()];
+        let registry = ProviderRegistry {
+            inner: Arc::new(RwLock::new(vec![Runtime {
+                backend: Arc::new(backend.clone()),
+                cfg,
+            }])),
+            local: Arc::new(milim_inference::unavailable::UnavailableBackend::new()),
+            store: ProviderStore::open(&root).unwrap(),
+        };
+
+        let verified = registry
+            .verify_model_capabilities("anthropic", "claude-opus-5-5")
+            .await
+            .unwrap();
+        assert!(verified.vision.supported);
+        assert!(verified.reasoning.supported, "{:?}", verified.reasoning);
+        assert!(verified.tools.supported);
+
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert_eq!(request.sampling.temperature, None);
+            assert_eq!(request.tool_choice, None);
+            assert!(request.sampling.max_tokens.unwrap() >= 2_048);
+        }
+
+        // Empty reasoning text alone does not count as reasoning.
+        let silent = probe_completion(
+            &ScriptedDeltas(vec![milim_inference::DeltaEvent {
+                reasoning: Some(" ".into()),
+                ..Default::default()
+            }]),
+            base_probe_request(),
+            PROBE_TIMEOUT,
+            |output| output.reasoning,
+        )
+        .await;
+        assert!(!silent.supported);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    struct ScriptedDeltas(Vec<milim_inference::DeltaEvent>);
+
+    #[async_trait]
+    impl ModelService for ScriptedDeltas {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        async fn list_models(&self) -> Result<Vec<Model>> {
+            Ok(Vec::new())
+        }
+
+        async fn stream(&self, _req: CompletionRequest) -> Result<EventStream> {
+            let events: Vec<Result<StreamEvent>> = self
+                .0
+                .iter()
+                .cloned()
+                .map(|delta| Ok(StreamEvent::Delta(delta)))
+                .collect();
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        async fn embed(&self, _model: &str, _inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn base_probe_request() -> CompletionRequest {
+        CompletionRequest {
+            model: "m".into(),
+            messages: vec![ChatMessage::text("user", "hi")],
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: Default::default(),
+            reasoning_effort: None,
+        }
     }
 
     #[test]
@@ -1636,6 +2023,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                provider_state: None,
             }],
             tools: Vec::new(),
             tool_choice: None,

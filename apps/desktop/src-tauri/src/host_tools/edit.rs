@@ -12,8 +12,8 @@ use milim_core::{Error, Result};
 use milim_tools::{atomic_write, Tool, ToolEffect};
 
 use super::{
-    arg_str, attach_diagnostics, has_mixed_newlines, host_tool_scoping, lsp, newline_separator,
-    optional_bool, safe_join, Freshness, HostCtx,
+    arg_str, attach_diagnostics, has_mixed_newlines, host_tool_scoping, lock_file, lsp,
+    newline_separator, optional_bool, path_schema, safe_join, HostCtx,
 };
 
 /// Unchanged lines shown around each change.
@@ -24,6 +24,10 @@ const MAX_HUNKS: usize = 3;
 const MIN_SIMILARITY: f64 = 0.5;
 /// Bound on line comparisons spent looking for the closest region.
 const MAX_SIMILARITY_WORK: usize = 4_000_000;
+/// Edits one `edits` array may carry.
+const MAX_EDITS: usize = 50;
+/// Columns a tab counts as when comparing relative indentation.
+const TAB_WIDTH: usize = 4;
 
 /// Replace text in a file (a surgical code edit).
 pub struct EditFileTool {
@@ -37,18 +41,23 @@ impl Tool for EditFileTool {
     }
     fn description(&self) -> &str {
         if self.ctx.full_access() {
-            "Replace text in a file anywhere on the host (relative paths use the working folder). 'old' must match exactly once unless replace_all is set. A match that differs only in whitespace or line endings is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
+            "Replace text in an existing file anywhere on the host (relative paths use the working folder). Read the file with read_file in this run first. 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing. A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
         } else {
-            "Replace text in a file in the working folder. 'old' must match exactly once unless replace_all is set. A match that differs only in whitespace or line endings is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
+            "Replace text in an existing file in the working folder. Read the file with read_file in this run first. 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing. A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
         }
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
-            "path":{"type":"string"},
-            "old":{"type":"string","description":"Exact text to replace. It must be unique in the file unless replace_all is set."},
+            "path":path_schema(&self.ctx),
+            "old":{"type":"string","description":"Exact text to replace, including its indentation. It must be unique in the file unless replace_all is set."},
             "new":{"type":"string","description":"Replacement text."},
-            "replace_all":{"type":"boolean","description":"Replace every occurrence of 'old'. Default false."}
-        },"required":["path","old","new"]})
+            "replace_all":{"type":"boolean","description":"Replace every occurrence of 'old'. Default false."},
+            "edits":{"type":"array","maxItems":MAX_EDITS,"description":"Several replacements for this file instead of old/new, applied in order (each sees the result of the previous one). If any fails, the file is left unchanged.","items":{"type":"object","properties":{
+                "old":{"type":"string"},
+                "new":{"type":"string"},
+                "replace_all":{"type":"boolean"}
+            },"required":["old","new"],"additionalProperties":false}}
+        },"required":["path"]})
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::Mutating
@@ -61,7 +70,12 @@ impl Tool for EditFileTool {
         } else {
             "replacements"
         };
-        let mut out = format!("Edited {path}: {replaced} {unit}.\n");
+        let edits = result["edits"].as_u64().unwrap_or(1);
+        let mut out = if edits > 1 {
+            format!("Edited {path}: {edits} edits, {replaced} {unit}.\n")
+        } else {
+            format!("Edited {path}: {replaced} {unit}.\n")
+        };
         for note in result["notes"].as_array().into_iter().flatten() {
             if let Some(note) = note.as_str() {
                 let _ = writeln!(out, "{note}");
@@ -74,25 +88,47 @@ impl Tool for EditFileTool {
     async fn invoke(&self, args: Value) -> Result<Value> {
         let rel = arg_str(&args, "path")?;
         let path = safe_join(&self.ctx.ws, rel)?;
-        let old = arg_str(&args, "old")?;
-        let new = arg_str(&args, "new")?;
-        let replace_all = optional_bool(&args, "replace_all")?;
-        if old.is_empty() {
-            return Err(Error::InvalidRequest(
-                "'old' must not be empty; use write_file to create or replace a whole file".into(),
-            ));
+        let edits = requested_edits(&args)?;
+        let _lock = lock_file(&path).await;
+        if !path.is_file() {
+            return Err(Error::InvalidRequest(format!(
+                "{rel} does not exist; use write_file to create a new file"
+            )));
         }
-        if old == new {
-            return Err(Error::InvalidRequest(
-                "'old' and 'new' are identical; nothing to change".into(),
-            ));
-        }
-        let freshness = self.ctx.run.freshness(&path)?;
+        self.ctx.run.require_read(&path, rel, "edit_file")?;
         let content = std::fs::read_to_string(&path)?;
-        let plan = plan_edit(&content, old, new, replace_all)
-            .map_err(|message| Error::InvalidRequest(format!("{rel}: {message}")))?;
-        let updated = apply(&content, &plan);
-        let (diff, added, removed) = render_diff(&content, &plan);
+        let mut updated = content.clone();
+        let (mut diff, mut added, mut removed, mut replaced) = (String::new(), 0, 0, 0);
+        let mut normalized = false;
+        for (index, edit) in edits.iter().enumerate() {
+            let plan =
+                plan_edit(&updated, edit.old, edit.new, edit.replace_all).map_err(|message| {
+                    Error::InvalidRequest(if edits.len() > 1 {
+                        format!(
+                            "{rel}: edit {} of {}: {message} No edit was applied.",
+                            index + 1,
+                            edits.len()
+                        )
+                    } else {
+                        format!("{rel}: {message}")
+                    })
+                })?;
+            let (hunks, plus, minus) =
+                render_diff(&updated, &plan, MAX_HUNKS.saturating_sub(replaced));
+            diff.push_str(&hunks);
+            added += plus;
+            removed += minus;
+            replaced += plan.replacements.len();
+            normalized |= plan.normalized;
+            updated = apply(&updated, &plan);
+        }
+        if replaced > MAX_HUNKS {
+            let _ = writeln!(
+                diff,
+                "... {} more replacement(s) not shown",
+                replaced - MAX_HUNKS
+            );
+        }
         if std::fs::read_to_string(&path)? != content {
             return Err(Error::InvalidRequest(
                 "file changed while edit_file was running; read it again".into(),
@@ -101,25 +137,78 @@ impl Tool for EditFileTool {
         atomic_write(&path, updated.as_bytes())?;
         self.ctx.run.touch(&path);
         let mut notes = Vec::new();
-        if plan.normalized {
+        if normalized {
             notes.push("Matched after ignoring whitespace differences; the file's indentation and line endings were kept.");
-        }
-        if freshness == Freshness::Unread {
-            notes.push("This file was not read earlier in this run; check the change below.");
         }
         let mut result = json!({
             "path": rel,
-            "replaced": plan.replacements.len(),
+            "replaced": replaced,
+            "edits": edits.len(),
             "bytes": updated.len(),
             "added": added,
             "removed": removed,
-            "normalized": plan.normalized,
+            "normalized": normalized,
             "diff": diff,
             "notes": notes,
         });
         attach_diagnostics(&self.ctx, &path, &updated, &mut result).await;
         Ok(result)
     }
+}
+
+/// One requested replacement.
+struct RequestedEdit<'a> {
+    old: &'a str,
+    new: &'a str,
+    replace_all: bool,
+}
+
+/// The replacements an `edit_file` call asks for: its `edits` array, or its
+/// top-level `old`/`new` pair.
+fn requested_edits(args: &Value) -> Result<Vec<RequestedEdit<'_>>> {
+    let edits = match args.get("edits") {
+        None | Some(Value::Null) => vec![RequestedEdit {
+            old: arg_str(args, "old")?,
+            new: arg_str(args, "new")?,
+            replace_all: optional_bool(args, "replace_all")?,
+        }],
+        Some(Value::Array(items)) => {
+            if args.get("old").is_some() || args.get("new").is_some() {
+                return Err(Error::InvalidRequest(
+                    "pass either old/new or edits, not both".into(),
+                ));
+            }
+            if items.is_empty() || items.len() > MAX_EDITS {
+                return Err(Error::InvalidRequest(format!(
+                    "edits must hold 1 to {MAX_EDITS} replacements"
+                )));
+            }
+            items
+                .iter()
+                .map(|item| {
+                    Ok(RequestedEdit {
+                        old: arg_str(item, "old")?,
+                        new: arg_str(item, "new")?,
+                        replace_all: optional_bool(item, "replace_all")?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+        Some(_) => return Err(Error::InvalidRequest("edits must be an array".into())),
+    };
+    for edit in &edits {
+        if edit.old.is_empty() {
+            return Err(Error::InvalidRequest(
+                "'old' must not be empty; use write_file to create or replace a whole file".into(),
+            ));
+        }
+        if edit.old == edit.new {
+            return Err(Error::InvalidRequest(
+                "'old' and 'new' are identical; nothing to change".into(),
+            ));
+        }
+    }
+    Ok(edits)
 }
 
 /// Bytes `start..end` of the original content become `text`.
@@ -288,10 +377,12 @@ fn normalized_plan(
     let mut found = Vec::new();
     let mut index = 0;
     while index + width <= spans.len() {
+        let window = &spans[index..index + width];
         let matches = old_lines
             .iter()
-            .enumerate()
-            .all(|(offset, line)| span_text(content, spans[index + offset]).trim() == line.trim());
+            .zip(window)
+            .all(|(line, span)| span_text(content, *span).trim() == line.trim())
+            && same_relative_indentation(&old_lines, content, window);
         if matches {
             found.push(index);
             index += width;
@@ -331,6 +422,31 @@ fn normalized_plan(
         replacements,
         normalized: true,
     }))
+}
+
+/// Indentation width in columns, counting a tab as [`TAB_WIDTH`].
+fn indent_width(line: &str) -> usize {
+    indentation(line)
+        .chars()
+        .map(|c| if c == '\t' { TAB_WIDTH } else { 1 })
+        .sum()
+}
+
+/// Whether the file lines are indented like `old_lines` up to one uniform
+/// shift, so a whitespace-tolerant match cannot land at another nesting
+/// level (which matters for Python and YAML).
+fn same_relative_indentation(old_lines: &[String], content: &str, window: &[LineSpan]) -> bool {
+    let mut shifts = old_lines
+        .iter()
+        .zip(window)
+        .filter(|(line, _)| !line.trim().is_empty())
+        .map(|(line, span)| {
+            indent_width(span_text(content, *span)) as isize - indent_width(line) as isize
+        });
+    let Some(first) = shifts.next() else {
+        return true;
+    };
+    shifts.all(|shift| shift == first)
 }
 
 /// Shift `body` from the indentation the caller used in `old_lines` to the
@@ -472,9 +588,9 @@ fn block_lines(block: &str) -> Vec<&str> {
         .collect()
 }
 
-/// A unified-diff snippet of the first few replacements, plus the total
+/// A unified-diff snippet of the first `show` replacements, plus the total
 /// added and removed line counts.
-fn render_diff(content: &str, plan: &Plan) -> (String, usize, usize) {
+fn render_diff(content: &str, plan: &Plan, show: usize) -> (String, usize, usize) {
     let spans = line_spans(content);
     let line_of = |byte: usize| {
         spans
@@ -505,7 +621,7 @@ fn render_diff(content: &str, plan: &Plan) -> (String, usize, usize) {
         let new_lines = block_lines(&new_block);
         added += new_lines.len();
         removed += old_lines.len();
-        if index < MAX_HUNKS {
+        if index < show {
             let before = first.saturating_sub(CONTEXT_LINES)..first;
             let after = (last + 1).min(spans.len())..(last + 1 + CONTEXT_LINES).min(spans.len());
             let context = before.len() + after.len();
@@ -531,13 +647,6 @@ fn render_diff(content: &str, plan: &Plan) -> (String, usize, usize) {
             }
         }
         delta += new_lines.len() as i64 - old_lines.len() as i64;
-    }
-    if plan.replacements.len() > MAX_HUNKS {
-        let _ = writeln!(
-            diff,
-            "... {} more replacement(s) not shown",
-            plan.replacements.len() - MAX_HUNKS
-        );
     }
     (diff, added, removed)
 }
@@ -596,6 +705,27 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_tolerant_matches_keep_relative_indentation() {
+        let content = "if ready:\n    run()\nstop()\n";
+        // Same text, but `stop()` sits one level deeper than in the file.
+        let error = plan_edit(content, "if ready:\n    run()\n    stop()", "x", false).unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+        let error = plan_edit(content, "if ready:\nrun()", "x", false).unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+        // A uniform shift, or tabs for four spaces, still matches.
+        let shifted = plan_edit(
+            content,
+            "  if ready:\n      run()",
+            "  if go:\n      run()",
+            false,
+        )
+        .unwrap();
+        assert_eq!(apply(content, &shifted), "if go:\n    run()\nstop()\n");
+        let tabbed = plan_edit(content, "if ready:\n\trun()", "if go:\n\trun()", false).unwrap();
+        assert!(tabbed.normalized);
+    }
+
+    #[test]
     fn crlf_files_keep_their_line_endings() {
         let content = "one\r\ntwo\r\nthree\r\n";
         assert_eq!(
@@ -628,14 +758,14 @@ mod tests {
     fn diff_snippet_shows_context_and_counts() {
         let content = "1\n2\n3\n4\n5\n6\n7\n8\n";
         let plan = plan_edit(content, "5\n", "five\nFIVE\n", false).unwrap();
-        let (diff, added, removed) = render_diff(content, &plan);
+        let (diff, added, removed) = render_diff(content, &plan, MAX_HUNKS);
         assert_eq!((added, removed), (2, 1));
         assert_eq!(
             diff,
             "@@ -2,7 +2,8 @@\n 2\n 3\n 4\n-5\n+five\n+FIVE\n 6\n 7\n 8\n"
         );
         let partial = plan_edit(content, "3", "three", false).unwrap();
-        let (diff, added, removed) = render_diff(content, &partial);
+        let (diff, added, removed) = render_diff(content, &partial, MAX_HUNKS);
         assert_eq!((added, removed), (1, 1));
         assert!(diff.contains("-3\n+three\n"), "{diff}");
     }

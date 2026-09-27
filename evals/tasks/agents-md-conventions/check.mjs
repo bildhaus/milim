@@ -5,7 +5,10 @@ expect(read("src/legacy.js") === headFile("src/legacy.js"), "src/legacy.js was e
 
 if (expect(exists("src/title-case.js"), "rule 1: src/title-case.js missing")) {
   const source = read("src/title-case.js");
-  const doc = /\/\*\*([\s\S]*?)\*\/\s*export function titleCase\s*\(/.exec(source)?.[1] ?? "";
+  // The JSDoc block must sit directly above the export, written either as a
+  // function declaration or as a const-bound function.
+  const doc =
+    /\/\*\*((?:(?!\*\/)[\s\S])*)\*\/\s*export\s+(?:(?:async\s+)?function\s+titleCase\s*\(|const\s+titleCase\s*=)/.exec(source)?.[1] ?? "";
   expect(doc !== "", "rule 2: titleCase has no JSDoc block directly above it");
   expect(/@param\s/.test(doc), "rule 2: JSDoc missing @param");
   expect(/@returns?\s/.test(doc), "rule 2: JSDoc missing @returns");
@@ -14,7 +17,7 @@ if (expect(exists("src/title-case.js"), "rule 1: src/title-case.js missing")) {
 
 const exportsList = read("src/index.js")
   .split("\n")
-  .map((line) => /export \{ (\w+) \}/.exec(line)?.[1])
+  .map((line) => /export\s*\{\s*(\w+)\s*\}/.exec(line)?.[1])
   .filter(Boolean);
 expectEqual(exportsList, ["reverseWords", "titleCase", "truncate"], "rule 1: index.js exports in alphabetical order");
 

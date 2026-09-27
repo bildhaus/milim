@@ -71,6 +71,7 @@ fn catalog_cost_estimate_uses_cached_per_token_pricing() {
     let pricing = ModelPricing {
         prompt: Some("0.000001".into()),
         completion: Some("0.000002".into()),
+        ..Default::default()
     };
     let estimated = estimate_usage_cost_usd(&pricing, Usage::new(100, 25)).unwrap();
     assert!((estimated - 0.00015).abs() < f64::EPSILON);
@@ -928,6 +929,28 @@ fn account_runtime_resume_sends_only_messages_after_its_sync_cursor() {
         full
     );
 
+    // A milim tool-loop turn tells the runtime what it already did.
+    let with_work_log = [
+        json!({"id":"user-1","role":"user","content":"fix it"}).to_string(),
+        json!({
+            "id":"assistant-1",
+            "role":"assistant",
+            "content":"Fixed.",
+            "workLog": {"entries": [{"tool": "edit_file", "arguments": "path=src/a.rs", "outcome": "ok"}]}
+        })
+        .to_string(),
+        json!({"id":"user-2","role":"user","content":"thanks"}).to_string(),
+    ];
+    let synced = account_runtime_prompt(&with_work_log, None, None, "thanks");
+    assert!(
+        synced.contains("Assistant:\nFixed.\n\n<work_log>"),
+        "{synced}"
+    );
+    assert!(
+        synced.contains("- edit_file path=src/a.rs -> ok"),
+        "{synced}"
+    );
+
     let (prompt, instructions) = account_runtime_harness_prompt(
         "codex",
         "User:\nsecond".into(),
@@ -1161,6 +1184,7 @@ fn journal_fixture(mode: crate::privacy::PrivacyMode) -> (Arc<UserDataStore>, Ru
         privacy_mode: mode,
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
+        sent_step: Default::default(),
     };
     (store, journal)
 }
@@ -1398,6 +1422,7 @@ async fn run_ledger_scrubs_credentials_before_any_artifact_is_persisted() {
         privacy_mode: crate::privacy::PrivacyMode::Off,
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
+        sent_step: Default::default(),
     };
     let sentinel = "sentinel-device-credential-9381";
     let request = CompletionRequest {
@@ -1551,7 +1576,7 @@ async fn step_after_an_output_limit_cut_replays_plain_assistant_text() {
     };
     journal.commit_model_request(1, &request).await.unwrap();
     journal
-        .commit_model_response(1, "part one", "", &[], "length", Usage::default())
+        .commit_model_response(1, "part one", "", &[], "length", Usage::default(), None)
         .await
         .unwrap();
     let mut messages = Vec::new();
@@ -1594,6 +1619,7 @@ async fn subsequent_model_step_rebuilds_text_and_tool_context_from_sqlite() {
             &tool_calls,
             "tool_calls",
             Usage::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1664,6 +1690,7 @@ async fn privacy_block_rejection_leaves_no_request_ledger_rows() {
         privacy_mode: crate::privacy::PrivacyMode::Block,
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
+        sent_step: Default::default(),
     };
     let request = CompletionRequest {
         model: "fixture".into(),
@@ -2975,6 +3002,7 @@ async fn inbox_steering_requires_the_exact_active_steer_capable_run() {
         privacy_mode: crate::privacy::PrivacyMode::Off,
         thread_id: "thread-fixture".into(),
         run_id: "run-active".into(),
+        sent_step: Default::default(),
     };
     let mut messages = vec![ChatMessage::text("user", "active")];
     journal.prepare_model_step(1, &mut messages).await.unwrap();

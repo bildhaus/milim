@@ -1,0 +1,8 @@
+{
+  "id": "ambiguous-edit-retry-config",
+  "title": "Change one of eight identical lines",
+  "category": "precise-edit",
+  "prompt": "In production, the payments client gives up too early. Raise its retry attempts to 5 in config/clients.js. Do not change any other client or environment, and do not reformat the file.",
+  "timeout_s": 240,
+  "check": "node check.mjs"
+}

@@ -1,0 +1,47 @@
+diff --git a/src/handlers/usage.js b/src/handlers/usage.js
+index c3f8e7c..74765e8 100644
+--- a/src/handlers/usage.js
++++ b/src/handlers/usage.js
+@@ -1,4 +1,4 @@
+-import { errorResponse, ok } from "../lib/http.js";
++import { ok, quotaExceeded } from "../lib/http.js";
+ import { config } from "../lib/config.js";
+ import { db } from "../lib/db.js";
+ 
+@@ -7,10 +7,7 @@ export function recordUsage(req) {
+   const used = (db.get("usage", account)?.used ?? 0) + (req.body.units ?? 1);
+   const limit = db.get("plans", account)?.limit ?? config.defaultQuota;
+   if (used > limit) {
+-    return {
+-      status: 500,
+-      body: { error: { code: "QUOTA_EXCEEDED", message: "usage quota exceeded", details: { limit, used } } },
+-    };
++    return quotaExceeded(limit, used);
+   }
+   db.upsert("usage", account, { used });
+   return ok({ account, used, limit });
+diff --git a/src/lib/http.js b/src/lib/http.js
+index 2f5c1b0..95877b8 100644
+--- a/src/lib/http.js
++++ b/src/lib/http.js
+@@ -8,3 +8,7 @@ export function errorResponse(code, details = {}) {
+   const spec = ERRORS[code] ?? ERRORS.INTERNAL;
+   return { status: spec.status, body: { error: { code, message: spec.message, details } } };
+ }
++
++export function quotaExceeded(limit, used) {
++  return errorResponse("QUOTA_EXCEEDED", { limit, used });
++}
+diff --git a/test/usage.test.js b/test/usage.test.js
+index 139fdd9..3b14c45 100644
+--- a/test/usage.test.js
++++ b/test/usage.test.js
+@@ -11,3 +11,8 @@ test("usage under the quota is recorded", () => {
+   assert.equal(response.status, 200);
+   assert.equal(response.body.used, 4);
+ });
++
++test("usage over the quota is 429", () => {
++  db.upsert("plans", "acme", { limit: 1 });
++  assert.equal(handle({ method: "POST", path: "/usage/acme", body: { units: 2 } }).status, 429);
++});

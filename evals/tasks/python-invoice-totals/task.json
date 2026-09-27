@@ -1,0 +1,9 @@
+{
+  "id": "python-invoice-totals",
+  "title": "Fix CSV parsing and money rounding in a Python package",
+  "category": "python",
+  "prompt": "The tests in this Python project fail (`python3 -m unittest discover -s tests`). Fix the billing package so they pass. Do not change the existing tests, and use only the standard library.",
+  "timeout_s": 300,
+  "requires": ["python3"],
+  "check": "node check.mjs"
+}

@@ -269,6 +269,23 @@ pub(super) fn frozen_harness_instructions(config: &FrozenRunConfigV1) -> String 
     }
 }
 
+/// The instruction layers a native Milim run follows. As in the account
+/// runtime harness, an active Agent's instructions take the place of the
+/// thread's own instructions.
+pub(super) fn frozen_instruction_layers(
+    config: &FrozenRunConfigV1,
+) -> crate::workspace_context::InstructionLayers {
+    let (agent, thread) = match config.agent.as_ref() {
+        Some(agent) => (agent.system_prompt.clone(), String::new()),
+        None => (String::new(), config.instructions.clone()),
+    };
+    crate::workspace_context::InstructionLayers {
+        milim: config.global_instructions.clone(),
+        agent,
+        thread,
+    }
+}
+
 pub(super) fn compose_labeled_instructions(
     first_label: &str,
     first: &str,
@@ -391,4 +408,52 @@ fn default_control_tool_mode() -> String {
 
 fn default_control_skill_mode() -> String {
     "auto".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn instruction_layers_keep_global_and_let_an_agent_replace_thread_instructions() {
+        let mut config: FrozenRunConfigV1 = serde_json::from_value(json!({
+            "model": "model-x", "global_instructions": "Global.", "instructions": "Thread.",
+            "workspace": null, "privacy": "off", "approval_mode": "review", "plan_mode": false,
+            "sandbox": false, "computer_use": false, "memory": false, "delegation_policy": "ask",
+            "worker_model": "", "agent": null, "enabled_tools": [], "enabled_skills": [],
+            "attachments": [], "native_session_id": null, "reasoning_effort": null,
+            "adapter": "provider"
+        }))
+        .unwrap();
+        let layers = frozen_instruction_layers(&config);
+        assert_eq!(
+            (
+                layers.milim.as_str(),
+                layers.agent.as_str(),
+                layers.thread.as_str()
+            ),
+            ("Global.", "", "Thread.")
+        );
+        config.agent = Some(AgentSnapshotV1 {
+            id: "reviewer".into(),
+            name: "Reviewer".into(),
+            description: String::new(),
+            avatar: String::new(),
+            system_prompt: "Review carefully.".into(),
+            tool_mode: "all".into(),
+            enabled_tools: Vec::new(),
+            skill_mode: "auto".into(),
+            enabled_skills: Vec::new(),
+        });
+        let layers = frozen_instruction_layers(&config);
+        assert_eq!(
+            (
+                layers.milim.as_str(),
+                layers.agent.as_str(),
+                layers.thread.as_str()
+            ),
+            ("Global.", "Review carefully.", "")
+        );
+    }
 }

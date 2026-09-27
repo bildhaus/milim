@@ -1,0 +1,23 @@
+diff --git a/src/queue.js b/src/queue.js
+index 1f068ff..3861069 100644
+--- a/src/queue.js
++++ b/src/queue.js
+@@ -41,9 +41,16 @@ export class JobQueue {
+     }
+   }
+ 
+-  drain() {
++  async drain() {
++    await new Promise((resolve) => setTimeout(resolve, 100));
+     if (this.running === 0 && this.pending.length === 0) {
+-      return Promise.resolve(this.results);
++      return Promise.all(this.results.map(async (result) => {
++        try {
++          return { ok: true, value: await result.value };
++        } catch (error) {
++          return { ok: false, error: error.message };
++        }
++      }));
+     }
+     return new Promise((resolve) => this.waiters.push(resolve));
+   }

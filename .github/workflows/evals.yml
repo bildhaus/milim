@@ -1,11 +1,14 @@
-# Agent-quality evals (evals/README.md). Manual only: the suite drives a
-# running, paired milim desktop app through /control/v1, so it needs a
-# self-hosted runner where that app is already running and paired under
-# Settings > Mobile. GitHub-hosted runners have neither the app nor a model.
+# Agent-quality evals (evals/README.md), full suite on demand. The suite
+# drives a running milim desktop app (the real Tauri app, never a browser or
+# the Vite dev server) through /control/v1, so it needs a self-hosted runner
+# where that app is already running and paired under Settings > Mobile.
+# GitHub-hosted runners have neither the app nor a model; the scheduled
+# nightly subset instead launches the debug binary itself (nightly.yml).
 #
-# The runner machine must provide MILIM_CONTROL_URL and MILIM_DEVICE_KEY in
-# its own environment (for example the runner service's .env file). This
-# workflow wires no secrets and never runs on pull requests.
+# The runner machine must provide MILIM_CONTROL_URL and MILIM_DEVICE_KEY (or
+# MILIM_E2E_CONTROL_FILE for a debug build) in its own environment, for
+# example the runner service's .env file. This workflow wires no secrets and
+# never runs on pull requests.
 name: Evals
 
 on:
@@ -25,6 +28,11 @@ on:
         required: true
         type: string
         default: milim-evals
+      repeat:
+        description: Samples per task (MILIM_EVAL_REPEAT); compare repeated runs with compare.mjs
+        required: false
+        type: string
+        default: "1"
 
 permissions:
   contents: read
@@ -51,7 +59,9 @@ jobs:
         env:
           MILIM_EVAL_MODEL: ${{ inputs.model }}
           MILIM_EVAL_TASKS: ${{ inputs.tasks }}
+          MILIM_EVAL_REPEAT: ${{ inputs.repeat }}
           MILIM_EVAL_ARCHIVE: "1"
+          MILIM_EVAL_ARTIFACT_NAME: eval-results
         run: node evals/run.mjs --out evals/results/ci.json
       - uses: actions/upload-artifact@v6
         if: always()

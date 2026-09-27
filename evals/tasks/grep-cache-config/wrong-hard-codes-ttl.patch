@@ -1,0 +1,13 @@
+diff --git a/src/lib/cache.js b/src/lib/cache.js
+index 1c54cfa..1bc9b70 100644
+--- a/src/lib/cache.js
++++ b/src/lib/cache.js
+@@ -5,7 +5,7 @@ const entries = new Map();
+ 
+ /** Remember `value` for the configured TTL. */
+ export function remember(key, value) {
+-  const ttlMs = config.cacheTTL * 1000;
++  const ttlMs = 60 * 1000;
+   if (!(ttlMs > 0)) {
+     return value;
+   }

@@ -322,6 +322,10 @@ impl RunManager {
             mailbox_context: Vec::new(),
             preview_runtime: None,
         };
+        // Deliver under the target's thread lock, like a send or steer, so
+        // its run cannot finish between the check below and the delivery.
+        let target_lock = self.lock_for_thread(target_thread_id);
+        let _target_guard = target_lock.lock().await;
         let active_delivery = self
             .active
             .lock()

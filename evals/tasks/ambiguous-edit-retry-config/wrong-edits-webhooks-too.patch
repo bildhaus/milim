@@ -1,0 +1,19 @@
+diff --git a/config/clients.js b/config/clients.js
+index a7b519e..c65a80e 100644
+--- a/config/clients.js
++++ b/config/clients.js
+@@ -37,12 +37,12 @@ export const CLIENTS = {
+     payments: {
+       baseUrl: "https://payments.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     paymentWebhooks: {
+       baseUrl: "https://payment-webhooks.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     search: {
+       baseUrl: "https://search.internal",

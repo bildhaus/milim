@@ -20,8 +20,8 @@ use milim_core::{Error, Result};
 use milim_tools::{Tool, ToolConcurrency, ToolEffect};
 
 use super::{
-    arg_str, host_tool_scoping, optional_arg_str, optional_bool, optional_u64, root_of, safe_join,
-    HostCtx, PathDisplay,
+    arg_str, host_tool_scoping, optional_arg_str, optional_bool, optional_u64, path_description,
+    read_path, root_of, safe_join, HostCtx, PathDisplay,
 };
 
 /// Paths one `glob` call returns.
@@ -38,13 +38,15 @@ const RG_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_GREP_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// Leading bytes inspected to skip binary files.
 const SNIFF_BYTES: usize = 8192;
-/// Upper bound on the text of one `grep` reply.
-const MAX_GREP_OUTPUT_BYTES: usize = 256 * 1024;
+/// Upper bound on the text of one `grep` reply, within the model's budget.
+const MAX_GREP_OUTPUT_BYTES: usize = milim_tools::MODEL_TEXT_BUDGET_BYTES;
+/// Upper bound on the lines of one `grep` reply.
+const MAX_GREP_OUTPUT_LINES: usize = milim_tools::MODEL_TEXT_BUDGET_LINES;
 /// ripgrep output read before the search is cut short.
 const MAX_RG_STDOUT: usize = 16 * 1024 * 1024;
 const MAX_GIT_STDOUT: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS: u64 = 200;
-const MAX_MAX_RESULTS: u64 = 5000;
+const MAX_MAX_RESULTS: u64 = MAX_GREP_OUTPUT_LINES as u64;
 const MAX_CONTEXT: u64 = 10;
 const MAX_LINE_CHARS: usize = 2000;
 
@@ -399,7 +401,7 @@ pub(super) fn helper_search_path() -> &'static OsString {
     })
 }
 
-fn find_helper(program: &str) -> Option<PathBuf> {
+pub(super) fn find_helper(program: &str) -> Option<PathBuf> {
     let file = if cfg!(windows) {
         format!("{program}.exe")
     } else {
@@ -518,7 +520,7 @@ impl Tool for GlobTool {
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
             "pattern":{"type":"string","description":"Glob pattern relative to path."},
-            "path":{"type":"string","description":"Directory to search, default the working folder."}
+            "path":{"type":"string","description":format!("Directory to search, default the working folder. {}", path_description(&self.ctx))}
         },"required":["pattern"],"additionalProperties":false})
     }
     fn effect(&self) -> ToolEffect {
@@ -618,10 +620,79 @@ struct GrepRequest {
     target: PathBuf,
     target_is_file: bool,
     glob: Option<String>,
+    /// File-name globs of the requested `type`; empty searches every type.
+    types: Vec<String>,
     case_insensitive: bool,
     mode: GrepMode,
-    context: usize,
+    before: usize,
+    after: usize,
+    /// Leading results (files, or matching lines in content mode) to skip.
+    offset: usize,
     max_results: usize,
+}
+
+impl GrepRequest {
+    fn context(&self) -> bool {
+        self.before > 0 || self.after > 0
+    }
+
+    /// Whether a found file passes the `type` filter. A file named as the
+    /// search target is always searched, like ripgrep does.
+    fn type_matches(&self, path: &Path) -> bool {
+        if self.types.is_empty() || self.target_is_file {
+            return true;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        self.types
+            .iter()
+            .filter_map(|pattern| Glob::new(pattern).ok())
+            .any(|glob| glob.matches(&name))
+    }
+}
+
+/// File-name globs for a `type` filter: common ripgrep type names, or a bare
+/// extension such as `rs` or `.vue`.
+fn type_globs(name: &str) -> Result<Vec<String>> {
+    let globs: &[&str] = match name
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "rust" | "rs" => &["*.rs"],
+        "python" | "py" => &["*.py", "*.pyi"],
+        "javascript" | "js" => &["*.js", "*.jsx", "*.mjs", "*.cjs"],
+        "typescript" | "ts" => &["*.ts", "*.tsx", "*.mts", "*.cts"],
+        "go" => &["*.go"],
+        "java" => &["*.java"],
+        "kotlin" | "kt" => &["*.kt", "*.kts"],
+        "swift" => &["*.swift"],
+        "c" => &["*.c", "*.h"],
+        "cpp" | "c++" => &["*.cpp", "*.cc", "*.cxx", "*.hpp", "*.hh", "*.hxx", "*.h"],
+        "csharp" | "cs" => &["*.cs"],
+        "ruby" | "rb" => &["*.rb"],
+        "php" => &["*.php"],
+        "sh" | "shell" | "bash" => &["*.sh", "*.bash", "*.zsh"],
+        "markdown" | "md" => &["*.md", "*.markdown", "*.mdx"],
+        "json" => &["*.json", "*.jsonc"],
+        "yaml" | "yml" => &["*.yaml", "*.yml"],
+        "toml" => &["*.toml"],
+        "html" => &["*.html", "*.htm"],
+        "css" => &["*.css", "*.scss", "*.sass", "*.less"],
+        "sql" => &["*.sql"],
+        other => {
+            if other.is_empty() || !other.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return Err(Error::InvalidRequest(format!(
+                    "unknown type: {name} (use a language such as rust, py, ts, or a file extension)"
+                )));
+            }
+            return Ok(vec![format!("*.{other}")]);
+        }
+    };
+    Ok(globs.iter().map(ToString::to_string).collect())
 }
 
 /// One output line of content mode.
@@ -651,17 +722,21 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents with a regular expression (ripgrep syntax). Honors .gitignore and skips binary files and files over 2 MiB. output_mode: files_with_matches (default, newest first), content (path:line:text, with optional context lines), or count."
+        "Search file contents with a regular expression (ripgrep syntax). Honors .gitignore and skips binary files and files over 2 MiB. output_mode: files_with_matches (default, newest first), content (path:line:text, with optional context lines), or count. Filter files with glob and/or type; page through long results with offset."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
             "pattern":{"type":"string","description":"Regular expression to search for."},
-            "path":{"type":"string","description":"File or directory to search, default the working folder."},
+            "path":{"type":"string","description":format!("File or directory to search, default the working folder. {}", path_description(&self.ctx))},
             "glob":{"type":"string","description":"Only search files matching this glob, e.g. `*.rs` or `src/**/*.ts`."},
+            "type":{"type":"string","description":"Only search files of this type: a language (rust, py, js, ts, go, java, c, cpp, md, json, yaml, ...) or a file extension."},
             "case_insensitive":{"type":"boolean","description":"Match case-insensitively. Default false."},
             "output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"Default files_with_matches."},
-            "context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context around each match in content mode. Default 0."},
-            "max_results":{"type":"integer","minimum":1,"maximum":MAX_MAX_RESULTS,"description":"Maximum files (or matching lines in content mode). Default 200."}
+            "context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context before and after each match in content mode (like grep -C). Default 0."},
+            "before_context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context before each match (like grep -B); overrides context."},
+            "after_context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context after each match (like grep -A); overrides context."},
+            "offset":{"type":"integer","minimum":0,"description":"Skip this many results (files, or matching lines in content mode) to page through long results. Default 0."},
+            "max_results":{"type":"integer","minimum":1,"maximum":MAX_MAX_RESULTS,"description":"Maximum files (or matching lines in content mode) per call. Default 200."}
         },"required":["pattern"],"additionalProperties":false})
     }
     fn effect(&self) -> ToolEffect {
@@ -711,8 +786,13 @@ impl Tool for GrepTool {
                 }
             }
         };
-        if truncated {
-            out.push_str("\n(Results were truncated. Narrow the pattern, path, or glob.)");
+        if let Some(next) = result["next_offset"].as_u64() {
+            let _ = write!(
+                out,
+                "\n(More results exist. Continue with offset={next}, or narrow the pattern, path, glob, or type.)"
+            );
+        } else if truncated {
+            out.push_str("\n(Results were truncated. Narrow the pattern, path, glob, or type.)");
         }
         if result["literal"].as_bool() == Some(true) {
             out.push_str(
@@ -729,7 +809,8 @@ impl Tool for GrepTool {
         }
         let rel = optional_arg_str(&args, "path")?.unwrap_or("");
         let root = root_of(&self.ctx.ws)?;
-        let target = safe_join(&self.ctx.ws, rel)?;
+        // Like read_file, grep may search saved oversized tool output.
+        let target = read_path(&self.ctx.ws, rel)?;
         let target_is_file = std::fs::metadata(&target)?.is_file();
         let mode = match optional_arg_str(&args, "output_mode")?.unwrap_or("files_with_matches") {
             "content" => GrepMode::Content,
@@ -742,13 +823,21 @@ impl Tool for GrepTool {
             }
         };
         let context = optional_u64(&args, "context", 0)?;
-        if context > MAX_CONTEXT {
+        let before = optional_u64(&args, "before_context", context)?;
+        let after = optional_u64(&args, "after_context", context)?;
+        if context.max(before).max(after) > MAX_CONTEXT {
             return Err(Error::InvalidRequest(format!(
-                "context must be at most {MAX_CONTEXT}"
+                "context lines must be at most {MAX_CONTEXT}"
             )));
         }
         let max_results =
             optional_u64(&args, "max_results", DEFAULT_MAX_RESULTS)?.clamp(1, MAX_MAX_RESULTS);
+        let offset = usize::try_from(optional_u64(&args, "offset", 0)?).unwrap_or(usize::MAX);
+        let types = optional_arg_str(&args, "type")?
+            .filter(|name| !name.trim().is_empty())
+            .map(type_globs)
+            .transpose()?
+            .unwrap_or_default();
         let (search, literal) = search_pattern(pattern);
         let request = GrepRequest {
             pattern: search,
@@ -757,9 +846,12 @@ impl Tool for GrepTool {
             glob: optional_arg_str(&args, "glob")?
                 .filter(|glob| !glob.trim().is_empty())
                 .map(ToString::to_string),
+            types,
             case_insensitive: optional_bool(&args, "case_insensitive")?,
             mode,
-            context: context as usize,
+            before: before as usize,
+            after: after as usize,
+            offset,
             max_results: max_results as usize,
         };
         let result = tokio::task::spawn_blocking(move || {
@@ -829,6 +921,12 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
     }
     if let Some(glob) = &request.glob {
         command.arg("--glob").arg(glob);
+    } else {
+        // With a glob as well, the type is applied to the results instead:
+        // ripgrep would accept a file matching either.
+        for pattern in &request.types {
+            command.arg("--glob").arg(pattern);
+        }
     }
     // Later globs take precedence, so this exclusion stays last.
     command.args(["--glob", "!.git"]);
@@ -841,8 +939,15 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
         }
         GrepMode::Content => {
             command.args(["--json", "--sort", "path"]);
-            if request.context > 0 {
-                command.arg("--context").arg(request.context.to_string());
+            if request.before > 0 {
+                command
+                    .arg("--before-context")
+                    .arg(request.before.to_string());
+            }
+            if request.after > 0 {
+                command
+                    .arg("--after-context")
+                    .arg(request.after.to_string());
             }
         }
     }
@@ -877,6 +982,7 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
                 .map(|path| path.trim_matches('\n'))
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from)
+                .filter(|path| request.type_matches(path))
                 .collect(),
         ),
         GrepMode::Count => Findings::Counts(
@@ -886,6 +992,7 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
                     let (path, count) = line.split_once('\0')?;
                     Some((PathBuf::from(path), count.trim().parse().ok()?))
                 })
+                .filter(|(path, _)| request.type_matches(path))
                 .collect(),
         ),
         GrepMode::Content => Findings::Content(
@@ -907,6 +1014,7 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
                         matched,
                     })
                 })
+                .filter(|hit| request.type_matches(&hit.path))
                 .collect(),
         ),
     };
@@ -926,6 +1034,7 @@ fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
         let mut listed = list_files(&request.target)
             .into_iter()
             .filter(|file| filter.as_ref().is_none_or(|glob| glob.matches(&file.rel)))
+            .filter(|file| request.type_matches(&file.path))
             .collect::<Vec<_>>();
         listed.sort_by(|a, b| a.rel.cmp(&b.rel));
         listed.into_iter().map(|file| file.path).collect()
@@ -972,8 +1081,8 @@ fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
                     .collect::<Vec<_>>();
                 let mut next = 0;
                 for (position, index) in matches.iter().enumerate() {
-                    let start = index.saturating_sub(request.context).max(next);
-                    let end = (index + request.context + 1).min(lines.len());
+                    let start = index.saturating_sub(request.before).max(next);
+                    let end = (index + request.after + 1).min(lines.len());
                     let end = matches
                         .get(position + 1)
                         .map(|following| end.min(*following))
@@ -989,7 +1098,7 @@ fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
                     next = end;
                     matched_lines += 1;
                 }
-                if matched_lines > request.max_results {
+                if matched_lines > request.offset.saturating_add(request.max_results) {
                     return Ok((Findings::Content(hits), false));
                 }
             }
@@ -1012,13 +1121,37 @@ fn cut_line(text: &str) -> String {
     }
 }
 
+/// The entries of one page: up to `limit` after skipping `offset`, stopping
+/// early at the reply's byte budget. Returns the page and the next offset
+/// when more entries remain.
+fn page<T>(
+    entries: Vec<T>,
+    offset: usize,
+    limit: usize,
+    size: impl Fn(&T) -> usize,
+) -> (Vec<T>, Option<usize>) {
+    let total = entries.len();
+    let mut bytes = 0;
+    let page = entries
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .take_while(|entry| {
+            bytes += size(entry) + 1;
+            bytes <= MAX_GREP_OUTPUT_BYTES
+        })
+        .collect::<Vec<_>>();
+    let next = offset.saturating_add(page.len());
+    (page, (next < total).then_some(next))
+}
+
 fn render_findings(
     (findings, cut_short): (Findings, bool),
     request: &GrepRequest,
     display: &PathDisplay,
     engine: &str,
 ) -> Value {
-    let limit = request.max_results;
+    let (offset, limit) = (request.offset, request.max_results);
     match findings {
         Findings::Files(files) => {
             let mut files = files
@@ -1032,70 +1165,119 @@ fn render_findings(
                 .collect::<Vec<_>>();
             files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             let count = files.len();
-            files.truncate(limit);
+            let (files, next_offset) = page(files, offset, limit, |(_, path)| path.len());
             json!({
                 "mode": "files_with_matches",
                 "files": files.into_iter().map(|(_, path)| path).collect::<Vec<_>>(),
                 "count": count,
-                "truncated": cut_short || count > limit,
+                "offset": offset,
+                "next_offset": next_offset,
+                "truncated": cut_short || next_offset.is_some(),
                 "engine": engine,
             })
         }
         Findings::Counts(counts) => {
             let total: u64 = counts.iter().map(|(_, count)| count).sum();
             let files = counts.len();
+            let counts = counts
+                .iter()
+                .map(|(path, count)| (display.show(path), *count))
+                .collect::<Vec<_>>();
+            let (counts, next_offset) = page(counts, offset, limit, |(path, _)| path.len() + 8);
             json!({
                 "mode": "count",
                 "counts": counts
                     .iter()
-                    .take(limit)
-                    .map(|(path, count)| json!({"path": display.show(path), "count": count}))
+                    .map(|(path, count)| json!({"path": path, "count": count}))
                     .collect::<Vec<_>>(),
                 "total": total,
                 "files": files,
-                "truncated": cut_short || files > limit,
+                "offset": offset,
+                "next_offset": next_offset,
+                "truncated": cut_short || next_offset.is_some(),
                 "engine": engine,
             })
         }
         Findings::Content(hits) => {
+            // Skip `offset` matching lines, keeping the leading context of
+            // the first match shown.
+            let first = hits
+                .iter()
+                .enumerate()
+                .filter(|(_, hit)| hit.matched)
+                .nth(offset)
+                .map(|(index, _)| index);
+            let mut start = first.unwrap_or(hits.len());
+            if let Some(first) = first {
+                while start > 0 && first - start < request.before {
+                    let (previous, current) = (&hits[start - 1], &hits[start]);
+                    if previous.matched
+                        || previous.path != current.path
+                        || previous.line + 1 != current.line
+                    {
+                        break;
+                    }
+                    start -= 1;
+                }
+            }
             let mut output = String::new();
+            let mut lines = 0;
             let mut shown = 0;
-            let mut truncated = cut_short;
+            let mut stopped_at = None;
             let mut previous: Option<(&Path, u64)> = None;
+            let mut last_match: Option<(&Path, u64)> = None;
             let mut shown_path = (PathBuf::new(), String::new());
-            for hit in &hits {
-                if hit.matched && shown == limit {
-                    truncated = true;
+            for (index, hit) in hits.iter().enumerate().skip(start) {
+                // A full page still takes the trailing context of its last match.
+                let trailing = last_match.is_some_and(|(path, line)| {
+                    path == hit.path && hit.line <= line + request.after as u64
+                });
+                if shown == limit && (hit.matched || !trailing) {
+                    stopped_at = Some(index);
                     break;
-                }
-                if output.len() > MAX_GREP_OUTPUT_BYTES {
-                    truncated = true;
-                    break;
-                }
-                let contiguous =
-                    previous.is_some_and(|(path, line)| path == hit.path && line + 1 == hit.line);
-                if request.context > 0 && previous.is_some() && !contiguous {
-                    output.push_str("--\n");
                 }
                 if shown_path.0 != hit.path {
                     shown_path = (hit.path.clone(), display.show(&hit.path));
                 }
                 let separator = if hit.matched { ':' } else { '-' };
-                let _ = writeln!(
-                    output,
-                    "{}{separator}{}{separator}{}",
+                let line = format!(
+                    "{}{separator}{}{separator}{}\n",
                     shown_path.1,
                     hit.line,
                     cut_line(&hit.text)
                 );
+                let contiguous =
+                    previous.is_some_and(|(path, line)| path == hit.path && line + 1 == hit.line);
+                let divider = request.context() && previous.is_some() && !contiguous;
+                if shown > 0
+                    && (output.len() + line.len() + 3 > MAX_GREP_OUTPUT_BYTES
+                        || lines + 2 > MAX_GREP_OUTPUT_LINES)
+                {
+                    stopped_at = Some(index);
+                    break;
+                }
+                if divider {
+                    output.push_str("--\n");
+                    lines += 1;
+                }
+                output.push_str(&line);
+                lines += 1;
                 shown += usize::from(hit.matched);
                 previous = Some((&hit.path, hit.line));
+                if hit.matched {
+                    last_match = previous;
+                }
             }
+            let next_offset = stopped_at
+                .is_some_and(|index| hits[index..].iter().any(|hit| hit.matched))
+                .then_some(offset + shown);
             json!({
                 "mode": "content",
                 "output": output.trim_end(),
                 "matches": shown,
-                "truncated": truncated,
+                "offset": offset,
+                "next_offset": next_offset,
+                "truncated": cut_short || next_offset.is_some(),
                 "engine": engine,
             })
         }
@@ -1138,9 +1320,12 @@ mod tests {
             target: target.to_path_buf(),
             target_is_file: false,
             glob: None,
+            types: Vec::new(),
             case_insensitive: false,
             mode,
-            context: 0,
+            before: 0,
+            after: 0,
+            offset: 0,
             max_results: 200,
         }
     }
@@ -1269,7 +1454,7 @@ mod tests {
         assert_eq!(counts, [(root.join("b.txt"), 1)]);
 
         let mut content = request(&root, "beta", GrepMode::Content);
-        content.context = 1;
+        (content.before, content.after) = (1, 1);
         content.glob = Some("*.rs".into());
         let found = grep_builtin(&content).unwrap();
         let rendered = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
@@ -1292,13 +1477,88 @@ mod tests {
         let root = temp_dir();
         write(&root, "a.txt", "hit\n2\n3\n4\n5\nhit\n");
         let mut content = request(&root, "hit", GrepMode::Content);
-        content.context = 1;
+        (content.before, content.after) = (1, 1);
         let found = grep_builtin(&content).unwrap();
         let rendered = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
         assert_eq!(
             rendered["output"],
             "a.txt:1:hit\na.txt-2-2\n--\na.txt-5-5\na.txt:6:hit"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_pages_continue_from_their_offset_with_asymmetric_context() {
+        let root = temp_dir();
+        write(&root, "a.txt", "x\nhit 1\ny\nz\nhit 2\nw\nhit 3\n");
+        let mut content = request(&root, "hit", GrepMode::Content);
+        (content.before, content.after) = (1, 0);
+        content.max_results = 2;
+        let found = grep_builtin(&content).unwrap();
+        let first = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
+        assert_eq!(
+            first["output"],
+            "a.txt-1-x\na.txt:2:hit 1\n--\na.txt-4-z\na.txt:5:hit 2"
+        );
+        assert_eq!(first["next_offset"], 2);
+        content.offset = 2;
+        let found = grep_builtin(&content).unwrap();
+        let second = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
+        assert_eq!(second["output"], "a.txt-6-w\na.txt:7:hit 3");
+        assert_eq!(second["next_offset"], Value::Null);
+        assert_eq!(second["truncated"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_pages_and_type_filters() {
+        let root = temp_dir();
+        write(&root, "a.rs", "needle\n");
+        write(&root, "b.py", "needle\n");
+        write(&root, "c.pyi", "needle\n");
+        let mut files = request(&root, "needle", GrepMode::FilesWithMatches);
+        files.types = type_globs("python").unwrap();
+        let found = grep_builtin(&files).unwrap();
+        let mut listed = render_findings(found, &files, &PathDisplay::new(&root), "builtin")
+            ["files"]
+            .as_array()
+            .unwrap()
+            .clone();
+        listed.sort_by_key(|path| path.as_str().unwrap().to_string());
+        assert_eq!(listed, [json!("b.py"), json!("c.pyi")]);
+        assert_eq!(type_globs(".vue").unwrap(), ["*.vue"]);
+        assert!(type_globs("no such type").is_err());
+
+        files.types = Vec::new();
+        files.max_results = 2;
+        let found = grep_builtin(&files).unwrap();
+        let rendered = render_findings(found, &files, &PathDisplay::new(&root), "builtin");
+        assert_eq!(rendered["files"].as_array().unwrap().len(), 2);
+        assert_eq!(rendered["next_offset"], 2);
+        files.offset = 2;
+        let found = grep_builtin(&files).unwrap();
+        let rendered = render_findings(found, &files, &PathDisplay::new(&root), "builtin");
+        assert_eq!(rendered["files"].as_array().unwrap().len(), 1);
+        assert_eq!(rendered["next_offset"], Value::Null);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_output_stays_within_the_model_budget() {
+        let root = temp_dir();
+        let body = (0..3000)
+            .map(|index| format!("match {index} {}", "x".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(&root, "big.txt", &body);
+        let mut content = request(&root, "match", GrepMode::Content);
+        content.max_results = MAX_MAX_RESULTS as usize;
+        let found = grep_builtin(&content).unwrap();
+        let rendered = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
+        let output = rendered["output"].as_str().unwrap();
+        assert!(output.len() <= MAX_GREP_OUTPUT_BYTES, "{}", output.len());
+        let shown = rendered["matches"].as_u64().unwrap();
+        assert_eq!(rendered["next_offset"], shown);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1316,7 +1576,7 @@ mod tests {
             GrepMode::Content,
         ] {
             let mut search = request(&root, "fn|let", mode);
-            search.context = 1;
+            (search.before, search.after) = (1, 2);
             let display = PathDisplay::new(&root);
             let ripgrep = render_findings(
                 grep_ripgrep(rg, &search).unwrap().unwrap(),
@@ -1326,6 +1586,16 @@ mod tests {
             );
             let builtin = render_findings(grep_builtin(&search).unwrap(), &search, &display, "");
             assert_eq!(ripgrep, builtin, "{mode:?}");
+            search.types = type_globs("rust").unwrap();
+            search.offset = 1;
+            let ripgrep = render_findings(
+                grep_ripgrep(rg, &search).unwrap().unwrap(),
+                &search,
+                &display,
+                "",
+            );
+            let builtin = render_findings(grep_builtin(&search).unwrap(), &search, &display, "");
+            assert_eq!(ripgrep, builtin, "{mode:?} with type and offset");
         }
         let _ = std::fs::remove_dir_all(root);
     }

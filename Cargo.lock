@@ -1399,6 +1399,7 @@ name = "milim-tools"
 version = "0.2.73"
 dependencies = [
  "async-trait",
+ "base64",
  "milim-core",
  "reqwest",
  "serde",

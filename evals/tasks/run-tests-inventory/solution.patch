@@ -1,0 +1,38 @@
+diff --git a/src/inventory.js b/src/inventory.js
+index d8c1359..a76ed88 100644
+--- a/src/inventory.js
++++ b/src/inventory.js
+@@ -14,10 +14,10 @@ export class Inventory {
+ 
+   /** Reserve `quantity` units, or throw without reserving anything. */
+   reserve(sku, quantity) {
+-    this.reserved.set(sku, (this.reserved.get(sku) ?? 0) + quantity);
+-    if (this.available(sku) <= 0) {
++    if (quantity > this.available(sku)) {
+       throw new Error(`insufficient stock for ${sku}`);
+     }
++    this.reserved.set(sku, (this.reserved.get(sku) ?? 0) + quantity);
+   }
+ 
+   /** Ship reserved units: they leave both stock and the reservation. */
+@@ -27,5 +27,6 @@ export class Inventory {
+       throw new Error(`only ${reserved} reserved for ${sku}`);
+     }
+     this.reserved.set(sku, reserved - quantity);
++    this.stock.set(sku, (this.stock.get(sku) ?? 0) - quantity);
+   }
+ }
+diff --git a/src/report.js b/src/report.js
+index cbc9897..ac0ee65 100644
+--- a/src/report.js
++++ b/src/report.js
+@@ -4,7 +4,8 @@ export function weeklyTotals(shipments) {
+   for (const { date, quantity } of shipments) {
+     const day = new Date(`${date}T00:00:00Z`);
+     const monday = new Date(day);
+-    monday.setUTCDate(day.getUTCDate() - day.getUTCDay() + 1);
++    // getUTCDay() is 0 on Sunday, which belongs to the week that began six days earlier.
++    monday.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+     const key = monday.toISOString().slice(0, 10);
+     totals.set(key, (totals.get(key) ?? 0) + quantity);
+   }

@@ -1,0 +1,9 @@
+{
+  "name": "fxkit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-rates.mjs --input data/rates.csv --out src/generated/rates.js",
+    "test": "node --test test/"
+  }
+}

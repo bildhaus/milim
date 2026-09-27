@@ -27,8 +27,8 @@ use milim_core::{Error, Result};
 
 pub use builtins::{CurrentTimeTool, EchoTool, HttpFetchTool, RenderChartTool};
 pub use fs::{
-    atomic_write, fs_tools, read_text_range, resolve_workspace_path, ListDirTool, ReadFileTool,
-    WriteFileTool,
+    atomic_write, fs_tools, read_file_result, read_text_range, resolve_workspace_path, ListDirTool,
+    ReadFileTool, WriteFileTool, PATH_DESCRIPTION,
 };
 pub use todo::{TodoItem, TodoStatus, TodoWriteTool};
 pub use web_search::{
@@ -187,8 +187,19 @@ pub struct ToolExecutionSpec {
 
 pub struct ToolExecutionPipeline;
 
+/// Tool calls running at once across every run in the process.
 const PROCESS_TOOL_LIMIT: u32 = 16;
+/// Tool calls running at once within one run. An exclusive call takes all of
+/// them, so it never overlaps another call of the same run.
 const RUN_TOOL_LIMIT: u32 = 4;
+
+/// Model-visible text budget for one tool reply. Tools that page their output
+/// (`read_file`, `grep`, `http_fetch`) stay inside it so the agent loop's
+/// head+tail replay cut (50 KiB / 2000 lines) never removes the middle of a
+/// page while its continuation hint points past the gap.
+pub const MODEL_TEXT_BUDGET_BYTES: usize = 40 * 1024;
+/// Line counterpart of [`MODEL_TEXT_BUDGET_BYTES`], leaving room for hints.
+pub const MODEL_TEXT_BUDGET_LINES: usize = 1000;
 
 fn process_tool_permits() -> &'static Arc<tokio::sync::Semaphore> {
     static LIMIT: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -210,12 +221,15 @@ impl ToolExecutionPipeline {
             (ToolEffect::ReadOnly, ToolConcurrency::Parallel) => ToolConcurrency::Parallel,
             _ => ToolConcurrency::Exclusive,
         };
+        // Exclusivity is per run: an exclusive call holds its own run's
+        // permits, while the process-wide semaphore only caps how many calls
+        // run at once, so a long command in one run never stalls another.
         let (permits, process_permits) = if tool.waits_on_other_runs() {
             (0, 0)
         } else if concurrency == ToolConcurrency::Parallel {
             (1, 1)
         } else {
-            (RUN_TOOL_LIMIT, PROCESS_TOOL_LIMIT)
+            (RUN_TOOL_LIMIT, 1)
         };
         let _run_guard = run_permits
             .acquire_many_owned(permits)
@@ -235,7 +249,6 @@ impl ToolExecutionPipeline {
                     request.name, deadline
                 ))
             })??;
-        let raw = normalize_tool_output(raw, request.output_limit_bytes);
         Ok(ToolExecutionResult {
             raw,
             effect,
@@ -246,17 +259,118 @@ impl ToolExecutionPipeline {
     }
 }
 
-fn normalize_tool_output(value: Value, limit: usize) -> Value {
-    let encoded = serde_json::to_vec(&value).unwrap_or_default();
-    if encoded.len() <= limit.max(1024) {
+/// Bound an encoded tool result to `limit` bytes. Oversized string fields are
+/// cut to their head and tail around an omission marker, largest first, so
+/// the result keeps its shape; only a result that still does not fit becomes
+/// a JSON preview. A top-level `image` (see `split_tool_image` in the agent
+/// loop) is left whole: it travels to the model as its own message.
+fn normalize_tool_output(mut value: Value, limit: usize) -> Value {
+    let image = value
+        .as_object_mut()
+        .and_then(|object| object.remove("image"));
+    let mut value = bound_encoded(value, limit.max(1024));
+    if let (Some(image), Some(object)) = (image, value.as_object_mut()) {
+        object.insert("image".into(), image);
+    }
+    value
+}
+
+/// Room [`cut_middle`]'s omission marker takes in an encoded string.
+const CUT_MARKER_BYTES: usize = 48;
+
+fn bound_encoded(value: Value, limit: usize) -> Value {
+    let encoded_len = |value: &Value| serde_json::to_vec(value).map_or(0, |encoded| encoded.len());
+    let original = encoded_len(&value);
+    if original <= limit {
         return value;
     }
-    let preview = String::from_utf8_lossy(&encoded[..limit.max(1024).min(encoded.len())]);
+    // Cut every string longer than one shared cap, so a short final error
+    // survives next to a long log. JSON escaping can make one pass fall
+    // short; later passes cut the original again with a larger target.
+    let mut reduction = original - limit;
+    for _ in 0..4 {
+        let mut shrunk = value.clone();
+        let mut strings = Vec::new();
+        collect_strings(&mut shrunk, &mut strings);
+        let Some(cap) = string_cap(&strings, reduction) else {
+            break;
+        };
+        for text in strings {
+            if text.len() > cap + CUT_MARKER_BYTES {
+                *text = cut_middle(text, cap);
+            }
+        }
+        let size = encoded_len(&shrunk);
+        if size <= limit {
+            return shrunk;
+        }
+        reduction += size - limit;
+    }
+    let encoded = serde_json::to_vec(&value).unwrap_or_default();
+    let preview = String::from_utf8_lossy(&encoded[..limit.min(encoded.len())]);
     serde_json::json!({
         "truncated": true,
-        "original_bytes": encoded.len(),
+        "original_bytes": original,
         "preview": preview,
     })
+}
+
+fn collect_strings<'a>(value: &'a mut Value, out: &mut Vec<&'a mut String>) {
+    match value {
+        Value::String(text) => out.push(text),
+        Value::Array(items) => items.iter_mut().for_each(|item| collect_strings(item, out)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|item| collect_strings(item, out)),
+        _ => {}
+    }
+}
+
+/// The largest per-string length whose cuts save at least `reduction` bytes,
+/// or `None` when even empty strings would not.
+fn string_cap(strings: &[&mut String], reduction: usize) -> Option<usize> {
+    let saved = |cap: usize| {
+        strings
+            .iter()
+            .map(|text| text.len().saturating_sub(cap + CUT_MARKER_BYTES))
+            .sum::<usize>()
+    };
+    let longest = strings.iter().map(|text| text.len()).max()?;
+    if saved(0) < reduction {
+        return None;
+    }
+    let (mut low, mut high) = (0, longest);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if saved(middle) >= reduction {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Some(low)
+}
+
+/// Keep about `keep` bytes of `text`, half from each end, around a marker
+/// naming how much was left out.
+pub fn cut_middle(text: &str, keep: usize) -> String {
+    if text.len() <= keep {
+        return text.to_string();
+    }
+    let mut head = keep / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - keep / 2;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n[… {} bytes omitted …]\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
 }
 
 /// Interactive UI metadata carried with an agent tool event.
@@ -625,22 +739,26 @@ impl ToolRegistry {
     /// Invoke a tool by name.
     pub async fn call(&self, name: &str, args: Value) -> Result<Value> {
         let tool = self.tool(name)?;
+        let request = ToolExecutionRequest::new(name, args);
+        let limit = request.output_limit_bytes;
         let result = ToolExecutionPipeline::execute(
             tool.clone(),
-            ToolExecutionRequest::new(name, args),
+            request,
             self.run_permits.clone(),
             ToolExecutionContext::default(),
         )
         .await?;
-        Ok(tool.call_result(&result.raw))
+        Ok(normalize_tool_output(tool.call_result(&result.raw), limit))
     }
 
     /// Invoke a tool while preserving private UI data outside model context.
     pub async fn call_for_agent(&self, name: &str, args: Value) -> Result<ToolAgentResult> {
         let tool = self.tool(name)?;
+        let request = ToolExecutionRequest::new(name, args);
+        let limit = request.output_limit_bytes;
         let result = ToolExecutionPipeline::execute(
             tool.clone(),
-            ToolExecutionRequest::new(name, args),
+            request,
             self.run_permits.clone(),
             ToolExecutionContext::default(),
         )
@@ -648,9 +766,11 @@ impl ToolRegistry {
         let raw = result.raw;
         let ui = tool.ui();
         Ok(ToolAgentResult {
-            result: tool.model_result(&raw),
+            result: normalize_tool_output(tool.model_result(&raw), limit),
+            // Rendered from the complete result: the agent loop bounds the
+            // text itself and saves the full version for later reads.
             model_text: tool.model_text(&raw),
-            app_result: ui.is_some().then_some(raw),
+            app_result: ui.is_some().then(|| normalize_tool_output(raw, limit)),
             ui,
         })
     }
@@ -663,6 +783,30 @@ impl ToolRegistry {
     /// Input schema of one tool, resolving aliases the same way as calls.
     pub fn input_schema(&self, name: &str) -> Option<Value> {
         self.tool(name).ok().map(|tool| tool.input_schema())
+    }
+
+    /// The registered name `name` resolves to (itself, or the tool an alias
+    /// such as a renamed MCP tool's earlier name points at). Policy keyed by
+    /// tool name (hooks, approval allowances) can match on this.
+    pub fn canonical_name(&self, name: &str) -> Option<String> {
+        self.tool(name).ok().map(|tool| tool.name().to_string())
+    }
+
+    /// Every other name the tool called `name` answers to: its canonical
+    /// name and all its aliases, excluding `name` itself.
+    pub fn other_names(&self, name: &str) -> Vec<String> {
+        let Some(canonical) = self.canonical_name(name) else {
+            return Vec::new();
+        };
+        std::iter::once(canonical.clone())
+            .chain(
+                self.aliases
+                    .iter()
+                    .filter(|(_, target)| **target == canonical)
+                    .map(|(alias, _)| alias.clone()),
+            )
+            .filter(|other| other != name)
+            .collect()
     }
 
     /// Canonical names of all registered tools, ordered by name.
@@ -859,6 +1003,14 @@ mod tests {
         let filtered = registry.filtered(&["legacy".to_string()]);
         assert_eq!(filtered.list()[0].name, "canonical");
         assert_eq!(
+            registry.canonical_name("legacy").as_deref(),
+            Some("canonical")
+        );
+        assert_eq!(registry.canonical_name("missing"), None);
+        assert_eq!(registry.other_names("canonical"), vec!["legacy"]);
+        assert_eq!(registry.other_names("legacy"), vec!["canonical"]);
+        assert!(registry.other_names("missing").is_empty());
+        assert_eq!(
             filtered.call("legacy", json!({})).await.unwrap()["ok"],
             true
         );
@@ -960,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_enforces_deadline_and_output_limit_without_cancelling_a_sibling() {
+    async fn pipeline_enforces_deadline_without_cancelling_a_sibling() {
         let (slow, _) = timed_tool(
             "slow",
             ToolEffect::ReadOnly,
@@ -982,17 +1134,130 @@ mod tests {
             permits.clone(),
             ToolExecutionContext::default(),
         );
-        let mut good_request = ToolExecutionRequest::new("good", json!({}));
-        good_request.output_limit_bytes = 1024;
         let good_call = ToolExecutionPipeline::execute(
             good,
-            good_request,
+            ToolExecutionRequest::new("good", json!({})),
             permits,
             ToolExecutionContext::default(),
         );
         let (slow_result, good_result) = tokio::join!(slow_call, good_call);
         assert!(slow_result.unwrap_err().to_string().contains("deadline"));
-        assert_eq!(good_result.unwrap().raw["truncated"], true);
+        assert_eq!(good_result.unwrap().raw["name"], "good");
+    }
+
+    #[tokio::test]
+    async fn exclusive_calls_in_one_run_do_not_block_other_runs() {
+        let (slow, _) = timed_tool(
+            "slow",
+            ToolEffect::Command,
+            ToolConcurrency::Exclusive,
+            Duration::from_millis(400),
+        );
+        let (fast, _) = timed_tool(
+            "fast",
+            ToolEffect::Mutating,
+            ToolConcurrency::Exclusive,
+            Duration::ZERO,
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register(slow);
+        registry.register(fast);
+        let first_run = registry.scoped_for_run();
+        let second_run = registry.scoped_for_run();
+        let slow_call = tokio::spawn(async move { first_run.call("slow", json!({})).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = Instant::now();
+        second_run.call("fast", json!({})).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "another run's exclusive call waited {:?}",
+            started.elapsed()
+        );
+        assert!(!slow_call.is_finished());
+        slow_call.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn exclusive_calls_across_runs_share_the_process_cap() {
+        let (tool, maximum) = timed_tool(
+            "exclusive",
+            ToolEffect::Command,
+            ToolConcurrency::Exclusive,
+            Duration::from_millis(30),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register(tool);
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..(PROCESS_TOOL_LIMIT as usize + 8) {
+            let run = registry.scoped_for_run();
+            tasks.spawn(async move { run.call("exclusive", json!({})).await });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let maximum = maximum.load(Ordering::SeqCst);
+        assert!(maximum > 1, "separate runs ran exclusive calls together");
+        assert!(maximum <= PROCESS_TOOL_LIMIT as usize);
+    }
+
+    #[test]
+    fn oversized_results_keep_their_shape_and_both_ends_of_long_strings() {
+        let value = json!({
+            "exit_code": 1,
+            "stdout": format!("start{}end-of-stdout", "x".repeat(4000)),
+            "stderr": format!("first error{}final error", "y".repeat(3000)),
+        });
+        let bounded = normalize_tool_output(value, 2048);
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= 2048);
+        assert_eq!(bounded["exit_code"], 1);
+        let stdout = bounded["stdout"].as_str().unwrap();
+        assert!(stdout.starts_with("start") && stdout.ends_with("end-of-stdout"));
+        assert!(stdout.contains("bytes omitted"), "{stdout}");
+        let stderr = bounded["stderr"].as_str().unwrap();
+        assert!(stderr.starts_with("first error") && stderr.ends_with("final error"));
+
+        let image = json!({"image": {"mime": "image/png", "data": "A".repeat(5000)}, "ok": true});
+        assert_eq!(normalize_tool_output(image.clone(), 1024), image);
+
+        let wide = Value::Array((0..400).map(|index| json!({ "n": index })).collect());
+        let preview = normalize_tool_output(wide, 1024);
+        assert_eq!(preview["truncated"], true);
+    }
+
+    struct LongOutputTool;
+
+    #[async_trait]
+    impl Tool for LongOutputTool {
+        fn name(&self) -> &str {
+            "long"
+        }
+        fn description(&self) -> &str {
+            "returns more than the output limit"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn model_text(&self, result: &Value) -> Option<String> {
+            result["text"].as_str().map(str::to_string)
+        }
+        async fn invoke(&self, _args: Value) -> Result<Value> {
+            Ok(
+                json!({ "text": format!("{}\nfinal error: build failed", "line\n".repeat(400_000)) }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn text_projection_sees_the_complete_result() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(LongOutputTool));
+        let result = registry.call_for_agent("long", json!({})).await.unwrap();
+        let text = result.model_text.unwrap();
+        assert!(text.ends_with("final error: build failed"));
+        assert!(text.len() > 1024 * 1024);
+        let visible = result.result["text"].as_str().unwrap();
+        assert!(visible.len() < 1024 * 1024);
+        assert!(visible.ends_with("final error: build failed"));
     }
 
     struct DelegatingTool {

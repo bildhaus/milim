@@ -283,6 +283,17 @@ impl LoadedHook {
                 _ => true,
             }
     }
+
+    /// Match a tool call under its called name or any other registered name,
+    /// so hooks written for a renamed tool (such as an earlier MCP name)
+    /// keep matching.
+    fn matches_call(&self, event: &str, call: &InterceptedCall<'_>) -> bool {
+        self.matches(event, Some(call.name))
+            || call
+                .other_names
+                .iter()
+                .any(|name| self.matches(event, Some(name)))
+    }
 }
 
 /// Compile a matcher to a whole-name regex. `None` means every tool.
@@ -409,6 +420,15 @@ impl UserHooks {
         self.hooks
             .iter()
             .filter(move |hook| hook.matches(event, tool))
+    }
+
+    /// Hooks for a tool call, collected so no borrowing iterator is held
+    /// across the hook runs' awaits.
+    fn matching_call(&self, event: &str, call: &InterceptedCall<'_>) -> Vec<&LoadedHook> {
+        self.hooks
+            .iter()
+            .filter(|hook| hook.matches_call(event, call))
+            .collect()
     }
 
     fn payload(&self, event: &str, fields: Value) -> Value {
@@ -566,7 +586,7 @@ impl ToolInterceptor for UserHooks {
                 "call_id": call.call_id,
             }),
         );
-        for hook in self.matching(PRE_TOOL_USE, Some(call.name)) {
+        for hook in self.matching_call(PRE_TOOL_USE, call) {
             let run = self.run(hook, &payload).await;
             if let Some((outcome, message)) = failure_outcome(&run) {
                 result
@@ -619,7 +639,10 @@ impl ToolInterceptor for UserHooks {
 
     async fn after_tool(&self, call: &InterceptedCall<'_>, output: &Value) -> ResultInterception {
         let mut result = ResultInterception::default();
-        let mut hooks = self.matching(POST_TOOL_USE, Some(call.name)).peekable();
+        let mut hooks = self
+            .matching_call(POST_TOOL_USE, call)
+            .into_iter()
+            .peekable();
         if hooks.peek().is_none() {
             return result;
         }
@@ -1003,6 +1026,7 @@ mod tests {
         InterceptedCall {
             call_id: Some("call-1"),
             name,
+            other_names: &[],
             arguments,
         }
     }
@@ -1031,6 +1055,32 @@ mod tests {
         assert_eq!(hooks.matching(PRE_TOOL_USE, Some("shell")).count(), 2);
         assert_eq!(hooks.matching(PRE_TOOL_USE, Some("read_file")).count(), 1);
         assert_eq!(hooks.matching(POST_TOOL_USE, Some("shell")).count(), 0);
+    }
+
+    #[test]
+    fn matchers_also_match_a_renamed_tool_by_its_earlier_names() {
+        let hook = LoadedHook {
+            event: PRE_TOOL_USE,
+            matcher: compile_matcher(Some("mcp_1a2b3c4d__tool_search")).unwrap(),
+            command: "true".into(),
+            timeout: Duration::from_secs(1),
+            source: HookSource::User,
+        };
+        let arguments = json!({});
+        let other_names = vec!["mcp_1a2b3c4d__tool_search".to_string()];
+        let renamed = InterceptedCall {
+            call_id: None,
+            name: "github_1a2b__search",
+            other_names: &other_names,
+            arguments: &arguments,
+        };
+        assert!(hook.matches_call(PRE_TOOL_USE, &renamed));
+        assert!(!hook.matches_call(POST_TOOL_USE, &renamed));
+        let unrelated = InterceptedCall {
+            other_names: &[],
+            ..renamed
+        };
+        assert!(!hook.matches_call(PRE_TOOL_USE, &unrelated));
     }
 
     #[test]

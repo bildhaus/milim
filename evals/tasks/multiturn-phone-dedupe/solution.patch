@@ -1,0 +1,111 @@
+diff --git a/src/contacts.js b/src/contacts.js
+index 7464ef6..f04e9c3 100644
+--- a/src/contacts.js
++++ b/src/contacts.js
+@@ -1,3 +1,5 @@
++import { normalizePhone } from "./phone.js";
++
+ /**
+  * Contacts are `{ name, phone, email? }` records merged from several address
+  * books, so the same person often appears more than once with the phone
+@@ -8,3 +10,37 @@
+ export function sortContacts(list) {
+   return [...list].sort((a, b) => a.name.localeCompare(b.name));
+ }
++
++function phoneKey(phone) {
++  try {
++    return normalizePhone(phone);
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Drop later contacts whose phone normalizes to an earlier contact's number,
++ * filling a missing email from the first later duplicate that has one.
++ * Contacts with an unparseable phone are kept unchanged.
++ */
++export function dedupeContacts(list) {
++  const firstByPhone = new Map();
++  const result = [];
++  for (const contact of list) {
++    const key = phoneKey(contact.phone);
++    if (key === null) {
++      result.push(contact);
++      continue;
++    }
++    const first = firstByPhone.get(key);
++    if (!first) {
++      const kept = { ...contact };
++      firstByPhone.set(key, kept);
++      result.push(kept);
++    } else if (!first.email && contact.email) {
++      first.email = contact.email;
++    }
++  }
++  return result;
++}
+diff --git a/src/phone.js b/src/phone.js
+new file mode 100644
+index 0000000..ba76155
+--- /dev/null
++++ b/src/phone.js
+@@ -0,0 +1,16 @@
++/**
++ * Normalize a US phone number to E.164 (`+15551234567`). Accepts the usual
++ * separators (spaces, dashes, dots, parentheses) and an optional leading
++ * country code 1; anything else throws a RangeError.
++ */
++export function normalizePhone(raw) {
++  if (typeof raw !== "string" || !/^[\d\s().+-]+$/.test(raw)) {
++    throw new RangeError(`not a US phone number: ${raw}`);
++  }
++  let digits = raw.replace(/\D/g, "");
++  if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
++  if (digits.length !== 10) {
++    throw new RangeError(`not a US phone number: ${raw}`);
++  }
++  return `+1${digits}`;
++}
+diff --git a/test/contacts.test.js b/test/contacts.test.js
+index 799b9c4..44bc198 100644
+--- a/test/contacts.test.js
++++ b/test/contacts.test.js
+@@ -7,3 +7,16 @@ test("sorts by name", () => {
+   assert.deepEqual(sortContacts(list).map((contact) => contact.name), ["Al", "Bo"]);
+   assert.equal(list[0].name, "Bo");
+ });
++
++test("dedupeContacts merges contacts by normalized phone", async () => {
++  const { dedupeContacts } = await import("../src/contacts.js");
++  const result = dedupeContacts([
++    { name: "Ann", phone: "555-123-4567" },
++    { name: "Ann B.", phone: "+1 555 123 4567", email: "ann@x.io" },
++    { name: "Nobody", phone: "n/a" },
++  ]);
++  assert.deepEqual(result, [
++    { name: "Ann", phone: "555-123-4567", email: "ann@x.io" },
++    { name: "Nobody", phone: "n/a" },
++  ]);
++});
+diff --git a/test/phone.test.js b/test/phone.test.js
+new file mode 100644
+index 0000000..e6d4a77
+--- /dev/null
++++ b/test/phone.test.js
+@@ -0,0 +1,14 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { normalizePhone } from "../src/phone.js";
++
++test("normalizes common US formats", () => {
++  for (const raw of ["555-123-4567", "(555) 123-4567", "555.123.4567", "5551234567", "1-555-123-4567", "+1 555 123 4567"]) {
++    assert.equal(normalizePhone(raw), "+15551234567");
++  }
++});
++
++test("rejects other numbers", () => {
++  assert.throws(() => normalizePhone("555-1234"), RangeError);
++  assert.throws(() => normalizePhone("+44 20 7946 0958"), RangeError);
++});

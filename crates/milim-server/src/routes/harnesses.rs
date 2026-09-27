@@ -6,11 +6,33 @@ use crate::account_runtime_events::HarnessEvent;
 use crate::routes::account_runtimes::AccountHarnessStream;
 
 const HARNESS_EVENT_SCHEMA_VERSION: u8 = 1;
-// ponytail: five seconds bounds post-terminal cleanup; Claude must exit cleanly to release its session lock.
+// ponytail: five seconds bounds post-terminal cleanup; specialize only if a runtime needs longer.
 const HARNESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+// Claude releases its session lock only when it exits cleanly, after its
+// session-end hooks; this bound covers them without leaking a hung CLI.
+const CLAUDE_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 
-fn harness_terminal_drain_timeout(harness_id: &str) -> Option<Duration> {
-    (harness_id != "claude").then_some(HARNESS_TERMINAL_DRAIN_TIMEOUT)
+fn harness_terminal_drain_timeout(harness_id: &str) -> Duration {
+    if harness_id == "claude" {
+        CLAUDE_TERMINAL_DRAIN_TIMEOUT
+    } else {
+        HARNESS_TERMINAL_DRAIN_TIMEOUT
+    }
+}
+
+/// Keep reading a harness stream in the background after its terminal event.
+/// Dropping the stream kills the native process, so the drain lets it finish
+/// its own cleanup first; the bound stops a runtime that never exits. The
+/// handle completes once the runtime is gone.
+pub(crate) fn drain_harness_after_terminal(
+    harness_id: &str,
+    mut source: AccountHarnessStream,
+) -> tokio::task::JoinHandle<()> {
+    let timeout = harness_terminal_drain_timeout(harness_id);
+    tokio::spawn(async move {
+        let drain = async move { while source.next().await.is_some() {} };
+        let _ = tokio::time::timeout(timeout, drain).await;
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,17 +217,7 @@ fn harness_event_stream(
             seq += 1;
             yield harness_sse(harness_envelope(harness_id, &run_id, seq, event));
             if terminal {
-                let timeout = harness_terminal_drain_timeout(harness_id);
-                tokio::spawn(async move {
-                    let drain = async move {
-                        while source.next().await.is_some() {}
-                    };
-                    if let Some(timeout) = timeout {
-                        let _ = tokio::time::timeout(timeout, drain).await;
-                    } else {
-                        drain.await;
-                    }
-                });
+                drain_harness_after_terminal(harness_id, source);
                 return;
             }
         }
@@ -333,11 +345,15 @@ mod tests {
     }
 
     #[test]
-    fn claude_terminal_cleanup_is_not_timed_out() {
-        assert_eq!(harness_terminal_drain_timeout("claude"), None);
+    fn claude_terminal_cleanup_gets_a_longer_bounded_drain() {
+        assert_eq!(
+            harness_terminal_drain_timeout("claude"),
+            CLAUDE_TERMINAL_DRAIN_TIMEOUT
+        );
+        assert!(CLAUDE_TERMINAL_DRAIN_TIMEOUT > HARNESS_TERMINAL_DRAIN_TIMEOUT);
         assert_eq!(
             harness_terminal_drain_timeout("codex"),
-            Some(HARNESS_TERMINAL_DRAIN_TIMEOUT)
+            HARNESS_TERMINAL_DRAIN_TIMEOUT
         );
     }
 

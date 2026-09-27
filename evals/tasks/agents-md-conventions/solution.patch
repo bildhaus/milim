@@ -1,0 +1,60 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 57706b4..074241f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## Unreleased
+ 
++- Added `titleCase`: capitalizes each space- or hyphen-separated word.
++
+ ## 1.2.0
+ 
+ - Added `reverseWords`: reverses word order while keeping spacing.
+diff --git a/src/index.js b/src/index.js
+index 8978b99..afe1064 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -1,2 +1,3 @@
+ export { reverseWords } from "./reverse-words.js";
++export { titleCase } from "./title-case.js";
+ export { truncate } from "./truncate.js";
+diff --git a/src/title-case.js b/src/title-case.js
+new file mode 100644
+index 0000000..e48cf7b
+--- /dev/null
++++ b/src/title-case.js
+@@ -0,0 +1,15 @@
++/**
++ * Capitalize the first letter of every word and lowercase the rest. Words
++ * are separated by spaces or hyphens, and the original spacing is kept.
++ *
++ * @param {string} text - Input text.
++ * @returns {string} The text in title case.
++ * @example
++ * titleCase("hello WORLD-wide"); // "Hello World-Wide"
++ */
++export function titleCase(text) {
++  if (typeof text !== "string") {
++    throw new TypeError("text must be a string");
++  }
++  return text.toLowerCase().replace(/(^|[\s-])(\p{L})/gu, (_, before, letter) => `${before}${letter.toUpperCase()}`);
++}
+diff --git a/tests/title-case.test.js b/tests/title-case.test.js
+new file mode 100644
+index 0000000..c3d0671
+--- /dev/null
++++ b/tests/title-case.test.js
+@@ -0,0 +1,12 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { titleCase } from "../src/index.js";
++
++test("capitalizes words split by spaces and hyphens", () => {
++  assert.equal(titleCase("hello WORLD-wide"), "Hello World-Wide");
++  assert.equal(titleCase("  two  spaces "), "  Two  Spaces ");
++});
++
++test("rejects non-strings", () => {
++  assert.throws(() => titleCase(7), TypeError);
++});

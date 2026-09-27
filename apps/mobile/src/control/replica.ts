@@ -420,6 +420,15 @@ const APPROVAL_EVENTS = new Set([
   'tool_approval_resolved',
 ]);
 
+/** Terminal `run_status` values and the activity status each one settles on. */
+const RUN_END_STATUS: Record<string, ActivityStatus> = {
+  completed: 'completed',
+  cancelled: 'warning',
+  canceled: 'warning',
+  failed: 'failed',
+  interrupted: 'failed',
+};
+
 const QUIET_EVENTS = new Set([
   'start',
   'session_established',
@@ -586,6 +595,10 @@ function approvalRequest(item: TimelineItemV1, data: Record<string, unknown>): P
   };
 }
 
+function closedApprovalLabel(status: string): string {
+  return status === 'interrupted' ? 'Approval interrupted' : 'Approval cancelled';
+}
+
 function approvalCopy(approval: PendingApprovalV1 | null, data: Record<string, unknown>) {
   const request = approval ? asRecord(approval.request) : data;
   const label = stringField(request, 'name', 'title', 'server_name') || 'Runtime approval';
@@ -612,6 +625,7 @@ export function projectTranscript(
   const modelChangeState: {pending: ProjectedModelChange | null} = {pending: null};
   const pendingById = new Map(pendingApprovals.map(approval => [approval.id, approval]));
   const latestAtByRun = new Map<string, number>();
+  const endedRuns = new Set<string>();
 
   const groupFor = (item: TimelineItemV1) => {
     if (!item.run_id) return null;
@@ -755,6 +769,9 @@ export function projectTranscript(
       const decision = stringField(data, 'decision').toLowerCase();
       const failed = item.type === 'approval_failed';
       const resolved = /resolved$/.test(item.type) || decision === 'approve' || decision === 'deny';
+      // The run ended (or milim restarted) before anyone answered.
+      const closedStatus = stringField(data, 'status').toLowerCase();
+      const closed = resolved && ['cancelled', 'canceled', 'interrupted'].includes(closedStatus);
       const copy = approvalCopy(pending, data);
       approvals.set(id, {
         kind: 'approval',
@@ -764,11 +781,13 @@ export function projectTranscript(
         status: failed ? 'failed' : resolved ? 'completed' : 'approval',
         label: failed
           ? 'Approval failed'
-          : resolved
-            ? stringField(data, 'reason') === 'timed_out'
-              ? 'Approval timed out'
-              : decision === 'approve' ? 'Approved' : 'Denied'
-            : copy.label,
+          : closed
+            ? closedApprovalLabel(closedStatus)
+            : resolved
+              ? stringField(data, 'reason') === 'timed_out'
+                ? 'Approval timed out'
+                : decision === 'approve' ? 'Approved' : 'Denied'
+              : copy.label,
         detail: failed ? compactText(stringField(data, 'message')) : copy.detail,
         approval: resolved || failed ? null : pending,
       });
@@ -779,6 +798,26 @@ export function projectTranscript(
       if (group) {
         group.terminalStatus = 'completed';
         group.completedAtMs = item.created_at_ms;
+      }
+      continue;
+    }
+    if (item.type === 'run_status') {
+      // The run's final item. A stopped provider run or a restart emits
+      // nothing else terminal, so this alone must settle the activity.
+      const status = RUN_END_STATUS[stringField(data, 'status').toLowerCase()];
+      const group = status ? groupFor(item) : null;
+      if (status && item.run_id) endedRuns.add(item.run_id);
+      if (group && status) {
+        if (status === 'failed' && group.terminalStatus !== 'failed') {
+          const error = asRecord(data.error);
+          const row = statusRow(item, {
+            status: 'failed',
+            label: stringField(error, 'message') || stringField(data, 'message') || 'Run failed',
+          });
+          if (row) group.rows.push(row);
+        }
+        group.terminalStatus = status;
+        group.completedAtMs ??= item.created_at_ms;
       }
       continue;
     }
@@ -847,6 +886,9 @@ export function projectTranscript(
   for (const approval of pendingApprovals) {
     if (approvals.has(approval.id)) {
       const projected = approvals.get(approval.id)!;
+      // A resolution already in the timeline outranks a bootstrap that has
+      // not caught up with it.
+      if (projected.status !== 'approval') continue;
       projected.approval = approval;
       projected.status = 'approval';
       const copy = approvalCopy(approval, {});
@@ -865,6 +907,16 @@ export function projectTranscript(
       detail: copy.detail,
       approval,
     });
+  }
+
+  // An approval cannot outlive its run: nothing is left to deliver it to.
+  for (const projected of approvals.values()) {
+    if (projected.status !== 'approval' || !projected.runId || !endedRuns.has(projected.runId)) {
+      continue;
+    }
+    projected.status = 'completed';
+    projected.label = closedApprovalLabel('cancelled');
+    projected.approval = null;
   }
 
   const visibleMessages = [

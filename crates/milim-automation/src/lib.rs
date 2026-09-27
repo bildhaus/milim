@@ -213,6 +213,7 @@ pub fn message_with_attachments(
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        provider_state: None,
     })
 }
 

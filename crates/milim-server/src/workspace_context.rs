@@ -5,7 +5,11 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const AGENTS_MAX_BYTES: usize = 32 * 1024;
+/// Each instruction family (AGENTS files; Claude files and their imports)
+/// loads at most this many bytes.
+const INSTRUCTIONS_MAX_BYTES: usize = 32 * 1024;
+/// How many `@path` hops a Claude instruction file may import through.
+const MAX_IMPORT_DEPTH: usize = 4;
 const GIT_STATUS_MAX_LINES: usize = 20;
 const GIT_RECENT_COMMITS: &str = "5";
 const GIT_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -61,49 +65,36 @@ pub(crate) fn resolve(folder: Option<&Path>) -> WorkspaceContext {
         instructions: Vec::new(),
         warnings: Vec::new(),
     };
-    let mut seen = HashSet::new();
-    let mut agents_bytes = 0;
+    let mut loader = InstructionLoader::new(&mut context);
 
     if let Some(home) = home_dir() {
         let codex = std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
-        add_first_agents(&mut context, &mut seen, &mut agents_bytes, &codex, "global");
-        add_file(
-            &mut context,
-            &mut seen,
+        loader.add_first_agents(&codex, "global");
+        // Files the user wrote for every project may import from anywhere in
+        // their home folder.
+        let user_roots = [canonical(&home)];
+        loader.add_claude(
             home.join(".claude").join("CLAUDE.md"),
-            "claude",
             "global",
-            false,
-            None,
+            &user_roots,
         );
-        add_rules(
-            &mut context,
-            &mut seen,
-            &home.join(".claude").join("rules"),
-            "global",
-        );
+        loader.add_rules(&home.join(".claude").join("rules"), "global", &user_roots);
     }
 
+    // Repository files may only import files inside the repository, so a
+    // cloned project cannot pull the user's private files into the prompt.
+    let project_roots = [canonical(root), folder.clone()];
     for dir in project_chain(root, &folder) {
-        add_first_agents(&mut context, &mut seen, &mut agents_bytes, &dir, "project");
+        loader.add_first_agents(&dir, "project");
         for relative in ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
-            add_file(
-                &mut context,
-                &mut seen,
-                dir.join(relative),
-                "claude",
-                "project",
-                false,
-                None,
-            );
+            loader.add_claude(dir.join(relative), "project", &project_roots);
         }
-        add_rules(
-            &mut context,
-            &mut seen,
+        loader.add_rules(
             &dir.join(".claude").join("rules"),
             "project",
+            &project_roots,
         );
     }
     context
@@ -131,8 +122,66 @@ pub(crate) fn formatted(context: &WorkspaceContext, family: Option<&str>) -> Opt
     Some(text)
 }
 
-/// Machine and workspace facts a native agent run starts from. Captured once
-/// per run so the rendered block stays byte-identical across the run's steps.
+/// Instructions a native run carries besides its instruction files.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InstructionLayers {
+    /// App-wide Custom instructions from Milim settings.
+    pub milim: String,
+    /// The active Agent's instructions.
+    pub agent: String,
+    /// Instructions for this thread only.
+    pub thread: String,
+}
+
+/// Every instruction source of a native run in one block, ordered from the
+/// broadest to the most specific so that "the later one wins" follows how
+/// widely each source applies: Milim's custom instructions, the user's own
+/// instruction files, the Agent, the repository's files from its root down to
+/// the working folder, and last the thread's instructions.
+pub(crate) fn instruction_block(
+    context: &WorkspaceContext,
+    layers: &InstructionLayers,
+) -> Option<String> {
+    let mut sections = Vec::new();
+    let mut push = |heading: String, content: &str| {
+        let content = content.trim();
+        if !content.is_empty() {
+            sections.push(format!("## {heading}\n{content}"));
+        }
+    };
+    let files = |scope: &'static str| {
+        context
+            .instructions
+            .iter()
+            .filter(move |item| item.status == "loaded" && item.scope == scope)
+    };
+    push("Custom instructions (all chats)".to_string(), &layers.milim);
+    for item in files("global") {
+        push(
+            format!("User instructions from {}", item.path),
+            &item.content,
+        );
+    }
+    push("Agent instructions".to_string(), &layers.agent);
+    for item in files("project") {
+        push(
+            format!("Repository instructions from {}", item.path),
+            &item.content,
+        );
+    }
+    push("Thread instructions".to_string(), &layers.thread);
+    (!sections.is_empty()).then(|| {
+        format!(
+            "# Instructions\nFollow these instructions. They are ordered from broadest to most specific; when two conflict, the later one takes precedence.\n\n{}",
+            sections.join("\n\n")
+        )
+    })
+}
+
+/// Machine and workspace facts a native agent run starts from, captured once
+/// per run. The stable part leads the prompt and must not change between
+/// turns, or every turn would rewrite the provider's prompt cache for the
+/// whole conversation; the date and git state go with each turn instead.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RunEnvironment {
     pub os: String,
@@ -176,12 +225,14 @@ impl RunEnvironment {
         }
     }
 
-    pub(crate) fn render(&self) -> String {
+    /// The facts that stay fixed for a thread: machine, shell, time zone,
+    /// workspace, and model.
+    pub(crate) fn render_stable(&self) -> String {
         let mut lines = vec![
             "<environment>".to_string(),
             format!("OS: {} ({}, {})", self.os, std::env::consts::OS, self.arch),
             format!("Shell: {}", self.shell),
-            format!("Today's date: {} ({})", self.date, self.timezone),
+            format!("Time zone: {}", self.timezone),
             match &self.workspace {
                 Some(path) => format!("Workspace root: {path}"),
                 None => "Workspace root: none (no working folder is selected)".to_string(),
@@ -196,36 +247,49 @@ impl RunEnvironment {
                     repo.push_str(&format!(" (root {})", git.root));
                 }
                 lines.push(repo);
-                lines.push(format!(
-                    "Current branch: {}",
-                    git.branch.as_deref().unwrap_or("(detached HEAD)")
-                ));
-                if git.status_total == 0 {
-                    lines.push("Git status: clean".to_string());
-                } else {
-                    let shown = if git.status.len() < git.status_total {
-                        format!(", first {}", git.status.len())
-                    } else {
-                        String::new()
-                    };
-                    lines.push(format!(
-                        "Git status ({} changed paths{shown}):",
-                        git.status_total
-                    ));
-                    lines.extend(git.status.iter().map(|line| format!("  {line}")));
-                }
-                if !git.commits.is_empty() {
-                    lines.push("Recent commits:".to_string());
-                    lines.extend(git.commits.iter().map(|line| format!("  {line}")));
-                }
             }
         }
         lines.push(format!("Model: {}", self.model));
         lines.push(
-            "This snapshot was taken when the run started; re-check git state before relying on it."
-                .to_string(),
+            if self.git.is_some() {
+                "Today's date and the current git branch, status, and recent commits come with each user message."
+            } else {
+                "Today's date comes with each user message."
+            }
+            .to_string(),
         );
         lines.push("</environment>".to_string());
+        lines.join("\n")
+    }
+
+    /// The facts that change between turns: today's date and, in a git
+    /// repository, the branch, status, and recent commits.
+    pub(crate) fn render_turn(&self) -> String {
+        let mut lines = vec![format!("Today's date: {}", self.date)];
+        if let Some(git) = &self.git {
+            lines.push(format!(
+                "Current branch: {}",
+                git.branch.as_deref().unwrap_or("(detached HEAD)")
+            ));
+            if git.status_total == 0 {
+                lines.push("Git status: clean".to_string());
+            } else {
+                let shown = if git.status.len() < git.status_total {
+                    format!(", first {}", git.status.len())
+                } else {
+                    String::new()
+                };
+                lines.push(format!(
+                    "Git status ({} changed paths{shown}):",
+                    git.status_total
+                ));
+                lines.extend(git.status.iter().map(|line| format!("  {line}")));
+            }
+            if !git.commits.is_empty() {
+                lines.push("Recent commits:".to_string());
+                lines.extend(git.commits.iter().map(|line| format!("  {line}")));
+            }
+        }
         lines.join("\n")
     }
 }
@@ -329,105 +393,216 @@ fn git_bounded(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output).trim_end().to_string())
 }
 
-fn add_first_agents(
-    context: &mut WorkspaceContext,
-    seen: &mut HashSet<PathBuf>,
-    bytes: &mut usize,
-    dir: &Path,
-    scope: &'static str,
-) {
-    for name in ["AGENTS.override.md", "AGENTS.md"] {
-        let path = dir.join(name);
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            context
-                .warnings
-                .push(format!("Could not read {}", path.display()));
-            continue;
-        };
-        if content.trim().is_empty() {
-            continue;
-        }
-        add_file(context, seen, path, "agents", scope, false, Some(bytes));
-        return;
-    }
+/// Collects instruction files in precedence order. Each file loads at most
+/// once, and each family (AGENTS files; Claude files with their imports) is
+/// held to its own 32 KiB budget.
+struct InstructionLoader<'a> {
+    context: &'a mut WorkspaceContext,
+    seen: HashSet<PathBuf>,
+    agents_bytes: usize,
+    claude_bytes: usize,
 }
 
-fn add_rules(
-    context: &mut WorkspaceContext,
-    seen: &mut HashSet<PathBuf>,
-    dir: &Path,
-    scope: &'static str,
-) {
-    let mut files = Vec::new();
-    collect_markdown(dir, &mut files, &mut context.warnings);
-    files.sort();
-    for path in files {
-        add_file(context, seen, path, "claude", scope, true, None);
+impl<'a> InstructionLoader<'a> {
+    fn new(context: &'a mut WorkspaceContext) -> Self {
+        Self {
+            context,
+            seen: HashSet::new(),
+            agents_bytes: 0,
+            claude_bytes: 0,
+        }
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn add_file(
-    context: &mut WorkspaceContext,
-    seen: &mut HashSet<PathBuf>,
-    path: PathBuf,
-    family: &'static str,
-    scope: &'static str,
-    rule: bool,
-    agents_bytes: Option<&mut usize>,
-) {
-    if !path.is_file() {
-        return;
-    }
-    let canonical_path = canonical(&path);
-    if !seen.insert(canonical_path) {
-        return;
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) if !content.trim().is_empty() => content,
-        Ok(_) => return,
-        Err(error) => {
-            context
-                .warnings
-                .push(format!("Could not read {}: {error}", path.display()));
+    /// The first non-empty `AGENTS.override.md` or `AGENTS.md` in `dir`.
+    fn add_first_agents(&mut self, dir: &Path, scope: &'static str) {
+        for name in ["AGENTS.override.md", "AGENTS.md"] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                self.context
+                    .warnings
+                    .push(format!("Could not read {}", path.display()));
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            self.add_file(path, "agents", scope, false, None);
             return;
         }
-    };
-    let bytes = content.len();
-    let mut status = "loaded";
-    if rule && has_paths_frontmatter(&content) {
-        status = "conditional";
-        context.warnings.push(format!(
-            "Skipped path-conditional Claude rule {} outside the Claude runtime",
-            path.display()
-        ));
     }
-    if let Some(total) = agents_bytes {
-        if *total + bytes > AGENTS_MAX_BYTES {
-            status = "limit_exceeded";
-            context.warnings.push(format!(
-                "Skipped {} because AGENTS instructions exceed 32 KiB",
-                path.display()
-            ));
-        } else {
-            *total += bytes;
+
+    /// A CLAUDE.md file, preceded by the files it imports with `@path`.
+    /// Imports must resolve inside one of `roots`.
+    fn add_claude(&mut self, path: PathBuf, scope: &'static str, roots: &[PathBuf]) {
+        self.add_file(path, "claude", scope, false, Some((roots, 0)));
+    }
+
+    fn add_rules(&mut self, dir: &Path, scope: &'static str, roots: &[PathBuf]) {
+        let mut files = Vec::new();
+        collect_markdown(dir, &mut files, &mut self.context.warnings);
+        files.sort();
+        for path in files {
+            self.add_file(path, "claude", scope, true, Some((roots, 0)));
         }
     }
-    context.instructions.push(WorkspaceInstruction {
-        family,
-        scope,
-        path: path.display().to_string(),
-        content: if status == "loaded" {
-            content
-        } else {
-            String::new()
-        },
-        bytes,
-        status,
-    });
+
+    /// Load one file. With `imports`, the files it imports load first, up to
+    /// [`MAX_IMPORT_DEPTH`] hops, so the importing file's own text follows
+    /// them and takes precedence, as in Claude Code.
+    fn add_file(
+        &mut self,
+        path: PathBuf,
+        family: &'static str,
+        scope: &'static str,
+        rule: bool,
+        imports: Option<(&[PathBuf], usize)>,
+    ) {
+        if !path.is_file() || !self.seen.insert(canonical(&path)) {
+            return;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) if !content.trim().is_empty() => content,
+            Ok(_) => return,
+            Err(error) => {
+                self.context
+                    .warnings
+                    .push(format!("Could not read {}: {error}", path.display()));
+                return;
+            }
+        };
+        let bytes = content.len();
+        let mut status = "loaded";
+        if rule && has_paths_frontmatter(&content) {
+            status = "conditional";
+            self.context.warnings.push(format!(
+                "Skipped path-conditional Claude rule {} outside the Claude runtime",
+                path.display()
+            ));
+        }
+        if status == "loaded" {
+            if let Some((roots, depth)) = imports.filter(|(_, depth)| *depth < MAX_IMPORT_DEPTH) {
+                for target in import_targets(&content, &path) {
+                    if !target.is_file() {
+                        continue;
+                    }
+                    let resolved = canonical(&target);
+                    if roots.iter().any(|root| resolved.starts_with(root)) {
+                        self.add_file(target, family, scope, false, Some((roots, depth + 1)));
+                    } else {
+                        self.context.warnings.push(format!(
+                            "Skipped import {} in {} because it is outside the folders instructions may import from",
+                            target.display(),
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            let (used, label) = if family == "agents" {
+                (&mut self.agents_bytes, "AGENTS")
+            } else {
+                (&mut self.claude_bytes, "Claude")
+            };
+            if *used + bytes > INSTRUCTIONS_MAX_BYTES {
+                status = "limit_exceeded";
+                self.context.warnings.push(format!(
+                    "Skipped {} because {label} instructions exceed 32 KiB",
+                    path.display()
+                ));
+            } else {
+                *used += bytes;
+            }
+        }
+        self.context.instructions.push(WorkspaceInstruction {
+            family,
+            scope,
+            path: path.display().to_string(),
+            content: if status == "loaded" {
+                content
+            } else {
+                String::new()
+            },
+            bytes,
+            status,
+        });
+    }
+}
+
+/// The `@path` imports of a Claude instruction file, resolved against the
+/// importing file's folder (`@~/` against the home folder). Markdown code
+/// spans and fenced code blocks are skipped, so a quoted path stays literal.
+fn import_targets(content: &str, importer: &Path) -> Vec<PathBuf> {
+    let base = importer.parent().unwrap_or_else(|| Path::new("."));
+    let mut targets = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if let Some(marker) = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker))
+        {
+            match fence {
+                Some(open) if open == marker => fence = None,
+                None => fence = Some(marker),
+                Some(_) => {}
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        for word in without_code_spans(line).split_whitespace() {
+            let Some(raw) = word.strip_prefix('@') else {
+                continue;
+            };
+            let raw = raw.trim_end_matches(|c: char| {
+                matches!(
+                    c,
+                    '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\''
+                )
+            });
+            if raw.is_empty() {
+                continue;
+            }
+            let target = match raw.strip_prefix("~/") {
+                Some(rest) => match home_dir() {
+                    Some(home) => home.join(rest),
+                    None => continue,
+                },
+                None if Path::new(raw).is_absolute() => PathBuf::from(raw),
+                None => base.join(raw),
+            };
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+/// `line` with its Markdown code spans blanked out. An unmatched backtick run
+/// is literal text.
+fn without_code_spans(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        out.push_str(&rest[..start]);
+        let run = rest[start..].chars().take_while(|c| *c == '`').count();
+        let delimiter = &rest[start..start + run];
+        let after = &rest[start + run..];
+        match after.find(delimiter) {
+            Some(end) => {
+                out.push(' ');
+                rest = &after[end + run..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>, warnings: &mut Vec<String>) {
@@ -570,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_block_reports_git_state_and_is_stable() {
+    fn environment_keeps_git_state_out_of_the_stable_block() {
         let dir = std::env::temp_dir().join(format!("milim-env-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = canonical(&dir);
@@ -584,7 +759,9 @@ mod tests {
         };
         let plain = RunEnvironment::capture(Some(&dir), "model-a");
         assert!(plain.git.is_none());
-        assert!(plain.render().contains("Git repository: no"));
+        assert!(plain.render_stable().contains("Git repository: no"));
+        assert!(plain.render_turn().starts_with("Today's date: "));
+        assert!(!plain.render_turn().contains("branch"));
 
         if git_ok(&["init", "-q", "-b", "main"])
             && git_ok(&["config", "user.email", "test@example.com"])
@@ -593,6 +770,7 @@ mod tests {
             std::fs::write(dir.join("a.txt"), "a").unwrap();
             assert!(git_ok(&["add", "a.txt"]));
             assert!(git_ok(&["commit", "-q", "-m", "first commit"]));
+            let clean = RunEnvironment::capture(Some(&dir), "model-a");
             for index in 0..25 {
                 std::fs::write(dir.join(format!("new-{index:02}.txt")), "x").unwrap();
             }
@@ -602,15 +780,25 @@ mod tests {
             assert_eq!(git.status_total, 25);
             assert_eq!(git.status.len(), GIT_STATUS_MAX_LINES);
             assert!(git.commits[0].ends_with("first commit"));
-            let rendered = env.render();
-            assert!(rendered.contains(&format!("Workspace root: {}", dir.display())));
-            assert!(rendered.contains("Current branch: main"));
-            assert!(rendered.contains("Git status (25 changed paths, first 20):"));
-            assert!(rendered.contains("Model: model-a"));
-            assert_eq!(rendered, env.clone().render());
+            let stable = env.render_stable();
+            assert!(stable.contains(&format!("Workspace root: {}", dir.display())));
+            assert!(stable.contains("Git repository: yes"));
+            assert!(stable.contains("Model: model-a"));
+            assert!(!stable.contains("Today's date:"), "{stable}");
+            assert!(!stable.contains("Current branch"), "{stable}");
+            assert_eq!(
+                stable,
+                clean.render_stable(),
+                "git changes leave the stable block byte-identical"
+            );
+            let turn = env.render_turn();
+            assert!(turn.contains("Current branch: main"));
+            assert!(turn.contains("Git status (25 changed paths, first 20):"));
+            assert!(turn.contains("first commit"));
+            assert!(clean.render_turn().contains("Git status: clean"));
         }
 
-        let none = RunEnvironment::capture(None, "model-b").render();
+        let none = RunEnvironment::capture(None, "model-b").render_stable();
         assert!(none.contains("Workspace root: none"));
         assert!(!none.contains("Git repository"));
         let _ = std::fs::remove_dir_all(dir);
@@ -658,10 +846,9 @@ mod tests {
         .unwrap();
 
         let mut context = empty_context();
-        let mut seen = HashSet::new();
-        let mut bytes = 0;
-        add_first_agents(&mut context, &mut seen, &mut bytes, &dir, "project");
-        add_rules(&mut context, &mut seen, &dir.join("rules"), "project");
+        let mut loader = InstructionLoader::new(&mut context);
+        loader.add_first_agents(&dir, "project");
+        loader.add_rules(&dir.join("rules"), "project", &[canonical(&dir)]);
 
         assert!(context.instructions.iter().any(|file| {
             file.path.ends_with("AGENTS.override.md") && file.content == "override"
@@ -680,18 +867,144 @@ mod tests {
     }
 
     #[test]
-    fn agents_aggregate_limit_never_loads_more_than_32_kib() {
+    fn agents_and_claude_files_each_load_at_most_32_kib() {
         let dir =
             std::env::temp_dir().join(format!("milim-context-limit-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("AGENTS.md"), "x".repeat(AGENTS_MAX_BYTES + 1)).unwrap();
+        std::fs::create_dir_all(dir.join("rules")).unwrap();
+        std::fs::write(
+            dir.join("AGENTS.md"),
+            "x".repeat(INSTRUCTIONS_MAX_BYTES + 1),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("CLAUDE.md"),
+            "c".repeat(INSTRUCTIONS_MAX_BYTES - 10),
+        )
+        .unwrap();
+        std::fs::write(dir.join("rules").join("big.md"), "r".repeat(100)).unwrap();
+        std::fs::write(dir.join("rules").join("small.md"), "tiny").unwrap();
         let mut context = empty_context();
-        let mut seen = HashSet::new();
-        let mut bytes = 0;
-        add_first_agents(&mut context, &mut seen, &mut bytes, &dir, "project");
-        assert_eq!(bytes, 0);
-        assert_eq!(context.instructions[0].status, "limit_exceeded");
-        assert!(context.instructions[0].content.is_empty());
+        let mut loader = InstructionLoader::new(&mut context);
+        let roots = [canonical(&dir)];
+        loader.add_first_agents(&dir, "project");
+        loader.add_claude(dir.join("CLAUDE.md"), "project", &roots);
+        loader.add_rules(&dir.join("rules"), "project", &roots);
+        assert_eq!(loader.agents_bytes, 0);
+        assert_eq!(loader.claude_bytes, INSTRUCTIONS_MAX_BYTES - 6);
+        let status = |name: &str| {
+            let file = context
+                .instructions
+                .iter()
+                .find(|file| file.path.ends_with(name))
+                .unwrap();
+            (file.status, file.content.len())
+        };
+        assert_eq!(status("AGENTS.md"), ("limit_exceeded", 0));
+        assert_eq!(status("CLAUDE.md").0, "loaded");
+        assert_eq!(status("big.md"), ("limit_exceeded", 0));
+        assert_eq!(status("small.md"), ("loaded", 4));
+        assert!(context
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Claude instructions exceed 32 KiB")));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn claude_imports_load_first_within_roots_without_cycles() {
+        let base =
+            std::env::temp_dir().join(format!("milim-context-imports-{}", uuid::Uuid::new_v4()));
+        let dir = base.join("repo");
+        std::fs::create_dir_all(dir.join("docs").join("deep")).unwrap();
+        std::fs::write(
+            dir.join("CLAUDE.md"),
+            "Project rules. See @docs/style.md.\n\
+             Mention `@docs/quoted.md` literally.\n\
+             ```\n@docs/fenced.md\n```\n\
+             Escape @../secret.md and @missing.md, email a@docs/style.md.",
+        )
+        .unwrap();
+        std::fs::write(dir.join("docs").join("style.md"), "Style. @deep/one.md").unwrap();
+        std::fs::write(dir.join("docs").join("quoted.md"), "quoted").unwrap();
+        std::fs::write(dir.join("docs").join("fenced.md"), "fenced").unwrap();
+        // A chain past the four-hop limit that also imports its start again.
+        std::fs::write(
+            dir.join("docs").join("deep").join("one.md"),
+            "one @two.md @../../CLAUDE.md",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("docs").join("deep").join("two.md"),
+            "two @three.md",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("docs").join("deep").join("three.md"),
+            "three @four.md",
+        )
+        .unwrap();
+        std::fs::write(dir.join("docs").join("deep").join("four.md"), "four").unwrap();
+        std::fs::write(base.join("secret.md"), "secret").unwrap();
+
+        let mut context = empty_context();
+        let mut loader = InstructionLoader::new(&mut context);
+        loader.add_claude(dir.join("CLAUDE.md"), "project", &[canonical(&dir)]);
+
+        let loaded: Vec<String> = context
+            .instructions
+            .iter()
+            .map(|file| {
+                assert_eq!(file.status, "loaded");
+                assert_eq!(file.family, "claude");
+                file.content.split_whitespace().next().unwrap().to_string()
+            })
+            .collect();
+        // style.md is hop 1 and three.md hop 4, so four.md would be hop 5.
+        assert_eq!(loaded, ["three", "two", "one", "Style.", "Project"]);
+        assert_eq!(context.warnings.len(), 1, "{:?}", context.warnings);
+        assert!(context.warnings[0].contains("secret.md"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn instruction_block_orders_sources_from_broadest_to_most_specific() {
+        let file = |scope: &'static str, path: &str, content: &str| WorkspaceInstruction {
+            family: "agents",
+            scope,
+            path: path.to_string(),
+            content: content.to_string(),
+            bytes: content.len(),
+            status: "loaded",
+        };
+        let mut context = empty_context();
+        context.instructions = vec![
+            file("global", "/home/u/.codex/AGENTS.md", "USER_TEXT"),
+            file("project", "/repo/AGENTS.md", "REPO_TEXT"),
+            file("project", "/repo/app/AGENTS.md", "APP_TEXT"),
+        ];
+        let block = instruction_block(
+            &context,
+            &InstructionLayers {
+                milim: "MILIM_TEXT".into(),
+                agent: "AGENT_TEXT".into(),
+                thread: "THREAD_TEXT".into(),
+            },
+        )
+        .unwrap();
+        let order: Vec<usize> = [
+            "MILIM_TEXT",
+            "USER_TEXT",
+            "AGENT_TEXT",
+            "REPO_TEXT",
+            "APP_TEXT",
+            "THREAD_TEXT",
+        ]
+        .iter()
+        .map(|needle| block.find(needle).unwrap())
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{block}");
+        assert!(block.starts_with("# Instructions\n"));
+        assert!(block.contains("## Repository instructions from /repo/app/AGENTS.md\nAPP_TEXT"));
+        assert!(instruction_block(&empty_context(), &InstructionLayers::default()).is_none());
     }
 }

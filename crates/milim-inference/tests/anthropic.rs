@@ -252,7 +252,10 @@ async fn streams_text_and_builds_messages_body() {
     let temp = req.body["temperature"].as_f64().unwrap();
     assert!((temp - 0.2).abs() < 0.000_001, "temperature was {temp}");
     assert_eq!(req.body["stop_sequences"][0], "END");
-    assert_eq!(req.body["output_config"]["effort"], "high");
+    // Claude Sonnet 4 rejects `effort`, and a 64-token budget leaves no room
+    // for manual thinking, so the request keeps its temperature instead.
+    assert!(req.body.get("output_config").is_none());
+    assert!(req.body.get("thinking").is_none());
 
     assert_eq!(out.message.text_content(), "Hello");
     assert_eq!(out.finish_reason, "stop");
@@ -292,6 +295,7 @@ async fn sends_image_bytes_as_native_anthropic_blocks() {
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        provider_state: None,
     }];
 
     backend.complete(req).await.unwrap();
@@ -368,7 +372,7 @@ async fn streams_tool_use_as_openai_tool_calls() {
 
 #[tokio::test]
 async fn retries_once_with_the_model_output_limit_and_remembers_it() {
-    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 32000 > 8192, which is the maximum allowed number of output tokens for claude-3-5-sonnet-custom"}}"#;
+    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 16000 > 8192, which is the maximum allowed number of output tokens for claude-3-5-sonnet-custom"}}"#;
     let (base, mut captured) = spawn_sequence(vec![
         ("400 Bad Request", "application/json", rejection),
         ("200 OK", "text/event-stream", MINIMAL_SSE),
@@ -384,7 +388,7 @@ async fn retries_once_with_the_model_output_limit_and_remembers_it() {
     assert_eq!(out.usage.prompt_tokens, 45);
     assert_eq!(out.usage.cache_read_tokens, Some(40));
     assert_eq!(out.usage.cache_write_tokens, None);
-    assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 32_000);
+    assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 16_000);
     assert_eq!(captured.recv().await.unwrap().body["max_tokens"], 8_192);
 
     // The learned cap applies to the next request without another rejection.
@@ -451,4 +455,180 @@ async fn max_tokens_stop_reports_length() {
         .await
         .unwrap();
     assert_eq!(out.finish_reason, "length");
+}
+
+const THINKING_TOOL_SSE: &str = concat!(
+    "event: message_start\n",
+    r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}"#,
+    "\n\n",
+    "event: content_block_start\n",
+    r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+    "\n\n",
+    "event: content_block_delta\n",
+    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants Paris weather."}}"#,
+    "\n\n",
+    "event: content_block_delta\n",
+    r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqQBCgIYAhIM1gbcDa9GJwZA2b=="}}"#,
+    "\n\n",
+    "event: content_block_stop\n",
+    r#"data: {"type":"content_block_stop","index":0}"#,
+    "\n\n",
+    "event: content_block_start\n",
+    r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"EmwKAhgBEgy3va3pzix/LafPsn4a"}}"#,
+    "\n\n",
+    "event: content_block_stop\n",
+    r#"data: {"type":"content_block_stop","index":1}"#,
+    "\n\n",
+    "event: content_block_start\n",
+    r#"data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#,
+    "\n\n",
+    "event: content_block_delta\n",
+    r#"data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"Paris\"}"}}"#,
+    "\n\n",
+    "event: content_block_stop\n",
+    r#"data: {"type":"content_block_stop","index":2}"#,
+    "\n\n",
+    "event: message_delta\n",
+    r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":30}}"#,
+    "\n\n",
+    "event: message_stop\n",
+    r#"data: {"type":"message_stop"}"#,
+    "\n\n"
+);
+
+fn weather_tool() -> Tool {
+    Tool {
+        kind: "function".to_string(),
+        function: ToolFunction {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: Some(serde_json::json!({"type":"object"})),
+        },
+    }
+}
+
+#[tokio::test]
+async fn thinking_blocks_round_trip_into_the_next_request() {
+    let (base, mut captured) = spawn_sequence(vec![
+        ("200 OK", "text/event-stream", THINKING_TOOL_SSE),
+        ("200 OK", "text/event-stream", MINIMAL_SSE),
+    ])
+    .await;
+    let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
+    let mut first = basic_req("claude-opus-5-5");
+    first.messages = vec![ChatMessage::text("user", "Weather in Paris?")];
+    first.tools = vec![weather_tool()];
+    first.sampling.max_tokens = None;
+
+    let out = backend.complete(first.clone()).await.unwrap();
+    let sent = captured.recv().await.unwrap().body;
+    assert_eq!(
+        sent["thinking"],
+        serde_json::json!({ "type": "adaptive", "display": "summarized" })
+    );
+    assert_eq!(sent["max_tokens"], 64_000);
+    assert!(sent.get("temperature").is_none());
+    assert_eq!(
+        out.message.reasoning_content.as_deref(),
+        Some("The user wants Paris weather.")
+    );
+    assert_eq!(out.finish_reason, "tool_calls");
+    let state = out.message.provider_state.clone().unwrap();
+    assert_eq!(
+        state,
+        serde_json::json!({
+            "anthropic": {
+                "model": "claude-opus-5-5",
+                "blocks": [
+                    {
+                        "type": "thinking",
+                        "thinking": "The user wants Paris weather.",
+                        "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b=="
+                    },
+                    { "type": "redacted_thinking", "data": "EmwKAhgBEgy3va3pzix/LafPsn4a" }
+                ]
+            }
+        })
+    );
+
+    // The tool loop continues: the assistant turn goes back with its
+    // thinking blocks first and unchanged, ahead of the tool call.
+    let mut second = first;
+    second.messages.push(out.message);
+    second.messages.push(ChatMessage {
+        tool_call_id: Some("toolu_1".to_string()),
+        ..ChatMessage::text("tool", "20C and sunny")
+    });
+    backend.complete(second).await.unwrap();
+    let sent = captured.recv().await.unwrap().body;
+    let assistant = &sent["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"][0], state["anthropic"]["blocks"][0]);
+    assert_eq!(assistant["content"][1], state["anthropic"]["blocks"][1]);
+    assert_eq!(assistant["content"][2]["type"], "tool_use");
+    assert_eq!(assistant["content"][2]["id"], "toolu_1");
+    assert_eq!(assistant["content"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn stream_without_message_stop_is_an_error() {
+    let sse = concat!(
+        "event: message_start\n",
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}"#,
+        "\n\n",
+        "event: content_block_delta\n",
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = AnthropicBackend::new("anthropic", base, None);
+    let err = backend
+        .complete(basic_req("claude-sonnet-4-6"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, milim_core::Error::Other(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("provider stream ended before a completion event"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_thinking_replay_is_retried_once_then_left_out() {
+    let rejection = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."}}"#;
+    let (base, mut captured) = spawn_sequence(vec![
+        ("400 Bad Request", "application/json", rejection),
+        ("200 OK", "text/event-stream", MINIMAL_SSE),
+        ("200 OK", "text/event-stream", MINIMAL_SSE),
+    ])
+    .await;
+    let backend = AnthropicBackend::new("anthropic", base, Some("sk-ant-test".to_string()));
+    let mut request = basic_req("claude-fable-5-1");
+    let mut assistant = ChatMessage::text("assistant", "Earlier answer.");
+    assistant.provider_state = Some(serde_json::json!({
+        "anthropic": {
+            "model": "claude-fable-5-1",
+            "blocks": [{ "type": "thinking", "thinking": "", "signature": "sig-refused-once" }]
+        }
+    }));
+    request.messages = vec![
+        ChatMessage::text("user", "First."),
+        assistant,
+        ChatMessage::text("user", "Second."),
+    ];
+
+    let out = backend.complete(request.clone()).await.unwrap();
+    assert_eq!(out.message.text_content(), "ok");
+    let first = captured.recv().await.unwrap().body;
+    assert_eq!(first["messages"][1]["content"][0]["type"], "thinking");
+    let retry = captured.recv().await.unwrap().body;
+    let without_thinking = serde_json::json!("Earlier answer.");
+    assert_eq!(retry["messages"][1]["content"], without_thinking);
+
+    // The next step of the same conversation leaves the refused block out
+    // up front instead of being refused again.
+    backend.complete(request).await.unwrap();
+    let next = captured.recv().await.unwrap().body;
+    assert_eq!(next["messages"][1]["content"], without_thinking);
 }

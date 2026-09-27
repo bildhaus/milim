@@ -1,7 +1,7 @@
 // Deterministic generators for the 1500+ line single-file fixtures.
 
 /** Small linear congruential generator so output never depends on Math.random. */
-function rng(seed) {
+export function rng(seed) {
   let state = seed >>> 0;
   return () => {
     state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;

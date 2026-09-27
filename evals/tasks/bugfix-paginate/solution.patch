@@ -1,0 +1,15 @@
+diff --git a/src/paginate.js b/src/paginate.js
+index 5858833..2932336 100644
+--- a/src/paginate.js
++++ b/src/paginate.js
+@@ -11,8 +11,8 @@ export function paginate(items, page, pageSize) {
+   if (!Number.isInteger(pageSize) || pageSize < 1) {
+     throw new RangeError("pageSize must be a positive integer");
+   }
+-  const totalPages = Math.floor(items.length / pageSize);
+-  const start = page * pageSize;
++  const totalPages = Math.ceil(items.length / pageSize);
++  const start = (page - 1) * pageSize;
+   return {
+     items: items.slice(start, start + pageSize),
+     page,

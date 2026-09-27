@@ -1,0 +1,162 @@
+diff --git a/config/example.conf b/config/example.conf
+deleted file mode 100644
+index e742d30..0000000
+--- a/config/example.conf
++++ /dev/null
+@@ -1,4 +0,0 @@
+-# Example deployment config
+-host = 0.0.0.0
+-port = 9090
+-features = metrics, audit-log
+diff --git a/config/example.json b/config/example.json
+new file mode 100644
+index 0000000..b0ba94f
+--- /dev/null
++++ b/config/example.json
+@@ -0,0 +1,11 @@
++{
++  "version": 2,
++  "server": {
++    "host": "0.0.0.0",
++    "port": 9090
++  },
++  "features": [
++    "metrics",
++    "audit-log"
++  ]
++}
+diff --git a/docs/CONFIG.md b/docs/CONFIG.md
+index ba45ecd..b1e63f9 100644
+--- a/docs/CONFIG.md
++++ b/docs/CONFIG.md
+@@ -1,6 +1,25 @@
+ # Configuration
+ 
+-Configs use a simple `key = value` format:
++The current format is version 2, a JSON document:
++
++```json
++{
++  "version": 2,
++  "server": {
++    "host": "0.0.0.0",
++    "port": 9090
++  },
++  "features": ["metrics", "audit-log"]
++}
++```
++
++`port` must be an integer from 1 to 65535. Missing values fall back to
++`127.0.0.1`, `8080`, and no features.
++
++## Version 1 (deprecated)
++
++The old `key = value` format is still read but deprecated. Convert a v1 file
++with `migrateV1ToV2(text)` from `src/migrate.js`.
+ 
+ ```
+ host = 0.0.0.0
+@@ -8,5 +27,4 @@ port = 9090
+ features = metrics, audit-log
+ ```
+ 
+-Unknown keys are rejected. Missing keys fall back to `127.0.0.1`, `8080`,
+-and no features.
++Unknown keys are rejected.
+diff --git a/src/config.js b/src/config.js
+index c576e4b..1e19543 100644
+--- a/src/config.js
++++ b/src/config.js
+@@ -1,10 +1,20 @@
+ const DEFAULTS = { host: "127.0.0.1", port: 8080, features: [] };
+ 
++function validPort(value) {
++  const port = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
++  if (!Number.isInteger(port) || port < 1 || port > 65535) {
++    throw new RangeError(`port must be an integer from 1 to 65535, got ${JSON.stringify(value)}`);
++  }
++  return port;
++}
++
+ /**
+  * Parse a v1 config: one `key = value` per line, `#` comments, and blank
+  * lines. Known keys are `host`, `port`, and `features` (comma separated).
++ *
++ * @deprecated Use the v2 JSON format; see docs/CONFIG.md.
+  */
+-export function loadConfig(text) {
++export function loadConfigV1(text) {
+   const config = { ...DEFAULTS, features: [...DEFAULTS.features] };
+   for (const raw of text.split("\n")) {
+     const line = raw.trim();
+@@ -16,7 +26,7 @@ export function loadConfig(text) {
+         config.host = value;
+         break;
+       case "port":
+-        config.port = Number(value);
++        config.port = validPort(value);
+         break;
+       case "features":
+         config.features = value.split(",").map((item) => item.trim()).filter(Boolean);
+@@ -27,3 +37,22 @@ export function loadConfig(text) {
+   }
+   return config;
+ }
++
++/** Parse a v2 config: `{ "version": 2, "server": { host, port }, "features": [] }`. */
++export function loadConfigV2(text) {
++  const document = JSON.parse(text);
++  if (document?.version !== 2) {
++    throw new Error("config version must be 2");
++  }
++  const server = document.server ?? {};
++  return {
++    host: server.host ?? DEFAULTS.host,
++    port: validPort(server.port ?? DEFAULTS.port),
++    features: [...(document.features ?? DEFAULTS.features)],
++  };
++}
++
++/** Load either config format; v2 is detected by a leading `{`. */
++export function loadConfig(text) {
++  return text.trimStart().startsWith("{") ? loadConfigV2(text) : loadConfigV1(text);
++}
+diff --git a/src/migrate.js b/src/migrate.js
+new file mode 100644
+index 0000000..7392c16
+--- /dev/null
++++ b/src/migrate.js
+@@ -0,0 +1,7 @@
++import { loadConfigV1 } from "./config.js";
++
++/** Convert a v1 config document to the equivalent v2 JSON text. */
++export function migrateV1ToV2(text) {
++  const { host, port, features } = loadConfigV1(text);
++  return `${JSON.stringify({ version: 2, server: { host, port }, features }, null, 2)}\n`;
++}
+diff --git a/test/v2.test.js b/test/v2.test.js
+new file mode 100644
+index 0000000..c6bdf00
+--- /dev/null
++++ b/test/v2.test.js
+@@ -0,0 +1,20 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { loadConfig } from "../src/config.js";
++import { migrateV1ToV2 } from "../src/migrate.js";
++
++test("loads v2", () => {
++  const text = JSON.stringify({ version: 2, server: { host: "h", port: 81 }, features: ["a"] });
++  assert.deepEqual(loadConfig(`\n ${text}`), { host: "h", port: 81, features: ["a"] });
++});
++
++test("rejects bad ports in both formats", () => {
++  assert.throws(() => loadConfig("port = 0"), RangeError);
++  assert.throws(() => loadConfig('{"version":2,"server":{"host":"h","port":65536},"features":[]}'), RangeError);
++});
++
++test("migrateV1ToV2 keeps values", () => {
++  const migrated = migrateV1ToV2("host = a\nport = 2\nfeatures = x\n");
++  assert.equal(migrated, `${JSON.stringify({ version: 2, server: { host: "a", port: 2 }, features: ["x"] }, null, 2)}\n`);
++  assert.deepEqual(loadConfig(migrated), loadConfig("host = a\nport = 2\nfeatures = x\n"));
++});

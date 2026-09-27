@@ -1,8 +1,9 @@
-import { attempt, expect, expectEqual, expectOnlyChanged, finish, headFile, load, read, runNodeTests } from "../../lib/check.mjs";
+import { attempt, expect, expectEqual, expectOnlyChanged, finish, headFile, load, read, runNodeTests, stripComments } from "../../lib/check.mjs";
 
 expect(read("test/queue.test.js") === headFile("test/queue.test.js"), "tests were modified");
 expectOnlyChanged((path) => path.startsWith("src/"));
-expect(!/setTimeout|retry/i.test(read("src/queue.js")), "src/queue.js must not add sleeps or retries");
+// Comments may mention retries; code may not sleep or retry.
+expect(!/setTimeout|\bretr(y|ies|ied|ying)\b/i.test(stripComments(read("src/queue.js"))), "src/queue.js must not add sleeps or retries");
 runNodeTests("test");
 
 await attempt("hidden queue cases", async () => {

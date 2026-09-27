@@ -1,0 +1,11 @@
+diff --git a/ANSWER.json b/ANSWER.json
+new file mode 100644
+index 0000000..d633c7a
+--- /dev/null
++++ b/ANSWER.json
+@@ -0,0 +1,5 @@
++{
++  "function": "goldRate",
++  "file": "src/pricing/gold.js",
++  "max_percent": 22
++}

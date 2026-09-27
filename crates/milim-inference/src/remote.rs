@@ -3,27 +3,35 @@
 //! Translates a backend-neutral [`CompletionRequest`] into an OpenAI Chat
 //! Completions request, forwards it to any OpenAI-compatible base URL
 //! (OpenAI, Ollama's `/v1`, vLLM, OpenRouter, …), and re-parses the SSE
-//! stream back into [`StreamEvent`]s.
+//! stream back into [`StreamEvent`]s. OpenAI's own reasoning models on
+//! api.openai.com use the Responses API instead (see
+//! [`crate::openai_responses`]).
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use milim_core::api::openai::{
-    ChatCompletionChunk, ChatCompletionRequest, Content, ContentPart, DeltaFunction, DeltaToolCall,
-    Model, ModelCapabilities, ModelReasoningMetadata, ModelsResponse, ReasoningEffort,
-    StreamOptions, StringOrArray, Tool, Usage,
+    ChatCompletionRequest, ChatMessage, Content, ContentPart, DeltaFunction, DeltaToolCall, Model,
+    ModelCapabilities, ModelReasoningMetadata, ModelsResponse, ReasoningEffort, StreamOptions,
+    StringOrArray, Tool, Usage,
 };
 use milim_core::provider_error::upstream_stream_error;
 use milim_core::{Error, Result};
 use serde_json::{json, Map, Value};
 
-use crate::http_error::stream_read_error;
+use crate::http_error::HttpFailure;
+use crate::openai_responses::{self, is_openai_reasoning_model, ResponsesTurn};
 use crate::service::{
     normalize_finish_reason, CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent,
 };
+use crate::stall;
+
+/// This adapter's key in `ChatMessage::provider_state` for OpenRouter
+/// `reasoning_details`.
+const OPENROUTER_STATE_KEY: &str = "openrouter";
 
 /// Forwards generation to an OpenAI-compatible HTTP endpoint.
 #[derive(Debug, Clone)]
@@ -33,6 +41,11 @@ pub struct RemoteBackend {
     api_key: Option<String>,
     label: String,
     client: reqwest::Client,
+    /// Generation streams, whose idle budget is enforced per request.
+    stream_client: reqwest::Client,
+    /// Models OpenAI refused reasoning summaries for (they need a verified
+    /// organization); later requests for them stop asking.
+    models_without_summaries: Arc<Mutex<HashSet<String>>>,
 }
 
 #[cfg(not(test))]
@@ -70,6 +83,8 @@ impl RemoteBackend {
             api_key,
             label: label.into(),
             client,
+            stream_client: stall::streaming_client(),
+            models_without_summaries: Arc::default(),
         }
     }
 
@@ -133,13 +148,28 @@ impl RemoteBackend {
                 extra.insert("prompt_cache_key".to_string(), json!(key));
             }
         }
+        // OpenAI replaced `max_tokens` with `max_completion_tokens`, and its
+        // reasoning models (also behind proxies) reject `max_tokens`,
+        // `temperature`, and `top_p`. OpenRouter maps these fields itself.
+        let reasoning_model = is_openai_reasoning_model(&req.model);
+        let completion_tokens = !self.is_openrouter() && (self.is_openai() || reasoning_model);
         ChatCompletionRequest {
             model: req.model.clone(),
-            messages: req.messages.clone(),
-            temperature: s.temperature,
-            top_p: s.top_p,
-            max_tokens: s.max_tokens,
-            max_completion_tokens: None,
+            // Provider state is replayed by the adapter that owns it, never
+            // sent as a message field.
+            messages: req
+                .messages
+                .iter()
+                .cloned()
+                .map(|mut message| {
+                    message.provider_state = None;
+                    message
+                })
+                .collect(),
+            temperature: s.temperature.filter(|_| !reasoning_model),
+            top_p: s.top_p.filter(|_| !reasoning_model),
+            max_tokens: s.max_tokens.filter(|_| !completion_tokens),
+            max_completion_tokens: s.max_tokens.filter(|_| completion_tokens),
             n: None,
             stream: Some(stream),
             stop: (!s.stop.is_empty()).then(|| StringOrArray::Array(s.stop.clone())),
@@ -155,6 +185,23 @@ impl RemoteBackend {
             }),
             extra,
         }
+    }
+
+    /// The Chat Completions wire body, with OpenRouter's per-message extras.
+    fn chat_body(&self, req: &CompletionRequest, stream: bool) -> Result<Value> {
+        let mut body = serde_json::to_value(self.build_body(req, stream))?;
+        if self.is_openrouter() {
+            if let Some(Value::Array(wire)) = body.get_mut("messages") {
+                apply_openrouter_messages(wire, &req.messages, &req.model);
+            }
+        }
+        Ok(body)
+    }
+
+    /// OpenAI's reasoning models on api.openai.com go through the Responses
+    /// API; everything else (proxies included) stays on Chat Completions.
+    fn should_use_openai_responses(&self, req: &CompletionRequest) -> bool {
+        self.is_openai() && is_openai_reasoning_model(&req.model)
     }
 
     fn reasoning_effort_for_body(&self, effort: Option<ReasoningEffort>) -> RemoteReasoningEffort {
@@ -461,13 +508,19 @@ impl ModelService for RemoteBackend {
         if self.should_use_lm_studio_native_chat(&req) {
             return self.stream_lm_studio_native_chat(req).await;
         }
-        let body = self.build_body(&req, true);
-        let resp = self
-            .auth(self.client.post(self.endpoint("chat/completions")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream)?;
+        if self.should_use_openai_responses(&req) {
+            return self.stream_openai_responses(req).await;
+        }
+        let body = self.chat_body(&req, true)?;
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let resp = stall::send(
+            self.auth(self.stream_client.post(self.endpoint("chat/completions")))
+                .json(&body),
+            idle,
+            &self.label,
+            "chat/completions",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             return Err(crate::http_error::http_status_error(
@@ -479,53 +532,51 @@ impl ModelService for RemoteBackend {
         }
 
         let label = self.label.clone();
+        let mut chat = ChatStream::new(self.is_openrouter().then(|| req.model.clone()));
+        // OpenAI itself always returns structured calls.
+        if !self.is_openai() && req.tool_choice.as_ref().and_then(Value::as_str) != Some("none") {
+            chat = chat.with_text_tool_calls(&req.tools);
+        }
         let stream = async_stream::stream! {
-            let mut bytes = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
-            let mut last_finish: Option<String> = None;
-            let mut last_usage: Option<Usage> = None;
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
+            let mut saw_done = false;
 
-            'outer: while let Some(chunk) = bytes.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
                     Err(e) => {
-                        yield Err(stream_read_error(&label, e));
+                        yield Err(e);
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk);
-
-                // Process whole lines (SSE field lines are newline-terminated).
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line_bytes);
-                    match parse_sse_line(line.trim_end()) {
-                        LineOutcome::Done => break 'outer,
-                        LineOutcome::Error(e) => {
-                            yield Err(e.into_error(&label, "chat/completions"));
-                            return;
-                        }
-                        LineOutcome::Event(c) => {
-                            let (delta, finish, usage) = chunk_to_delta(&c);
-                            if let Some(f) = finish {
-                                last_finish = Some(f);
-                            }
-                            if let Some(u) = usage {
-                                last_usage = Some(u);
-                            }
-                            if !delta.is_empty() {
-                                yield Ok(StreamEvent::Delta(delta));
-                            }
-                        }
-                        LineOutcome::Ignore => {}
+                match parse_sse_line(&line) {
+                    LineOutcome::Done => {
+                        saw_done = true;
+                        break;
                     }
+                    LineOutcome::Error(e) => {
+                        yield Err(e.into_error(&label, "chat/completions"));
+                        return;
+                    }
+                    LineOutcome::Event(chunk) => {
+                        let delta = chat.apply(&chunk);
+                        if !delta.is_empty() {
+                            yield Ok(StreamEvent::Delta(delta));
+                        }
+                    }
+                    LineOutcome::Ignore => {}
                 }
             }
 
-            yield Ok(StreamEvent::Done {
-                finish_reason: normalize_finish_reason(last_finish.as_deref()).to_string(),
-                usage: last_usage.unwrap_or_default(),
-            });
+            // Local servers sometimes omit `[DONE]` or the finish reason, but
+            // a stream with neither was cut off.
+            if !saw_done && chat.finish_reason.is_none() {
+                yield Err(stall::ended_early());
+                return;
+            }
+            for event in chat.finish() {
+                yield Ok(event);
+            }
         };
 
         Ok(Box::pin(stream))
@@ -591,12 +642,15 @@ impl RemoteBackend {
 
     async fn stream_legacy_completion(&self, req: CompletionRequest) -> Result<EventStream> {
         let body = build_legacy_completion_body(&req, true)?;
-        let resp = self
-            .auth(self.client.post(self.endpoint("completions")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream)?;
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let resp = stall::send(
+            self.auth(self.stream_client.post(self.endpoint("completions")))
+                .json(&body),
+            idle,
+            &self.label,
+            "completions",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             return Err(
@@ -606,48 +660,49 @@ impl RemoteBackend {
 
         let label = self.label.clone();
         let stream = async_stream::stream! {
-            let mut bytes = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
+            let mut saw_done = false;
             let mut last_finish: Option<String> = None;
             let mut last_usage: Option<Usage> = None;
 
-            'outer: while let Some(chunk) = bytes.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
                     Err(e) => {
-                        yield Err(stream_read_error(&label, e));
+                        yield Err(e);
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk);
-
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line_bytes);
-                    match parse_completion_sse_line(line.trim_end()) {
-                        CompletionLineOutcome::Done => break 'outer,
-                        CompletionLineOutcome::Event(value) => {
-                            if let Some(e) = StreamErrorPayload::from_value(&value) {
-                                yield Err(e.into_error(&label, "completions"));
-                                return;
-                            }
-                            if let Some(text) = value.pointer("/choices/0/text").and_then(Value::as_str) {
-                                if !text.is_empty() {
-                                    yield Ok(StreamEvent::Delta(DeltaEvent::text(text)));
-                                }
-                            }
-                            if let Some(finish) = value.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
-                                last_finish = Some(finish.to_string());
-                            }
-                            if let Some(usage) = completion_usage(&value) {
-                                last_usage = Some(usage);
+                match parse_completion_sse_line(&line) {
+                    CompletionLineOutcome::Done => {
+                        saw_done = true;
+                        break;
+                    }
+                    CompletionLineOutcome::Event(value) => {
+                        if let Some(e) = StreamErrorPayload::from_value(&value) {
+                            yield Err(e.into_error(&label, "completions"));
+                            return;
+                        }
+                        if let Some(text) = value.pointer("/choices/0/text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                yield Ok(StreamEvent::Delta(DeltaEvent::text(text)));
                             }
                         }
-                        CompletionLineOutcome::Ignore => {}
+                        if let Some(finish) = value.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+                            last_finish = Some(finish.to_string());
+                        }
+                        if let Some(usage) = completion_usage(&value) {
+                            last_usage = Some(usage);
+                        }
                     }
+                    CompletionLineOutcome::Ignore => {}
                 }
             }
 
+            if !saw_done && last_finish.is_none() {
+                yield Err(stall::ended_early());
+                return;
+            }
             yield Ok(StreamEvent::Done {
                 finish_reason: normalize_finish_reason(last_finish.as_deref()).to_string(),
                 usage: last_usage.unwrap_or_default(),
@@ -657,14 +712,90 @@ impl RemoteBackend {
         Ok(Box::pin(stream))
     }
 
+    async fn stream_openai_responses(&self, req: CompletionRequest) -> Result<EventStream> {
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let mut summaries = self
+            .models_without_summaries
+            .lock()
+            .is_ok_and(|models| !models.contains(&req.model));
+        let resp = loop {
+            let body = openai_responses::build_body(&req, summaries, prompt_cache_key(&req))?;
+            let resp = stall::send(
+                self.auth(self.stream_client.post(self.endpoint("responses")))
+                    .json(&body),
+                idle,
+                &self.label,
+                "responses",
+            )
+            .await?;
+            if resp.status().is_success() {
+                break resp;
+            }
+            let failure = HttpFailure::read(resp).await;
+            // Unverified organizations may not request reasoning summaries;
+            // continue without them rather than fail every request.
+            if summaries
+                && failure.status == reqwest::StatusCode::BAD_REQUEST
+                && openai_responses::rejects_reasoning_summary(&failure.body)
+            {
+                if let Ok(mut models) = self.models_without_summaries.lock() {
+                    models.insert(req.model.clone());
+                }
+                summaries = false;
+                continue;
+            }
+            return Err(failure.into_error(&self.label, "responses"));
+        };
+
+        let label = self.label.clone();
+        let mut turn = ResponsesTurn::new(&label, &req.model);
+        let stream = async_stream::stream! {
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
+
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                };
+                let ResponsesLineOutcome::Event(value) = parse_responses_sse_line(&line) else {
+                    continue;
+                };
+                match turn.handle(&value) {
+                    Ok(events) => {
+                        for event in events {
+                            yield Ok(event);
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+                if turn.is_finished() {
+                    return;
+                }
+            }
+
+            yield Err(stall::ended_early());
+        };
+
+        Ok(Box::pin(stream))
+    }
+
     async fn stream_lm_studio_responses(&self, req: CompletionRequest) -> Result<EventStream> {
         let body = build_lm_studio_responses_body(&req, true)?;
-        let resp = self
-            .auth(self.client.post(self.endpoint("responses")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream)?;
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let resp = stall::send(
+            self.auth(self.stream_client.post(self.endpoint("responses")))
+                .json(&body),
+            idle,
+            &self.label,
+            "responses",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             return Err(crate::http_error::http_status_error(&self.label, "responses", resp).await);
@@ -672,55 +803,51 @@ impl RemoteBackend {
 
         let label = self.label.clone();
         let stream = async_stream::stream! {
-            let mut bytes = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
             let mut usage = Usage::default();
             let mut saw_done = false;
             let mut saw_tool_call = false;
 
-            while let Some(chunk) = bytes.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
                     Err(e) => {
-                        yield Err(stream_read_error(&label, e));
+                        yield Err(e);
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk);
-
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line_bytes);
-                    match parse_responses_sse_line(line.trim_end()) {
-                        ResponsesLineOutcome::Done => {
-                            saw_done = true;
-                            break;
-                        }
-                        ResponsesLineOutcome::Event(value) => match responses_event_to_stream_event(&value) {
-                            Ok(Some(StreamEvent::Delta(delta))) => {
-                                saw_tool_call |= !delta.tool_calls.is_empty();
-                                if !delta.is_empty() {
-                                    yield Ok(StreamEvent::Delta(delta));
-                                }
-                            }
-                            Ok(Some(StreamEvent::Done { usage: done_usage, .. })) => {
-                                usage = done_usage;
-                                saw_done = true;
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                yield Err(e);
-                                return;
-                            }
-                        },
-                        ResponsesLineOutcome::Ignore => {}
+                match parse_responses_sse_line(&line) {
+                    ResponsesLineOutcome::Done => {
+                        saw_done = true;
                     }
+                    ResponsesLineOutcome::Event(value) => match responses_event_to_stream_event(&value) {
+                        Ok(Some(StreamEvent::Delta(delta))) => {
+                            saw_tool_call |= !delta.tool_calls.is_empty();
+                            if !delta.is_empty() {
+                                yield Ok(StreamEvent::Delta(delta));
+                            }
+                        }
+                        Ok(Some(StreamEvent::Done { usage: done_usage, .. })) => {
+                            usage = done_usage;
+                            saw_done = true;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    },
+                    ResponsesLineOutcome::Ignore => {}
                 }
                 if saw_done {
                     break;
                 }
             }
 
+            if !saw_done {
+                yield Err(stall::ended_early());
+                return;
+            }
             yield Ok(StreamEvent::Done {
                 finish_reason: if saw_tool_call { "tool_calls" } else { "stop" }.to_string(),
                 usage,
@@ -732,12 +859,15 @@ impl RemoteBackend {
 
     async fn stream_lm_studio_native_chat(&self, req: CompletionRequest) -> Result<EventStream> {
         let body = build_lm_studio_native_chat_body(&req, true)?;
-        let resp = self
-            .auth(self.client.post(self.lm_studio_api_endpoint("chat")))
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream)?;
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let resp = stall::send(
+            self.auth(self.stream_client.post(self.lm_studio_api_endpoint("chat")))
+                .json(&body),
+            idle,
+            &self.label,
+            "api/v1/chat",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             return Err(
@@ -747,49 +877,46 @@ impl RemoteBackend {
 
         let label = self.label.clone();
         let stream = async_stream::stream! {
-            let mut bytes = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
             let mut usage = Usage::default();
             let mut saw_done = false;
 
-            while let Some(chunk) = bytes.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
                     Err(e) => {
-                        yield Err(stream_read_error(&label, e));
+                        yield Err(e);
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk);
-
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line_bytes);
-                    match parse_native_sse_line(line.trim_end()) {
-                        NativeLineOutcome::Event(value) => match native_chat_event_to_stream_event(&value) {
-                            Ok(Some(StreamEvent::Delta(delta))) => {
-                                if !delta.is_empty() {
-                                    yield Ok(StreamEvent::Delta(delta));
-                                }
+                match parse_native_sse_line(&line) {
+                    NativeLineOutcome::Event(value) => match native_chat_event_to_stream_event(&value) {
+                        Ok(Some(StreamEvent::Delta(delta))) => {
+                            if !delta.is_empty() {
+                                yield Ok(StreamEvent::Delta(delta));
                             }
-                            Ok(Some(StreamEvent::Done { usage: done_usage, .. })) => {
-                                usage = done_usage;
-                                saw_done = true;
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                yield Err(e);
-                                return;
-                            }
-                        },
-                        NativeLineOutcome::Ignore => {}
-                    }
+                        }
+                        Ok(Some(StreamEvent::Done { usage: done_usage, .. })) => {
+                            usage = done_usage;
+                            saw_done = true;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    },
+                    NativeLineOutcome::Ignore => {}
                 }
                 if saw_done {
                     break;
                 }
             }
 
+            if !saw_done {
+                yield Err(stall::ended_early());
+                return;
+            }
             yield Ok(StreamEvent::Done {
                 finish_reason: "stop".to_string(),
                 usage,
@@ -1196,7 +1323,7 @@ fn is_gpt_oss_model(model: &str) -> bool {
     model.trim().to_ascii_lowercase().contains("gpt-oss")
 }
 
-fn looks_reasoning_model(model: &str) -> bool {
+pub(crate) fn looks_reasoning_model(model: &str) -> bool {
     let id = model.trim().to_ascii_lowercase();
     id.starts_with("o1")
         || id.starts_with("o3")
@@ -1296,7 +1423,7 @@ fn parse_completion_sse_line(line: &str) -> CompletionLineOutcome {
 }
 
 fn completion_usage(value: &Value) -> Option<Usage> {
-    let usage = value.get("usage")?;
+    let usage = value.get("usage").filter(|usage| usage.is_object())?;
     let (cache_read_tokens, cache_write_tokens) = openai_cache_tokens(usage);
     Some(Usage {
         prompt_tokens: usage
@@ -1538,7 +1665,7 @@ fn responses_input(messages: &[milim_core::api::openai::ChatMessage]) -> Result<
     Ok(out)
 }
 
-fn responses_message_content(
+pub(crate) fn responses_message_content(
     message: &milim_core::api::openai::ChatMessage,
 ) -> Result<Option<Value>> {
     let Some(content) = &message.content else {
@@ -1568,7 +1695,8 @@ fn responses_message_content(
                     }
                     ContentPart::InputAudio { .. } | ContentPart::Unknown => {
                         return Err(Error::InvalidRequest(
-                            "LM Studio Responses reasoning path only supports text and image_url message parts".to_string(),
+                            "The Responses API path only supports text and image_url message parts"
+                                .to_string(),
                         ));
                     }
                 }
@@ -1578,7 +1706,7 @@ fn responses_message_content(
     }
 }
 
-fn responses_tools(tools: &[Tool]) -> Vec<Value> {
+pub(crate) fn responses_tools(tools: &[Tool]) -> Vec<Value> {
     tools
         .iter()
         .filter(|tool| tool.kind == "function")
@@ -1722,7 +1850,7 @@ fn response_tool_call_delta(value: &Value) -> Option<DeltaToolCall> {
     })
 }
 
-fn response_usage(value: &Value) -> Usage {
+pub(crate) fn response_usage(value: &Value) -> Usage {
     let usage = value.pointer("/response/usage").unwrap_or(&Value::Null);
     let prompt = usage
         .get("input_tokens")
@@ -1763,8 +1891,9 @@ fn response_error_message(value: &Value) -> String {
 enum LineOutcome {
     /// The terminal `data: [DONE]` sentinel.
     Done,
-    /// A parsed `chat.completion.chunk`.
-    Event(ChatCompletionChunk),
+    /// A parsed `chat.completion.chunk` object, read leniently by
+    /// [`ChatStream::apply`].
+    Event(Value),
     /// An error object the provider sent instead of (or inside) a chunk.
     Error(StreamErrorPayload),
     /// Comment, blank line, keepalive, or unparseable fragment.
@@ -1789,50 +1918,348 @@ fn parse_sse_line(line: &str) -> LineOutcome {
     if let Some(error) = StreamErrorPayload::from_value(&value) {
         return LineOutcome::Error(error);
     }
-    let (cache_read, cache_write) = value
-        .get("usage")
-        .map(openai_cache_tokens)
-        .unwrap_or_default();
-    match serde_json::from_value::<ChatCompletionChunk>(value) {
-        Ok(mut c) => {
-            if let Some(usage) = c.usage.as_mut() {
-                usage.cache_read_tokens = cache_read;
-                usage.cache_write_tokens = cache_write;
-            }
-            LineOutcome::Event(c)
-        }
-        Err(_) => LineOutcome::Ignore,
+    if value.is_object() {
+        LineOutcome::Event(value)
+    } else {
+        LineOutcome::Ignore
     }
 }
 
-/// Project an OpenAI chunk into a neutral delta + optional finish/usage.
-fn chunk_to_delta(chunk: &ChatCompletionChunk) -> (DeltaEvent, Option<String>, Option<Usage>) {
-    let mut delta = DeltaEvent::default();
-    let mut finish = None;
-    if let Some(choice) = chunk.choices.first() {
-        delta.content = choice.delta.content.clone();
-        delta.reasoning = choice
-            .delta
-            .reasoning_content
-            .clone()
-            .or_else(|| choice.delta.reasoning.clone())
-            .filter(|reasoning| !reasoning.trim().is_empty());
-        if let (Some(content), Some(reasoning)) = (&delta.content, &delta.reasoning) {
-            if reasoning == content {
-                delta.reasoning = None;
+/// Per-stream state for reading `chat.completion.chunk`s. Fields are read
+/// one at a time, so a chunk with an odd or missing field (no `id`, no tool
+/// call `index`, object-valued arguments) still delivers the rest.
+struct ChatStream {
+    finish_reason: Option<String>,
+    usage: Option<Usage>,
+    /// Call ids by slot, for servers that omit tool-call `index`.
+    unindexed_ids: Vec<String>,
+    last_slot: u32,
+    /// The model, when this is an OpenRouter stream whose
+    /// `reasoning_details` are kept for the next request.
+    openrouter_model: Option<String>,
+    reasoning_details: Vec<Value>,
+    structured_calls: bool,
+    text_calls: TextToolCalls,
+}
+
+impl ChatStream {
+    fn new(openrouter_model: Option<String>) -> Self {
+        Self {
+            finish_reason: None,
+            usage: None,
+            unindexed_ids: Vec::new(),
+            last_slot: 0,
+            openrouter_model,
+            reasoning_details: Vec::new(),
+            structured_calls: false,
+            text_calls: TextToolCalls::default(),
+        }
+    }
+
+    /// Recover tool calls written out as text for a request offering `tools`.
+    fn with_text_tool_calls(mut self, tools: &[Tool]) -> Self {
+        self.text_calls.names = tools
+            .iter()
+            .map(|tool| tool.function.name.clone())
+            .collect();
+        self
+    }
+
+    /// Fold one chunk in, returning the delta it carries.
+    fn apply(&mut self, chunk: &Value) -> DeltaEvent {
+        if let Some(usage) = completion_usage(chunk) {
+            self.usage = Some(usage);
+        }
+        let Some(choice) = chunk.pointer("/choices/0") else {
+            return DeltaEvent::default();
+        };
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = Some(reason.to_string());
+        }
+        let delta = choice.get("delta").unwrap_or(&Value::Null);
+        let text = |key: &str| delta.get(key).and_then(Value::as_str).map(str::to_string);
+        let content = text("content");
+        let reasoning = text("reasoning_content")
+            .or_else(|| text("reasoning"))
+            .filter(|reasoning| {
+                !reasoning.trim().is_empty() && Some(reasoning) != content.as_ref()
+            });
+        let mut out = DeltaEvent {
+            content: content.and_then(|content| self.text_calls.filter(content)),
+            reasoning,
+            ..Default::default()
+        };
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            out.tool_calls = calls
+                .iter()
+                .enumerate()
+                .filter_map(|(position, call)| self.tool_call(position as u32, call))
+                .collect();
+            self.structured_calls |= !out.tool_calls.is_empty();
+        }
+        if self.openrouter_model.is_some() {
+            if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+                for detail in details {
+                    merge_reasoning_detail(&mut self.reasoning_details, detail);
+                }
             }
         }
-        if let Some(tcs) = &choice.delta.tool_calls {
-            delta.tool_calls = tcs.clone();
-        }
-        finish = choice.finish_reason.clone();
+        out
     }
-    (delta, finish, chunk.usage)
+
+    fn tool_call(&mut self, position: u32, call: &Value) -> Option<DeltaToolCall> {
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let index = match call.get("index").and_then(Value::as_u64) {
+            Some(index) => index as u32,
+            // Without `index`, a new id opens a new call and an id-less
+            // fragment continues the latest one.
+            None => match &id {
+                Some(id) => {
+                    let slot = match self.unindexed_ids.iter().position(|seen| seen == id) {
+                        Some(slot) => slot,
+                        None => {
+                            self.unindexed_ids.push(id.clone());
+                            self.unindexed_ids.len() - 1
+                        }
+                    } as u32;
+                    self.last_slot = slot;
+                    slot
+                }
+                None => self.last_slot + position,
+            },
+        };
+        let function = call.get("function").unwrap_or(&Value::Null);
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let arguments = match function.get("arguments") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(arguments)) => Some(arguments.clone()),
+            // Some servers send the arguments as a JSON object.
+            Some(arguments) => Some(arguments.to_string()),
+        };
+        if id.is_none() && name.is_none() && arguments.is_none() {
+            return None;
+        }
+        Some(DeltaToolCall {
+            index,
+            id,
+            kind: call.get("type").and_then(Value::as_str).map(str::to_string),
+            function: DeltaFunction { name, arguments },
+        })
+    }
+
+    /// The terminal events: any held-back text (or the tool calls it
+    /// spelled out), OpenRouter reasoning state, then `Done`.
+    fn finish(mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        let (content, tool_calls) = self.text_calls.finish(self.structured_calls);
+        if !tool_calls.is_empty() {
+            self.finish_reason = Some("tool_calls".to_string());
+        }
+        if content.is_some() || !tool_calls.is_empty() {
+            events.push(StreamEvent::Delta(DeltaEvent {
+                content,
+                tool_calls,
+                ..Default::default()
+            }));
+        }
+        if let Some(model) = self
+            .openrouter_model
+            .filter(|_| !self.reasoning_details.is_empty())
+        {
+            events.push(StreamEvent::Delta(DeltaEvent {
+                provider_state: Some(json!({
+                    OPENROUTER_STATE_KEY: {
+                        "model": model,
+                        "reasoning_details": self.reasoning_details,
+                    }
+                })),
+                ..Default::default()
+            }));
+        }
+        events.push(StreamEvent::Done {
+            finish_reason: normalize_finish_reason(self.finish_reason.as_deref()).to_string(),
+            usage: self.usage.unwrap_or_default(),
+        });
+        events
+    }
+}
+
+const TOOL_CALL_OPEN: &str = "<tool_call>";
+const TOOL_CALL_CLOSE: &str = "</tool_call>";
+
+/// Recovers tool calls that a local model wrote out as text
+/// (`<tool_call>{"name":..,"arguments":..}</tool_call>`) and its server did
+/// not parse. Visible text that may still be such a call is held back; at the
+/// end it becomes tool calls only if it is nothing but those blocks, each
+/// naming an offered tool, and no structured call arrived. Otherwise it is
+/// released unchanged.
+#[derive(Default)]
+struct TextToolCalls {
+    /// The offered tools; empty turns recovery off.
+    names: Vec<String>,
+    held: Option<String>,
+    /// Visible text already passed through, so this turn is not a call.
+    released: bool,
+}
+
+impl TextToolCalls {
+    /// Pass visible text through, or hold it while it may still be a call.
+    fn filter(&mut self, text: String) -> Option<String> {
+        if self.names.is_empty() || self.released {
+            return Some(text);
+        }
+        let held = self.held.get_or_insert_with(String::new);
+        held.push_str(&text);
+        let start = held.trim_start();
+        if TOOL_CALL_OPEN.starts_with(start) || start.starts_with(TOOL_CALL_OPEN) {
+            return None;
+        }
+        self.released = true;
+        self.held.take()
+    }
+
+    /// The held text at the end of the stream, as text or as tool calls.
+    fn finish(&mut self, structured_calls: bool) -> (Option<String>, Vec<DeltaToolCall>) {
+        let Some(held) = self.held.take() else {
+            return (None, Vec::new());
+        };
+        match (!structured_calls).then(|| self.parse(&held)).flatten() {
+            Some(calls) => (None, calls),
+            None => ((!held.is_empty()).then_some(held), Vec::new()),
+        }
+    }
+
+    fn parse(&self, text: &str) -> Option<Vec<DeltaToolCall>> {
+        let mut blocks = text.trim().split(TOOL_CALL_OPEN);
+        if !blocks.next()?.trim().is_empty() {
+            return None;
+        }
+        let mut calls = Vec::new();
+        for (index, block) in blocks.enumerate() {
+            let block = block.trim();
+            // Chat templates often stop on the closing tag itself.
+            let block = block.strip_suffix(TOOL_CALL_CLOSE).unwrap_or(block);
+            let call: Value = serde_json::from_str(block.trim()).ok()?;
+            let name = call.get("name")?.as_str()?;
+            if !self.names.iter().any(|offered| offered == name) {
+                return None;
+            }
+            let arguments = match call.get("arguments")? {
+                Value::String(arguments) => arguments.clone(),
+                arguments @ Value::Object(_) => arguments.to_string(),
+                _ => return None,
+            };
+            calls.push(DeltaToolCall {
+                index: index as u32,
+                id: None,
+                kind: Some("function".to_string()),
+                function: DeltaFunction {
+                    name: Some(name.to_string()),
+                    arguments: Some(arguments),
+                },
+            });
+        }
+        (!calls.is_empty()).then_some(calls)
+    }
+}
+
+/// Fold one streamed OpenRouter `reasoning_details` entry in. OpenRouter
+/// streams a detail in pieces with the same `type` and `index`; their text is
+/// concatenated and later non-null fields (such as the signature) kept.
+fn merge_reasoning_detail(details: &mut Vec<Value>, incoming: &Value) {
+    let Some(incoming) = incoming.as_object() else {
+        return;
+    };
+    if let Some(Value::Object(last)) = details.last_mut() {
+        if last.get("type") == incoming.get("type") && last.get("index") == incoming.get("index") {
+            for (key, value) in incoming {
+                match (key.as_str(), last.get_mut(key), value) {
+                    (_, _, Value::Null) => {}
+                    (
+                        "text" | "summary" | "data",
+                        Some(Value::String(text)),
+                        Value::String(more),
+                    ) => text.push_str(more),
+                    _ => {
+                        last.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            return;
+        }
+    }
+    details.push(Value::Object(incoming.clone()));
+}
+
+/// OpenRouter extras on the wire messages: each assistant turn's saved
+/// `reasoning_details` (in place of its plain reasoning text), and prompt
+/// cache breakpoints on the system prompt and newest user message for
+/// Anthropic models, which cache only at explicit breakpoints.
+fn apply_openrouter_messages(wire: &mut [Value], messages: &[ChatMessage], model: &str) {
+    for (wire, message) in wire.iter_mut().zip(messages) {
+        let Some(details) = message
+            .provider_state
+            .as_ref()
+            .and_then(|state| state.get(OPENROUTER_STATE_KEY))
+            .filter(|state| state.get("model").and_then(Value::as_str) == Some(model))
+            .and_then(|state| state.get("reasoning_details"))
+        else {
+            continue;
+        };
+        if let Some(wire) = wire.as_object_mut() {
+            wire.remove("reasoning_content");
+            wire.insert("reasoning_details".to_string(), details.clone());
+        }
+    }
+    let id = model.trim().trim_start_matches('~').to_ascii_lowercase();
+    if !id.starts_with("anthropic/") {
+        return;
+    }
+    let leading_system = messages.iter().take_while(|m| m.role == "system").count();
+    let newest_user = messages.iter().rposition(|m| m.role == "user");
+    for index in [leading_system.checked_sub(1), newest_user]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(message) = wire.get_mut(index) {
+            mark_cache_breakpoint(message);
+        }
+    }
+}
+
+/// Put an ephemeral `cache_control` on a message's last text block.
+fn mark_cache_breakpoint(message: &mut Value) {
+    let cache_control = json!({ "type": "ephemeral" });
+    match message.get_mut("content") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            let text = std::mem::take(text);
+            message["content"] =
+                json!([{ "type": "text", "text": text, "cache_control": cache_control }]);
+        }
+        Some(Value::Array(parts)) => {
+            if let Some(part) = parts
+                .iter_mut()
+                .rev()
+                .find(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            {
+                part["cache_control"] = cache_control;
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1882,6 +2309,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            provider_state: None,
         }];
         let value = serde_json::to_value(backend.build_body(&req, true)).unwrap();
         assert_eq!(value["messages"][0]["content"][1]["type"], "image_url");
@@ -1897,10 +2325,11 @@ mod tests {
         let LineOutcome::Event(chunk) = parse_sse_line(line) else {
             panic!("expected event");
         };
-        let (delta, finish, usage) = chunk_to_delta(&chunk);
+        let mut chat = ChatStream::new(None);
+        let delta = chat.apply(&chunk);
         assert_eq!(delta.content.as_deref(), Some("hi"));
-        assert_eq!(finish.as_deref(), Some("stop"));
-        let usage = usage.unwrap();
+        assert_eq!(chat.finish_reason.as_deref(), Some("stop"));
+        let usage = chat.usage.unwrap();
         assert_eq!(usage.total_tokens, 4);
         assert_eq!(usage.cost_usd, Some(0.1745104));
     }
@@ -1911,7 +2340,7 @@ mod tests {
         let LineOutcome::Event(chunk) = parse_sse_line(line) else {
             panic!("expected event");
         };
-        let (delta, _, _) = chunk_to_delta(&chunk);
+        let delta = ChatStream::new(None).apply(&chunk);
         assert_eq!(delta.reasoning.as_deref(), Some("checking options"));
     }
 
@@ -1921,7 +2350,7 @@ mod tests {
         let LineOutcome::Event(chunk) = parse_sse_line(line) else {
             panic!("expected event");
         };
-        let (delta, _, _) = chunk_to_delta(&chunk);
+        let delta = ChatStream::new(None).apply(&chunk);
         assert_eq!(delta.content.as_deref(), Some("hello"));
         assert_eq!(delta.reasoning, None);
     }
@@ -2321,6 +2750,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            provider_state: None,
         }];
 
         assert!(!backend.should_use_lm_studio_native_chat(&req));
@@ -2396,6 +2826,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                provider_state: None,
             },
         ];
         req.tools = vec![Tool {
@@ -2523,9 +2954,11 @@ mod tests {
 
         assert!(start.elapsed() < Duration::from_secs(1));
         let msg = err.to_string();
+        assert!(msg.contains("timed out"), "expected a timeout, got: {msg}");
         assert!(
-            msg.contains("error sending request"),
-            "expected upstream request error, got: {msg}"
+            milim_core::provider_error::retry_hint(&err)
+                .unwrap()
+                .retryable
         );
     }
 
@@ -2571,7 +3004,9 @@ mod tests {
         let LineOutcome::Event(chunk) = parse_sse_line(line) else {
             panic!("expected a chunk");
         };
-        let usage = chunk.usage.unwrap();
+        let mut chat = ChatStream::new(None);
+        chat.apply(&chunk);
+        let usage = chat.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 2000);
         assert_eq!(usage.cache_read_tokens, Some(1536));
         assert_eq!(usage.cache_write_tokens, None);
@@ -2637,6 +3072,703 @@ mod tests {
         let body = serde_json::to_value(backend.build_body(&empty_req(), true)).unwrap();
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    /// Serve one scripted HTTP response per connection, recording each
+    /// request's JSON body.
+    async fn serve(
+        responses: Vec<(u16, &'static str, String)>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
+        tokio::spawn(async move {
+            for (status, content_type, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0u8; 4096];
+                let request_body = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    bytes.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                        continue;
+                    };
+                    let len = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= len || n == 0 {
+                        break body.to_string();
+                    }
+                };
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&request_body).unwrap_or(Value::Null));
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1"), bodies)
+    }
+
+    fn sse(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+    }
+
+    fn tool(name: &str) -> Tool {
+        Tool {
+            kind: "function".into(),
+            function: milim_core::api::openai::ToolFunction {
+                name: name.into(),
+                description: Some("List a directory.".into()),
+                parameters: Some(json!({"type":"object","properties":{"path":{"type":"string"}}})),
+            },
+        }
+    }
+
+    #[test]
+    fn recognizes_openai_reasoning_models() {
+        for model in [
+            "o1",
+            "o3",
+            "o3-mini",
+            "o4-mini-2025-04-16",
+            "o3-pro",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5.1-codex",
+            "gpt-5.5-pro",
+            "gpt-6-astra",
+            "codex-mini-latest",
+            "openai/gpt-5",
+            "GPT-5",
+        ] {
+            assert!(is_openai_reasoning_model(model), "{model}");
+        }
+        for model in [
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-5-chat-latest",
+            "gpt-5.2-chat-latest",
+            "gpt-4o-search-preview",
+            "gpt-oss-120b",
+            "gpt-realtime",
+            "o1x",
+            "qwen3-32b",
+            "anthropic/claude-sonnet-4",
+        ] {
+            assert!(!is_openai_reasoning_model(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn only_openai_reasoning_models_on_api_openai_com_use_responses() {
+        let mut req = empty_req();
+        let openai = RemoteBackend::new("OpenAI", "https://api.openai.com/v1", None);
+        for model in ["gpt-5", "o3", "gpt-6-astra"] {
+            req.model = model.into();
+            assert!(openai.should_use_openai_responses(&req), "{model}");
+        }
+        for model in ["gpt-4o", "gpt-5-chat-latest"] {
+            req.model = model.into();
+            assert!(!openai.should_use_openai_responses(&req), "{model}");
+        }
+        // Proxies and compatible servers keep Chat Completions.
+        req.model = "gpt-5".into();
+        for other in [
+            RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None),
+            RemoteBackend::new("proxy", "https://llm.example.com/v1", None),
+            RemoteBackend::new("proxy", "https://api.openai.com.example.net/v1", None),
+            RemoteBackend::new("vllm", "http://127.0.0.1:8000/v1", None),
+        ] {
+            assert!(!other.should_use_openai_responses(&req));
+        }
+    }
+
+    #[test]
+    fn chat_completions_sends_openai_reasoning_limits_through_proxies() {
+        let mut req = empty_req();
+        req.sampling.max_tokens = Some(512);
+        req.sampling.temperature = Some(0.3);
+        req.sampling.top_p = Some(0.9);
+
+        req.model = "openai/gpt-5".into();
+        let proxy = RemoteBackend::new("LiteLLM", "https://llm.example.com/v1", None);
+        let body = serde_json::to_value(proxy.build_body(&req, true)).unwrap();
+        assert_eq!(body["max_completion_tokens"], 512);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("top_p").is_none());
+
+        // OpenRouter maps `max_tokens` itself.
+        let openrouter = RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None);
+        let body = serde_json::to_value(openrouter.build_body(&req, true)).unwrap();
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body.get("temperature").is_none());
+
+        // Non-reasoning OpenAI models keep sampling, with the current field.
+        req.model = "gpt-4o".into();
+        let openai = RemoteBackend::new("OpenAI", "https://api.openai.com/v1", None);
+        let body = serde_json::to_value(openai.build_body(&req, true)).unwrap();
+        assert_eq!(body["max_completion_tokens"], 512);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_some());
+
+        req.model = "llama3".into();
+        let local = RemoteBackend::new("Ollama", "http://localhost:11434/v1", None);
+        let body = serde_json::to_value(local.build_body(&req, true)).unwrap();
+        assert_eq!(body["max_tokens"], 512);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("temperature").is_some());
+    }
+
+    #[test]
+    fn chat_completions_never_sends_provider_state() {
+        let mut req = empty_req();
+        let mut assistant = milim_core::api::openai::ChatMessage::text("assistant", "hi");
+        assistant.provider_state = Some(json!({"anthropic": {"blocks": []}}));
+        req.messages = vec![assistant];
+        for backend in [
+            RemoteBackend::new("OpenAI", "https://api.openai.com/v1", None),
+            RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None),
+        ] {
+            let body = backend.chat_body(&req, true).unwrap();
+            assert!(body["messages"][0].get("provider_state").is_none());
+            assert!(body["messages"][0].get("reasoning_details").is_none());
+        }
+    }
+
+    #[test]
+    fn builds_openai_responses_body() {
+        let mut req = empty_req();
+        req.model = "gpt-5".into();
+        req.messages = vec![
+            milim_core::api::openai::ChatMessage::text("system", "Be brief."),
+            milim_core::api::openai::ChatMessage::text("user", "List files."),
+        ];
+        req.tools = vec![tool("list_dir")];
+        req.tool_choice = Some(json!({"type":"function","function":{"name":"list_dir"}}));
+        req.response_format = Some(json!({
+            "type":"json_schema",
+            "json_schema":{"name":"out","schema":{"type":"object"},"strict":true}
+        }));
+        req.reasoning_effort = Some(ReasoningEffort::High);
+        req.sampling.max_tokens = Some(4);
+        req.sampling.temperature = Some(0.2);
+        req.sampling.top_p = Some(0.5);
+        req.sampling.stop = vec!["END".into()];
+
+        let body = openai_responses::build_body(&req, true, prompt_cache_key(&req)).unwrap();
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["reasoning"], json!({"effort":"high","summary":"auto"}));
+        assert_eq!(body["max_output_tokens"], 16, "raised to the API minimum");
+        for absent in ["temperature", "top_p", "stop", "max_tokens", "messages"] {
+            assert!(body.get(absent).is_none(), "{absent}");
+        }
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "list_dir");
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type":"function","name":"list_dir"})
+        );
+        assert_eq!(
+            body["text"]["format"],
+            json!({"type":"json_schema","name":"out","schema":{"type":"object"},"strict":true})
+        );
+        assert!(body["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("milim-"));
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type":"message","role":"system","content":"Be brief."},
+                {"type":"message","role":"user","content":"List files."}
+            ])
+        );
+
+        // Auto and On leave the effort to the model; summaries can be off.
+        req.reasoning_effort = Some(ReasoningEffort::On);
+        let body = openai_responses::build_body(&req, false, None).unwrap();
+        assert!(body.get("reasoning").is_none());
+        req.reasoning_effort = Some(ReasoningEffort::None);
+        let body = openai_responses::build_body(&req, false, None).unwrap();
+        assert_eq!(body["reasoning"], json!({"effort":"none"}));
+    }
+
+    #[tokio::test]
+    async fn streams_openai_responses_and_replays_reasoning_items() {
+        let fixture = include_str!("../tests/fixtures/openai-responses-tool-call.sse");
+        let (base, bodies) = serve(vec![(200, "text/event-stream", fixture.to_string())]).await;
+        let backend = RemoteBackend::new("OpenAI", base, Some("sk-test".into()));
+        let mut req = empty_req();
+        req.model = "gpt-5".into();
+        req.messages = vec![milim_core::api::openai::ChatMessage::text(
+            "user",
+            "List files.",
+        )];
+        req.tools = vec![tool("list_dir")];
+        req.reasoning_effort = Some(ReasoningEffort::Medium);
+
+        let mut stream = backend.stream_openai_responses(req.clone()).await.unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+        // The provider state arrives once, right before `Done`.
+        assert!(matches!(
+            &events[events.len() - 2],
+            StreamEvent::Delta(delta) if delta.provider_state.is_some()
+        ));
+        assert!(matches!(events.last(), Some(StreamEvent::Done { .. })));
+
+        let sent = bodies.lock().unwrap()[0].clone();
+        assert_eq!(
+            sent["reasoning"],
+            json!({"effort":"medium","summary":"auto"})
+        );
+
+        // Assemble the same stream the way the agent loop does.
+        let (base, _) = serve(vec![(200, "text/event-stream", fixture.to_string())]).await;
+        let backend = RemoteBackend::new("OpenAI", base, None);
+        let mut stream = backend.stream_openai_responses(req.clone()).await.unwrap();
+        let mut tools = crate::ToolCallAccumulator::default();
+        let (mut content, mut reasoning, mut state, mut done) =
+            (String::new(), String::new(), None, None);
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                StreamEvent::Delta(delta) => {
+                    content.push_str(delta.content.as_deref().unwrap_or_default());
+                    reasoning.push_str(delta.reasoning.as_deref().unwrap_or_default());
+                    delta
+                        .tool_calls
+                        .into_iter()
+                        .for_each(|call| tools.push(call));
+                    state = delta.provider_state.or(state);
+                }
+                StreamEvent::Done {
+                    finish_reason,
+                    usage,
+                } => done = Some((finish_reason, usage)),
+            }
+        }
+        let (finish_reason, usage) = done.unwrap();
+        assert_eq!(finish_reason, "tool_calls");
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert_eq!(usage.completion_tokens, 340);
+        assert_eq!(usage.total_tokens, 1540);
+        assert_eq!(usage.cache_read_tokens, Some(1024));
+        assert_eq!(content, "Checking the files.");
+        assert_eq!(
+            reasoning,
+            "**Planning** I need the file list.\n\nThen read it."
+        );
+        let calls = tools.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.as_deref(), Some("call_abc"));
+        assert_eq!(calls[0].function.name, "list_dir");
+        assert_eq!(calls[0].function.arguments, r#"{"path":"."}"#);
+        let state = state.unwrap();
+        let reasoning_item = json!({
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [
+                {"type":"summary_text","text":"**Planning** I need the file list."},
+                {"type":"summary_text","text":"Then read it."}
+            ],
+            "encrypted_content": "gAAAAB-encrypted-reasoning-1"
+        });
+        assert_eq!(
+            state,
+            json!({"openai_responses": {
+                "model": "gpt-5",
+                "items": [reasoning_item.clone()],
+                "phase": "commentary"
+            }})
+        );
+
+        // The next request replays the reasoning ahead of the call it led to.
+        let mut next = req.clone();
+        next.messages.push(milim_core::api::openai::ChatMessage {
+            role: "assistant".into(),
+            content: Some(Content::Text(content)),
+            name: None,
+            tool_calls: Some(calls),
+            tool_call_id: None,
+            reasoning_content: Some(reasoning),
+            provider_state: Some(state.clone()),
+        });
+        next.messages.push(milim_core::api::openai::ChatMessage {
+            role: "tool".into(),
+            content: Some(Content::Text("a.txt".into())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some("call_abc".into()),
+            reasoning_content: None,
+            provider_state: None,
+        });
+        let body = openai_responses::build_body(&next, true, None).unwrap();
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type":"message","role":"user","content":"List files."},
+                reasoning_item,
+                {"type":"message","role":"assistant","content":"Checking the files.","phase":"commentary"},
+                {"type":"function_call","call_id":"call_abc","name":"list_dir","arguments":"{\"path\":\".\"}"},
+                {"type":"function_call_output","call_id":"call_abc","output":"a.txt"}
+            ])
+        );
+
+        // Encrypted reasoning from another model is not replayed.
+        next.model = "o3".into();
+        let body = openai_responses::build_body(&next, true, None).unwrap();
+        assert!(body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "reasoning"));
+        assert!(body["input"][1].get("phase").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_responses_drop_summaries_for_unverified_organizations() {
+        let rejection = json!({"error":{
+            "message":"Your organization must be verified to generate reasoning summaries. Please go to: https://platform.openai.com/settings/organization/general and click on Verify Organization.",
+            "type":"invalid_request_error",
+            "param":"reasoning.summary",
+            "code":"unsupported_value"
+        }})
+        .to_string();
+        let done = sse(&[
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"ok"}),
+            json!({"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}),
+        ]);
+        let (base, bodies) = serve(vec![
+            (400, "application/json", rejection),
+            (200, "text/event-stream", done.clone()),
+            (200, "text/event-stream", done),
+        ])
+        .await;
+        let backend = RemoteBackend::new("OpenAI", base, None);
+        let mut req = empty_req();
+        req.model = "o3".into();
+
+        for _ in 0..2 {
+            let _stream = backend.stream_openai_responses(req.clone()).await.unwrap();
+        }
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies[0]["reasoning"]["summary"], "auto");
+        assert!(bodies[1].get("reasoning").is_none());
+        assert!(bodies[2].get("reasoning").is_none(), "remembered");
+    }
+
+    #[tokio::test]
+    async fn openai_responses_report_truncation_failures_and_cutoffs() {
+        let incomplete = sse(&[
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"partial"}),
+            json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":16,"total_tokens":21}}}),
+        ]);
+        let failed = sse(&[json!({
+            "type":"response.failed",
+            "response":{"error":{"code":"server_error","message":"The model failed to generate a response."}}
+        })]);
+        let cut_off =
+            sse(&[json!({"type":"response.output_text.delta","output_index":0,"delta":"partial"})]);
+        let (base, _) = serve(vec![
+            (200, "text/event-stream", incomplete),
+            (200, "text/event-stream", failed),
+            (200, "text/event-stream", cut_off),
+        ])
+        .await;
+        let backend = RemoteBackend::new("OpenAI", base, None);
+        let mut req = empty_req();
+        req.model = "gpt-5".into();
+        let drain = |req: CompletionRequest| {
+            let backend = backend.clone();
+            async move {
+                let mut stream = backend.stream_openai_responses(req).await?;
+                let mut last = None;
+                while let Some(event) = stream.next().await {
+                    last = Some(event?);
+                }
+                Ok::<_, Error>(last)
+            }
+        };
+
+        let Some(StreamEvent::Done {
+            finish_reason,
+            usage,
+        }) = drain(req.clone()).await.unwrap()
+        else {
+            panic!("expected done");
+        };
+        assert_eq!(finish_reason, "length");
+        assert_eq!(usage.completion_tokens, 16);
+
+        let error = drain(req.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("-> 500 server_error"), "{error}");
+
+        let error = drain(req).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stream ended before a completion event"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_needs_a_finish_reason_or_done_marker() {
+        let chunk = |delta: Value, finish: Value| {
+            json!({"id":"x","object":"chat.completion.chunk","created":1,"model":"m",
+                "choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+        };
+        let finish_only = sse(&[
+            chunk(json!({"content":"hi"}), Value::Null),
+            chunk(json!({}), json!("stop")),
+        ]);
+        let done_only = format!(
+            "{}data: [DONE]",
+            sse(&[chunk(json!({"content":"hi"}), Value::Null)])
+        );
+        let neither = sse(&[chunk(json!({"content":"hi"}), Value::Null)]);
+        let (base, _) = serve(vec![
+            (200, "text/event-stream", finish_only),
+            (200, "text/event-stream", done_only),
+            (200, "text/event-stream", neither),
+        ])
+        .await;
+        let backend = RemoteBackend::new("local", base, None);
+
+        let out = backend.complete(empty_req()).await.unwrap();
+        assert_eq!(out.message.text_content(), "hi");
+        // `[DONE]` without a trailing newline still counts.
+        let out = backend.complete(empty_req()).await.unwrap();
+        assert_eq!(out.finish_reason, "stop");
+        let error = backend.complete(empty_req()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stream ended before a completion event"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_reads_index_less_tool_calls_and_loose_chunks() {
+        // Shaped like Gemini's OpenAI-compatible endpoint: no chunk `id` or
+        // `created`, and whole tool calls without `index`, one per chunk.
+        let events = [
+            json!({"object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Looking.","tool_calls":[
+                {"id":"call_a","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\"a\"}"}}
+            ]}}]}),
+            json!({"object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[
+                {"id":"call_b","type":"function","function":{"name":"list_dir","arguments":{"path":"b"}}}
+            ]},"finish_reason":"tool_calls"}]}),
+        ];
+        let (base, _) = serve(vec![(200, "text/event-stream", sse(&events))]).await;
+        let backend = RemoteBackend::new("gemini-compat", base, None);
+        let out = backend.complete(empty_req()).await.unwrap();
+        assert_eq!(out.message.text_content(), "Looking.");
+        assert_eq!(out.finish_reason, "tool_calls");
+        let calls = out.message.tool_calls.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id.as_deref(), Some("call_a"));
+        assert_eq!(calls[0].function.arguments, r#"{"path":"a"}"#);
+        assert_eq!(calls[1].id.as_deref(), Some("call_b"));
+        assert_eq!(calls[1].function.name, "list_dir");
+        assert_eq!(calls[1].function.arguments, r#"{"path":"b"}"#);
+
+        // Without ids, fragments continue the call at their position.
+        let mut chat = ChatStream::new(None);
+        let first = chat.apply(&json!({"choices":[{"delta":{"tool_calls":[
+            {"function":{"name":"f","arguments":"{\"a\":"}}
+        ]}}]}));
+        let second = chat.apply(&json!({"choices":[{"delta":{"tool_calls":[
+            {"function":{"arguments":"1}"}}
+        ]}}]}));
+        assert_eq!(first.tool_calls[0].index, 0);
+        assert_eq!(second.tool_calls[0].index, 0);
+    }
+
+    #[test]
+    fn recovers_tool_calls_that_local_models_write_as_text() {
+        let chunk = |content: &str| json!({"choices":[{"delta":{"content":content}}]});
+        let run = |pieces: &[&str], finish: Value| {
+            let mut chat = ChatStream::new(None).with_text_tool_calls(&[tool("list_dir")]);
+            let mut streamed = String::new();
+            for piece in pieces {
+                streamed.push_str(
+                    chat.apply(&chunk(piece))
+                        .content
+                        .as_deref()
+                        .unwrap_or_default(),
+                );
+            }
+            chat.apply(&json!({"choices":[{"delta":{},"finish_reason":finish}]}));
+            let mut tail = DeltaEvent::default();
+            let mut finish_reason = String::new();
+            for event in chat.finish() {
+                match event {
+                    StreamEvent::Delta(delta) => tail = delta,
+                    StreamEvent::Done {
+                        finish_reason: reason,
+                        ..
+                    } => finish_reason = reason,
+                }
+            }
+            (streamed, tail, finish_reason)
+        };
+
+        let (streamed, tail, finish) = run(
+            &[
+                "\n<tool",
+                "_call>\n{\"name\": \"list_dir\", ",
+                "\"arguments\": {\"path\": \".\"}}\n</tool_call>",
+            ],
+            json!("stop"),
+        );
+        assert_eq!(streamed, "", "held back while it may be a call");
+        assert_eq!(finish, "tool_calls");
+        assert!(tail.content.is_none());
+        assert_eq!(tail.tool_calls.len(), 1);
+        assert_eq!(
+            tail.tool_calls[0].function.name.as_deref(),
+            Some("list_dir")
+        );
+        assert_eq!(
+            tail.tool_calls[0].function.arguments.as_deref(),
+            Some(r#"{"path":"."}"#)
+        );
+
+        // An unknown tool, extra prose, or plain text stays text.
+        for pieces in [
+            &["<tool_call>{\"name\":\"rm\",\"arguments\":{}}</tool_call>"][..],
+            &["<tool_call>{\"name\":\"list_dir\",\"arguments\":{}}</tool_call> done"][..],
+            &["<b>", "bold</b>"][..],
+        ] {
+            let (streamed, tail, finish) = run(pieces, json!("stop"));
+            assert_eq!(finish, "stop");
+            assert!(tail.tool_calls.is_empty());
+            assert_eq!(
+                format!("{streamed}{}", tail.content.unwrap_or_default()),
+                pieces.concat()
+            );
+        }
+        let (streamed, tail, _) = run(&["Hello ", "<tool_call>"], json!("stop"));
+        assert_eq!(streamed, "Hello <tool_call>");
+        assert!(tail.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn openrouter_keeps_reasoning_details_across_tool_steps() {
+        let chunk = |delta: Value, finish: Value| {
+            json!({"id":"gen","object":"chat.completion.chunk","created":1,"model":"anthropic/claude-sonnet-4",
+                "choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+        };
+        let events = [
+            chunk(
+                json!({"reasoning":"Let me ","reasoning_details":[
+                    {"type":"reasoning.text","text":"Let me ","format":"anthropic-claude-v1","index":0}
+                ]}),
+                Value::Null,
+            ),
+            chunk(
+                json!({"reasoning":"look.","reasoning_details":[
+                    {"type":"reasoning.text","text":"look.","format":"anthropic-claude-v1","index":0}
+                ]}),
+                Value::Null,
+            ),
+            chunk(
+                json!({"reasoning_details":[
+                    {"type":"reasoning.text","text":"","signature":"sig-1","format":"anthropic-claude-v1","index":0}
+                ]}),
+                Value::Null,
+            ),
+            chunk(
+                json!({"tool_calls":[
+                    {"index":0,"id":"toolu_1","type":"function","function":{"name":"list_dir","arguments":"{}"}}
+                ]}),
+                json!("tool_calls"),
+            ),
+        ];
+        let body = format!("{}data: [DONE]\n\n", sse(&events));
+        let (base, _) = serve(vec![(200, "text/event-stream", body)]).await;
+        let backend = RemoteBackend::new("OpenRouter", base, None);
+        let mut req = empty_req();
+        req.model = "anthropic/claude-sonnet-4".into();
+        let out = backend.complete(req.clone()).await.unwrap();
+        let state = out.message.provider_state.clone().unwrap();
+        assert_eq!(
+            state,
+            json!({"openrouter": {
+                "model": "anthropic/claude-sonnet-4",
+                "reasoning_details": [{
+                    "type":"reasoning.text",
+                    "text":"Let me look.",
+                    "signature":"sig-1",
+                    "format":"anthropic-claude-v1",
+                    "index":0
+                }]
+            }})
+        );
+
+        // Replayed on the assistant turn in place of its plain reasoning.
+        let openrouter = RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None);
+        req.messages = vec![
+            milim_core::api::openai::ChatMessage::text("system", "Be brief."),
+            milim_core::api::openai::ChatMessage::text("user", "List files."),
+            out.message,
+            milim_core::api::openai::ChatMessage {
+                role: "tool".into(),
+                content: Some(Content::Text("a.txt".into())),
+                name: None,
+                tool_calls: None,
+                tool_call_id: Some("toolu_1".into()),
+                reasoning_content: None,
+                provider_state: None,
+            },
+        ];
+        let body = openrouter.chat_body(&req, true).unwrap();
+        let assistant = &body["messages"][2];
+        assert_eq!(
+            assistant["reasoning_details"],
+            state["openrouter"]["reasoning_details"]
+        );
+        assert!(assistant.get("reasoning_content").is_none());
+        assert!(assistant.get("provider_state").is_none());
+        // Claude caches only at explicit breakpoints.
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type":"text","text":"Be brief.","cache_control":{"type":"ephemeral"}}])
+        );
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type":"text","text":"List files.","cache_control":{"type":"ephemeral"}}])
+        );
+        assert_eq!(body["messages"][3]["content"], "a.txt");
+
+        // Another model neither replays these details nor gets breakpoints.
+        req.model = "openai/gpt-5".into();
+        let body = openrouter.chat_body(&req, true).unwrap();
+        assert!(body["messages"][2].get("reasoning_details").is_none());
+        assert_eq!(body["messages"][2]["reasoning_content"], "Let me look.");
+        assert_eq!(body["messages"][0]["content"], "Be brief.");
     }
 
     fn empty_req() -> CompletionRequest {

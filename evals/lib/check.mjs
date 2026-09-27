@@ -6,6 +6,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { SKIP_EXIT_CODE } from "./tasks.mjs";
+
+export { findPython } from "./tasks.mjs";
 
 export const repo = process.cwd();
 
@@ -49,6 +52,15 @@ export function finish() {
   process.exit(1);
 }
 
+/**
+ * Stop without a verdict because the machine lacks something the task needs
+ * (for example python3). The runner records the task as skipped.
+ */
+export function skip(message) {
+  console.log(`SKIP ${message}`);
+  process.exit(SKIP_EXIT_CODE);
+}
+
 export function read(path) {
   return readFileSync(join(repo, path), "utf8");
 }
@@ -78,7 +90,23 @@ export function changedFiles() {
     .filter(Boolean)
     .map((line) => line.slice(3).replace(/^"|"$/g, ""))
     .map((path) => (path.includes(" -> ") ? path.split(" -> ")[1] : path))
-    .filter((path) => !path.split("/").includes("node_modules"));
+    .filter((path) => !path.split("/").some((part) => part === "node_modules" || part === "__pycache__"));
+}
+
+/**
+ * Lines added plus lines removed relative to the committed fixture, per
+ * changed path (untracked files count every line as added).
+ */
+export function changedLineCounts() {
+  const counts = {};
+  for (const line of git(["diff", "--numstat", "HEAD"]).split("\n").filter(Boolean)) {
+    const [added, removed, path] = line.split("\t");
+    counts[path] = (Number(added) || 0) + (Number(removed) || 0);
+  }
+  for (const path of changedFiles()) {
+    if (counts[path] === undefined && exists(path)) counts[path] = lines(read(path)).length;
+  }
+  return counts;
 }
 
 /** Fail for every changed path the predicate does not allow. */
@@ -134,6 +162,11 @@ export function runNodeTests(dir = "test", pattern = /\.(test|spec)\.m?js$/) {
     return false;
   }
   return true;
+}
+
+/** Source text with `//` line comments and block comments removed (strings are not parsed). */
+export function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
 }
 
 /** Lines of `text` split without a trailing empty entry. */

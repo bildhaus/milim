@@ -47,12 +47,6 @@ pub const MODEL_FAVORITES_SETTINGS_KEY: &str = "milim.settings";
 pub const MODEL_FAVORITES_EVENT_TYPE: &str = "model_favorites.updated";
 pub const MODEL_CATALOG_STATE_KEY: &str = "milim.modelCatalog";
 
-// Wire declarations live in `milim-control-contract`. Keeping the former
-// declarations compiled out for this cutover makes the ownership move easy to
-// audit while all server call sites use the canonical crate above.
-#[cfg(any())]
-mod legacy_control_contract;
-
 pub(crate) struct AppearanceBackgroundAsset {
     pub revision: String,
     pub mime: &'static str,
@@ -143,6 +137,12 @@ pub struct RunManager {
     /// Workspace checkpoints taken before active runs, keyed by run id, so
     /// the final assistant message can carry its undo point.
     turn_checkpoints: Mutex<HashMap<String, Value>>,
+    /// Each active native run's per-turn context message, keyed by run id,
+    /// so the assistant message can carry it for byte-stable replay.
+    turn_contexts: Mutex<HashMap<String, String>>,
+    /// Account runtimes still exiting after their turn ended, keyed by thread
+    /// id. The thread's next runtime turn waits for its predecessor.
+    harness_drains: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     events: broadcast::Sender<ControlEventV1>,
 }
 
@@ -185,6 +185,8 @@ impl RunManager {
             socket_tickets: Mutex::new(HashMap::new()),
             attachment_uploads: Mutex::new(HashMap::new()),
             turn_checkpoints: Mutex::new(HashMap::new()),
+            turn_contexts: Mutex::new(HashMap::new()),
+            harness_drains: Mutex::new(HashMap::new()),
             events,
         });
         manager.backfill_message_timelines()?;
@@ -494,5 +496,7 @@ fn control_default_true() -> bool {
     true
 }
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

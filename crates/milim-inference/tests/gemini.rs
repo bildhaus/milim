@@ -211,6 +211,7 @@ async fn sends_uploaded_image_bytes_as_gemini_inline_data() {
         tool_calls: None,
         tool_call_id: None,
         reasoning_content: None,
+        provider_state: None,
     }];
 
     backend.complete(req).await.unwrap();
@@ -367,5 +368,90 @@ async fn mid_stream_error_payloads_are_typed_upstream_errors() {
         milim_core::provider_error::retry_hint(&err)
             .unwrap()
             .retryable
+    );
+}
+
+#[tokio::test]
+async fn counts_thinking_tokens_as_output() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"Hi"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":300,"totalTokenCount":312}}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, None);
+    let out = backend.complete(basic_req("gemini-2.5-pro")).await.unwrap();
+    assert_eq!(out.usage.prompt_tokens, 10);
+    assert_eq!(out.usage.completion_tokens, 302);
+    assert_eq!(out.usage.total_tokens, 312);
+}
+
+#[tokio::test]
+async fn returns_thought_signatures_as_provider_state() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"location":"Paris"}},"thoughtSignature":"c2lnLTE="}],"role":"model"}}]}"#,
+        "\n\n",
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"c2lnLTI="}],"role":"model"},"finishReason":"STOP"}]}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, None);
+    let out = backend
+        .complete(basic_req("gemini-3-pro-preview"))
+        .await
+        .unwrap();
+    let call_id = out.message.tool_calls.as_ref().unwrap()[0]
+        .id
+        .clone()
+        .unwrap();
+    assert_eq!(
+        out.message.provider_state,
+        Some(serde_json::json!({"gemini": {
+            "signatures": { call_id.clone(): "c2lnLTE=" },
+            "text_signature": "c2lnLTI="
+        }}))
+    );
+
+    // A different backend instance (as after a restart) signs the replay
+    // from the saved provider state.
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"Sunny."}],"role":"model"},"finishReason":"STOP"}]}"#,
+        "\n\n"
+    );
+    let (base, captured) = spawn_once(sse, "text/event-stream").await;
+    let restarted = GeminiBackend::new("gemini", base, None);
+    let mut req = basic_req("gemini-3-pro-preview");
+    req.messages.push(out.message);
+    req.messages.push(ChatMessage {
+        role: "tool".to_string(),
+        content: Some(Content::Text(r#"{"temp":21}"#.to_string())),
+        name: Some("get_weather".to_string()),
+        tool_calls: None,
+        tool_call_id: Some(call_id),
+        reasoning_content: None,
+        provider_state: None,
+    });
+    restarted.complete(req).await.unwrap();
+    let sent = captured.await.unwrap();
+    let model_parts = &sent.body["contents"][1]["parts"];
+    assert_eq!(model_parts[0]["functionCall"]["name"], "get_weather");
+    assert_eq!(model_parts[0]["thoughtSignature"], "c2lnLTE=");
+}
+
+#[tokio::test]
+async fn stream_without_finish_reason_is_a_retryable_cutoff() {
+    let sse = concat!(
+        r#"data: {"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"}}]}"#,
+        "\n\n"
+    );
+    let (base, _captured) = spawn_once(sse, "text/event-stream").await;
+    let backend = GeminiBackend::new("gemini", base, None);
+    let err = backend
+        .complete(basic_req("gemini-2.5-flash"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("stream ended before a completion event"),
+        "{err}"
     );
 }

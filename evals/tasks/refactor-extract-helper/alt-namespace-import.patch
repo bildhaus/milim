@@ -1,0 +1,84 @@
+diff --git a/src/invoice.js b/src/invoice.js
+index e0052d8..8f57093 100644
+--- a/src/invoice.js
++++ b/src/invoice.js
+@@ -1,15 +1,9 @@
+-function money(cents, currency) {
+-  const sign = cents < 0 ? "-" : "";
+-  const abs = Math.abs(cents);
+-  const whole = Math.floor(abs / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+-  const fraction = String(abs % 100).padStart(2, "0");
+-  return `${sign}${currency === "EUR" ? "€" : "$"}${whole}.${fraction}`;
+-}
++import * as money from "./money.js";
+ 
+ export function renderInvoice(invoice) {
+   const lines = invoice.items.map(
+-    (item) => `${item.description}: ${money(item.quantity * item.unitCents, invoice.currency)}`,
++    (item) => `${item.description}: ${money.formatMoney(item.quantity * item.unitCents, invoice.currency)}`,
+   );
+   const total = invoice.items.reduce((sum, item) => sum + item.quantity * item.unitCents, 0);
+-  return [`Invoice ${invoice.number}`, ...lines, `Total: ${money(total, invoice.currency)}`].join("\n");
++  return [`Invoice ${invoice.number}`, ...lines, `Total: ${money.formatMoney(total, invoice.currency)}`].join("\n");
+ }
+diff --git a/src/money.js b/src/money.js
+new file mode 100644
+index 0000000..3d1ef55
+--- /dev/null
++++ b/src/money.js
+@@ -0,0 +1,8 @@
++/** Format integer cents as a currency string, e.g. 123456 USD -> "$1,234.56". */
++export function formatMoney(cents, currency) {
++  const sign = cents < 0 ? "-" : "";
++  const abs = Math.abs(cents);
++  const whole = Math.floor(abs / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
++  const fraction = String(abs % 100).padStart(2, "0");
++  return `${sign}${currency === "EUR" ? "€" : "$"}${whole}.${fraction}`;
++}
+diff --git a/src/receipt.js b/src/receipt.js
+index 82cee35..c27e2e9 100644
+--- a/src/receipt.js
++++ b/src/receipt.js
+@@ -1,15 +1,9 @@
+-const formatAmount = (cents, currency) => {
+-  const sign = cents < 0 ? "-" : "";
+-  const abs = Math.abs(cents);
+-  const whole = Math.floor(abs / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+-  const fraction = String(abs % 100).padStart(2, "0");
+-  return `${sign}${currency === "EUR" ? "€" : "$"}${whole}.${fraction}`;
+-};
++import * as money from "./money.js";
+ 
+ export function renderReceipt(payment) {
+-  return `Received ${formatAmount(payment.cents, payment.currency)} from ${payment.payer}`;
++  return `Received ${money.formatMoney(payment.cents, payment.currency)} from ${payment.payer}`;
+ }
+ 
+ export function renderRefund(payment) {
+-  return `Refunded ${formatAmount(-payment.cents, payment.currency)} to ${payment.payer}`;
++  return `Refunded ${money.formatMoney(-payment.cents, payment.currency)} to ${payment.payer}`;
+ }
+diff --git a/src/statement.js b/src/statement.js
+index 2fe259c..e32effe 100644
+--- a/src/statement.js
++++ b/src/statement.js
+@@ -1,16 +1,10 @@
++import * as money from "./money.js";
++
+ export function renderStatement(account) {
+   let balance = 0;
+   const rows = account.entries.map((entry) => {
+     balance += entry.cents;
+-    return `${entry.date}  ${fmt(entry.cents, account.currency)}  ${fmt(balance, account.currency)}`;
++    return `${entry.date}  ${money.formatMoney(entry.cents, account.currency)}  ${money.formatMoney(balance, account.currency)}`;
+   });
+   return [`Statement for ${account.owner}`, ...rows].join("\n");
+ }
+-
+-function fmt(cents, currency) {
+-  const sign = cents < 0 ? "-" : "";
+-  const abs = Math.abs(cents);
+-  const whole = Math.floor(abs / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+-  const fraction = String(abs % 100).padStart(2, "0");
+-  return `${sign}${currency === "EUR" ? "€" : "$"}${whole}.${fraction}`;
+-}

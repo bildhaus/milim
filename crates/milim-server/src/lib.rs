@@ -53,7 +53,7 @@ use milim_control_contract::{
     ControlCommandKindV1, ControlCommandStatusV1, ControlCommandV1, ThreadOriginV1,
     CONTROL_MAX_ATTACHMENT_BYTES,
 };
-use milim_core::{api::openai::ChatMessage, Error, Result};
+use milim_core::{Error, Result};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -747,20 +747,16 @@ pub fn gen_id(prefix: &str) -> String {
 /// Skill context for one native agent run: a compact index of the run's skills
 /// (loaded on demand with `load_skill`) plus the full bodies of skills the user
 /// explicitly mentioned with `@name` or `/name`.
+///
+/// The index depends only on which skills are installed, so it can sit in the
+/// cached prompt prefix. What depends on the request (the skills relevant to
+/// it when too many are installed to list, and explicitly mentioned bodies)
+/// goes with the turn instead.
 #[derive(Default)]
 pub(crate) struct AgentSkillContext {
     pub index: Option<String>,
+    pub relevant: Option<String>,
     pub explicit: Option<String>,
-}
-
-impl AgentSkillContext {
-    pub(crate) fn messages(&self) -> Vec<ChatMessage> {
-        [&self.index, &self.explicit]
-            .into_iter()
-            .flatten()
-            .map(|text| ChatMessage::text("system", text.clone()))
-            .collect()
-    }
 }
 
 pub(crate) fn agent_skill_context(
@@ -780,50 +776,66 @@ pub(crate) fn agent_skill_context(
     }
     .unwrap_or_default();
     let query = milim_skills::SkillQuery::new(query);
-    let (explicit, others): (Vec<_>, Vec<_>) =
-        skills.into_iter().partition(|skill| query.mentions(skill));
+    let explicit: Vec<_> = skills
+        .iter()
+        .filter(|skill| query.mentions(skill))
+        .cloned()
+        .collect();
     // Skill mode "none" keeps explicit mentions but exposes no index or tools.
-    let others = if mode == "none" { Vec::new() } else { others };
+    let skills = if mode == "none" { Vec::new() } else { skills };
+    let (index, relevant) = skill_index_blocks(&query, skills);
     AgentSkillContext {
-        index: skill_index_block(&query, others),
+        index,
+        relevant,
         explicit: explicit_skill_block(&explicit),
     }
 }
 
-/// List every skill when there are few; otherwise only the most relevant ones,
-/// so the index stays small. The index is ordered by name so it is stable
-/// across turns.
-fn skill_index_block(
+const MAX_INDEXED_SKILLS: usize = 20;
+const SKILL_INDEX_INTRO: &str = "Installed skills are folders of task-specific instructions and resources. When the request matches a skill's description, call load_skill with its name before starting and follow what it returns. Skills are optional guidance; the user's request and repository instructions take precedence.";
+
+/// The stable skill index and, when too many skills are installed to list
+/// them all, the per-request list of the most relevant ones. Listings are
+/// ordered by name.
+fn skill_index_blocks(
     query: &milim_skills::SkillQuery,
     skills: Vec<milim_skills::SkillDef>,
-) -> Option<String> {
-    const MAX_INDEXED_SKILLS: usize = 20;
-    const MAX_DESCRIPTION_CHARS: usize = 200;
+) -> (Option<String>, Option<String>) {
     let total = skills.len();
-    let mut listed = if total <= MAX_INDEXED_SKILLS {
-        skills
-    } else {
-        let mut relevant: Vec<_> = skills
-            .into_iter()
-            .map(|skill| (query.score(&skill), skill))
-            .filter(|(_, skill)| query.is_relevant(skill))
-            .collect();
-        relevant.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        relevant
-            .into_iter()
-            .take(MAX_INDEXED_SKILLS)
-            .map(|(_, skill)| skill)
-            .collect()
-    };
-    let hidden = total - listed.len();
-    if listed.is_empty() && hidden == 0 {
-        return None;
+    if total == 0 {
+        return (None, None);
     }
-    listed.sort_by_key(|skill| skill.name.to_lowercase());
-    let mut text = String::from(
-        "Installed skills are folders of task-specific instructions and resources. When the request matches a skill's description, call load_skill with its name before starting and follow what it returns. Skills are optional guidance; the user's request and repository instructions take precedence.",
+    if total <= MAX_INDEXED_SKILLS {
+        let mut text = String::from(SKILL_INDEX_INTRO);
+        push_skill_lines(&mut text, skills);
+        return (Some(text), None);
+    }
+    let index = format!(
+        "{SKILL_INDEX_INTRO}\n{total} skills are installed. The ones most relevant to each request are listed with it; use milim_skill_search to find others by task."
     );
-    for skill in &listed {
+    let mut relevant: Vec<_> = skills
+        .into_iter()
+        .map(|skill| (query.score(&skill), skill))
+        .filter(|(_, skill)| query.is_relevant(skill))
+        .collect();
+    relevant.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    let relevant: Vec<_> = relevant
+        .into_iter()
+        .take(MAX_INDEXED_SKILLS)
+        .map(|(_, skill)| skill)
+        .collect();
+    let relevant = (!relevant.is_empty()).then(|| {
+        let mut text = String::from("Installed skills most relevant to this request:");
+        push_skill_lines(&mut text, relevant);
+        text
+    });
+    (Some(index), relevant)
+}
+
+fn push_skill_lines(text: &mut String, mut skills: Vec<milim_skills::SkillDef>) {
+    const MAX_DESCRIPTION_CHARS: usize = 200;
+    skills.sort_by_key(|skill| skill.name.to_lowercase());
+    for skill in &skills {
         let description = skill
             .description
             .split_whitespace()
@@ -846,13 +858,6 @@ fn skill_index_block(
             text.push_str(&format!(": {description}"));
         }
     }
-    if hidden > 0 {
-        text.push_str(&format!(
-            "\n{hidden} more skill{} installed; use milim_skill_search to find one by task.",
-            if hidden == 1 { " is" } else { "s are" }
-        ));
-    }
-    Some(text)
 }
 
 fn explicit_skill_block(skills: &[milim_skills::SkillDef]) -> Option<String> {
@@ -1096,6 +1101,47 @@ mod tests {
         let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
             .with_control(control.clone());
         (state, control, store)
+    }
+
+    #[test]
+    fn skill_index_is_stable_across_requests_and_relevance_moves_to_the_turn() {
+        let store = milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store.create("Mailer", "Send email", "Use SMTP.").unwrap();
+        store
+            .create("Release", "Cut a release", "Run the script.")
+            .unwrap();
+        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+            .with_skills(store);
+        let plain = agent_skill_context(&state, "auto", &[], "fix the parser", None);
+        let mention = agent_skill_context(&state, "auto", &[], "use @mailer to announce", None);
+        let index = plain.index.clone().unwrap();
+        assert!(index.contains("- Mailer: Send email") && index.contains("- Release"));
+        assert_eq!(
+            mention.index, plain.index,
+            "an explicit mention keeps the index"
+        );
+        assert!(plain.explicit.is_none() && plain.relevant.is_none());
+        assert!(mention.explicit.unwrap().contains("Use SMTP."));
+
+        let many = milim_skills::SkillStore::new(Database::open_in_memory().unwrap()).unwrap();
+        for index in 0..MAX_INDEXED_SKILLS + 5 {
+            many.create(&format!("Tool {index:02}"), "Generic helper", "Body.")
+                .unwrap();
+        }
+        many.create("Changelog", "Write changelog entries", "Body.")
+            .unwrap();
+        let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+            .with_skills(many);
+        let first = agent_skill_context(&state, "auto", &[], "update the changelog", None);
+        let second = agent_skill_context(&state, "auto", &[], "fix a typo", None);
+        assert_eq!(first.index, second.index);
+        let index = first.index.unwrap();
+        assert!(index.contains("26 skills are installed"), "{index}");
+        assert!(!index.contains("Changelog"), "{index}");
+        assert!(first
+            .relevant
+            .unwrap()
+            .contains("- Changelog: Write changelog entries"));
     }
 
     fn occurrence(schedule: milim_automation::Schedule) -> milim_automation::DueSchedule {

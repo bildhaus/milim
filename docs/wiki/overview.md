@@ -6,7 +6,7 @@ title: milim docs wiki
 summary: Start here for one canonical development thread, model hot-swapping, local control, and diff review.
 group: Start
 order: 10
-updated: 2026-08-17
+updated: 2026-09-27
 ---
 
 milim is a model-agnostic software development desktop app with an embedded Rust backend and local HTTP API. Its default workflow keeps one canonical thread, lets the next turn hot-swap between provider, local, and account runtimes, keeps workspace execution under explicit local control, and puts Git diff review beside the conversation.
@@ -52,4 +52,4 @@ Agents, Workers, skills, schedules, MCP, media, Google Workspace, previews, and 
 
 Local-first does not mean local-only. milim can talk to OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio, Replicate, fal, Codex, and the installed Claude CLI. The important boundary is explicit routing: local API runtimes stay on the machine, provider models use milim's tool-agent loop when workspace or tool context is active, Codex and Claude use their account-runtime bridges, and remote sends can pass through the server-side privacy gate before leaving it.
 
-The canonical control path resolves complete model input from SQLite timeline and run events, treats memory as a cache, and records the privacy-processed provider request before sending it. Tool calls pass through one bounded pipeline, and follow-up, steer, and inject inputs share one durable inbox with atomic claims. Desktop and mobile keep this machinery quiet: normal transcript rendering makes no ledger request, while explicit **Run details** expands nested diagnostics inside the existing work surface.
+The canonical control path resolves each turn's model input from the SQLite timeline, rebuilds later steps of a run from an exact copy of the request it last sent (run events are the fallback), treats memory as a cache, and records the privacy-processed provider request, with credential spans masked, before sending it. Earlier turns replay as their model-visible text plus a condensed work log of their tool calls ([details](agents#conversation-history-across-turns)). Tool calls pass through one bounded pipeline, and follow-up, steer, and inject inputs share one durable inbox with atomic claims. Desktop and mobile keep this machinery quiet: normal transcript rendering makes no ledger request, while explicit **Run details** expands nested diagnostics inside the existing work surface.

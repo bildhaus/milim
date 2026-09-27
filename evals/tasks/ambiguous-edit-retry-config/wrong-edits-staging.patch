@@ -1,0 +1,13 @@
+diff --git a/config/clients.js b/config/clients.js
+index a7b519e..01e92b2 100644
+--- a/config/clients.js
++++ b/config/clients.js
+@@ -10,7 +10,7 @@ export const CLIENTS = {
+     payments: {
+       baseUrl: "https://payments.staging.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     paymentWebhooks: {
+       baseUrl: "https://payment-webhooks.staging.internal",
