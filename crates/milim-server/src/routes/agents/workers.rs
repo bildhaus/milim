@@ -178,8 +178,8 @@ pub(super) async fn resolve_worker_plan(
         ));
     }
     let mut available = None;
-    let mut plan = Vec::with_capacity(tasks.len());
-    let mut system_prompts = Vec::with_capacity(tasks.len());
+    let mut plan = Vec::new();
+    let mut system_prompts = Vec::new();
     for task in tasks {
         let prompt = trim_required_tool_arg(task.prompt, "tasks[].prompt")?;
         let preferred_model = worker_model

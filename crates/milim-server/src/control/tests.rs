@@ -942,14 +942,8 @@ fn account_runtime_resume_sends_only_messages_after_its_sync_cursor() {
         json!({"id":"user-2","role":"user","content":"thanks"}).to_string(),
     ];
     let synced = account_runtime_prompt(&with_work_log, None, None, "thanks");
-    assert!(
-        synced.contains("Assistant:\nFixed.\n\n<work_log>"),
-        "{synced}"
-    );
-    assert!(
-        synced.contains("- edit_file path=src/a.rs -> ok"),
-        "{synced}"
-    );
+    assert!(synced.contains("Assistant:\nFixed.\n\n<work_log>"));
+    assert!(synced.contains("- edit_file path=src/a.rs -> ok"));
 
     let (prompt, instructions) = account_runtime_harness_prompt(
         "codex",
