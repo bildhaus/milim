@@ -380,7 +380,7 @@ async fn panicking_run_task_fails_the_run_and_releases_its_thread() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_turn_runs_with_the_threads_settings_when_it_starts() {
+async fn queued_turn_keeps_its_frozen_model_but_takes_stricter_boundaries() {
     let (manager, state) = manager_and_state();
     create_thread(&manager, &state).await;
     let first = manager
@@ -392,6 +392,19 @@ async fn queued_turn_runs_with_the_threads_settings_when_it_starts() {
         .await
         .unwrap();
     assert_eq!(queued.status, ControlCommandStatusV1::Queued);
+    let switched = manager
+        .command(
+            state.clone(),
+            None,
+            command(
+                "switch-model",
+                ControlCommandKindV1::ThreadSetModel,
+                json!({ "model": "test-echo" }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(switched.status, ControlCommandStatusV1::Applied);
     let patched = manager
         .command(
             state.clone(),
@@ -436,8 +449,69 @@ async fn queued_turn_runs_with_the_threads_settings_when_it_starts() {
         .unwrap();
     let accepted: AcceptedTurnV1 = serde_json::from_str(&run.request_json).unwrap();
     assert_eq!(accepted.text, "queued");
+    assert_eq!(
+        accepted.config.model, "mock-echo",
+        "the queued model stays frozen"
+    );
     assert_eq!(accepted.config.approval_mode, "guarded");
     assert!(accepted.config.plan_mode);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loosening_a_thread_does_not_reach_a_turn_queued_under_stricter_settings() {
+    let (manager, state) = manager_and_state();
+    create_thread(&manager, &state).await;
+    let first = manager
+        .command(state.clone(), None, send("send-long", &long_text()))
+        .await
+        .unwrap();
+    let queued = manager
+        .command(state.clone(), None, send("send-queued", "queued"))
+        .await
+        .unwrap();
+    assert_eq!(queued.status, ControlCommandStatusV1::Queued);
+    let loosened = manager
+        .command(
+            state.clone(),
+            None,
+            command(
+                "loosen",
+                ControlCommandKindV1::ThreadSetExecutionSettings,
+                json!({ "tool_approval": "open" }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loosened.status, ControlCommandStatusV1::Applied);
+    manager
+        .command(
+            state.clone(),
+            None,
+            command("stop-long", ControlCommandKindV1::TurnStop, Value::Null),
+        )
+        .await
+        .unwrap();
+    let first_run = first.run_id.unwrap();
+    wait_until(|| !is_active(&manager, &first_run)).await;
+    let resumed = manager
+        .command(
+            state.clone(),
+            None,
+            command(
+                "resume-queued",
+                ControlCommandKindV1::TurnQueueResume,
+                json!({ "queue_id": queued.queue_id }),
+            ),
+        )
+        .await
+        .unwrap();
+    let run = manager
+        .store
+        .control_run(resumed.run_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let accepted: AcceptedTurnV1 = serde_json::from_str(&run.request_json).unwrap();
+    assert_eq!(accepted.config.approval_mode, "review");
 }
 
 #[tokio::test]

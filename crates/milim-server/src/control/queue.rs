@@ -272,9 +272,8 @@ impl RunManager {
             .mailbox_origin
             .as_ref()
             .map(|origin| origin.exchange_id.clone());
-        let started = self
-            .refresh_queued_turn_config(&state, &thread_id, &mut accepted)
-            .and_then(|()| self.start_turn(state, thread_id.clone(), accepted));
+        self.tighten_queued_turn_boundaries(&state, &thread_id, &mut accepted);
+        let started = self.start_turn(state, thread_id.clone(), accepted);
         let run_id = match started {
             Ok(run_id) => run_id,
             Err(error) => {
@@ -309,22 +308,38 @@ impl RunManager {
         Ok(run_id)
     }
 
-    /// A queued turn runs with the thread's settings as they are when it
-    /// starts, not when it was queued, so a model, approval, or privacy
-    /// change made while it waited applies to it. Its attachments are kept.
-    fn refresh_queued_turn_config(
+    /// A queued turn keeps the settings frozen when it was queued (model,
+    /// Agent, instructions, tools, attachments). Only a stricter boundary
+    /// chosen while it waited applies to it: a tighter approval mode, a
+    /// stronger privacy mode, or Plan mode. Loosening never reaches work
+    /// that was queued under the stricter setting.
+    fn tighten_queued_turn_boundaries(
         &self,
         state: &AppState,
         thread_id: &str,
         accepted: &mut AcceptedTurnV1,
-    ) -> Result<()> {
-        let thread = self
+    ) {
+        let Some(current) = self
             .store
-            .control_thread(thread_id)?
-            .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
-        let attachments = std::mem::take(&mut accepted.config.attachments);
-        accepted.config = self.resolve_turn_config(state, &thread, attachments, "sending")?;
-        Ok(())
+            .control_thread(thread_id)
+            .ok()
+            .flatten()
+            .and_then(|thread| {
+                self.resolve_turn_config(state, &thread, Vec::new(), "sending")
+                    .ok()
+            })
+        else {
+            return;
+        };
+        let config = &mut accepted.config;
+        if approval_strictness(&current.approval_mode) > approval_strictness(&config.approval_mode)
+        {
+            config.approval_mode = current.approval_mode;
+        }
+        if privacy_strictness(&current.privacy) > privacy_strictness(&config.privacy) {
+            config.privacy = current.privacy;
+        }
+        config.plan_mode |= current.plan_mode;
     }
 
     pub(super) fn drain_queue(self: &Arc<Self>, state: AppState, thread_id: String) {
@@ -337,5 +352,24 @@ impl RunManager {
             return;
         };
         let _ = self.start_queued_turn(state, thread_id, &next.id, false);
+    }
+}
+
+/// Approval modes from least to most restrictive; unknown values count as
+/// Guarded, the mode an unrecognized request resolves to.
+fn approval_strictness(mode: &str) -> u8 {
+    match mode {
+        "open" => 0,
+        "review" => 1,
+        _ => 2,
+    }
+}
+
+/// Privacy modes from least to most restrictive.
+fn privacy_strictness(mode: &str) -> u8 {
+    match mode {
+        "block" => 2,
+        "redact" => 1,
+        _ => 0,
     }
 }
