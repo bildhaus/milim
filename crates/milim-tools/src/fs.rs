@@ -36,7 +36,9 @@ const MAX_LIST_ENTRIES: usize = 1000;
 pub fn resolve_workspace_path(root: &Path, rel: &str) -> Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root)?;
     let within;
-    let rel = if Path::new(rel).is_absolute() {
+    // A rooted path counts as absolute even without a drive (`/etc` on
+    // Windows), so it gets the same containment check and message.
+    let rel = if Path::new(rel).has_root() {
         within = absolute_within(&canonical_root, Path::new(rel))?;
         within.as_path()
     } else {
