@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -29,10 +29,11 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 /// Extra time the pipeline allows beyond a command's own timeout, so the
 /// shell can kill the process tree and report partial output first.
 const DEADLINE_GRACE: Duration = Duration::from_secs(15);
-/// Bytes kept per output stream of a foreground command.
-const MAX_OUTPUT: usize = 1024 * 1024;
-/// Trailing stdout bytes searched for the working-directory marker.
-const MARKER_TAIL: usize = 8192;
+/// Leading bytes kept per output stream of a foreground command.
+const OUTPUT_HEAD: usize = 256 * 1024;
+/// Trailing bytes kept per stream; output between head and tail is dropped,
+/// so final errors and summaries always survive.
+const OUTPUT_TAIL: usize = 256 * 1024;
 /// How long output readers may keep draining after the process tree ends.
 const READER_DRAIN: Duration = Duration::from_secs(2);
 /// Output retained per background process; older output is dropped.
@@ -90,19 +91,78 @@ fn milim_secret_env_keys() -> Vec<std::ffi::OsString> {
         .collect()
 }
 
-/// PowerShell on Windows, `sh -c` elsewhere, in its own process group.
+/// The shell that runs host commands.
+struct HostShell {
+    program: PathBuf,
+    /// Shown to the model: `bash`, `zsh`, `sh`, `PowerShell 7`, or
+    /// `Windows PowerShell 5.1`.
+    label: &'static str,
+}
+
+/// PowerShell 7 (`pwsh`) when installed, else Windows PowerShell 5.1, on
+/// Windows. Elsewhere bash (the user's `$SHELL` when it is a bash), which is
+/// what models write commands for; zsh or `sh` only when bash is missing.
+fn host_shell() -> &'static HostShell {
+    static SHELL: OnceLock<HostShell> = OnceLock::new();
+    SHELL.get_or_init(|| {
+        if cfg!(windows) {
+            return match super::search::find_helper("pwsh") {
+                Some(program) => HostShell {
+                    program,
+                    label: "PowerShell 7",
+                },
+                None => HostShell {
+                    program: "powershell".into(),
+                    label: "Windows PowerShell 5.1",
+                },
+            };
+        }
+        let login = std::env::var_os("SHELL")
+            .map(PathBuf::from)
+            .filter(|shell| shell.is_file());
+        let named = |name: &str| {
+            login
+                .clone()
+                .filter(|shell| shell.file_name().is_some_and(|file| file == name))
+        };
+        let bash = named("bash")
+            .or_else(|| Some(PathBuf::from("/bin/bash")).filter(|bash| bash.is_file()))
+            .or_else(|| super::search::find_helper("bash"));
+        match (bash, named("zsh")) {
+            (Some(program), _) => HostShell {
+                program,
+                label: "bash",
+            },
+            (None, Some(program)) => HostShell {
+                program,
+                label: "zsh",
+            },
+            (None, None) => HostShell {
+                program: "sh".into(),
+                label: "sh",
+            },
+        }
+    })
+}
+
+/// Makes PowerShell write UTF-8, whatever the console code page is.
+const POWERSHELL_UTF8: &str = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding\n";
+
+/// The host shell running `script` in its own process group. POSIX shells get
+/// the login shell's `PATH`, so a Finder- or Dock-launched app still finds
+/// `cargo`, `npm`, and version-manager binaries.
 fn shell_command(cwd: &Path, script: &str) -> Command {
-    let mut cmd = if cfg!(windows) {
-        let mut cmd = Command::new("powershell");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let shell = host_shell();
+    let mut cmd = Command::new(&shell.program);
+    if cfg!(windows) {
+        let script = format!("{POWERSHELL_UTF8}{script}");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
         #[cfg(windows)]
         cmd.creation_flags(milim_core::proc::CREATE_NO_WINDOW);
-        cmd
     } else {
-        let mut cmd = Command::new("sh");
         cmd.args(["-c", script]);
-        cmd
-    };
+        cmd.env("PATH", super::search::helper_search_path());
+    }
     cmd.current_dir(cwd);
     for key in milim_secret_env_keys() {
         cmd.env_remove(key);
@@ -144,15 +204,44 @@ fn wrap_with_cwd_marker(command: &str, marker: &str) -> String {
     }
 }
 
-/// Output of one stream: the first bytes up to a limit plus the stream's tail.
+/// Output of one stream: its first [`OUTPUT_HEAD`] bytes and last
+/// [`OUTPUT_TAIL`] bytes, with the size of the dropped middle.
 #[derive(Default)]
 struct Captured {
-    kept: Vec<u8>,
-    truncated: bool,
+    head: Vec<u8>,
     tail: VecDeque<u8>,
+    /// Bytes dropped between `head` and `tail`.
+    omitted: u64,
 }
 
-async fn capture(mut stream: impl AsyncRead + Unpin, sink: Arc<Mutex<Captured>>, tail_len: usize) {
+impl Captured {
+    fn push(&mut self, chunk: &[u8]) {
+        let room = OUTPUT_HEAD.saturating_sub(self.head.len()).min(chunk.len());
+        self.head.extend_from_slice(&chunk[..room]);
+        self.tail.extend(&chunk[room..]);
+        let excess = self.tail.len().saturating_sub(OUTPUT_TAIL);
+        self.tail.drain(..excess);
+        self.omitted += excess as u64;
+    }
+
+    /// The kept output, with a marker where the middle was dropped.
+    fn text(&self) -> String {
+        let tail = self.tail.iter().copied().collect::<Vec<_>>();
+        if self.omitted == 0 {
+            let mut all = self.head.clone();
+            all.extend_from_slice(&tail);
+            return String::from_utf8_lossy(&all).into_owned();
+        }
+        format!(
+            "{}\n[... {} bytes of output omitted ...]\n{}",
+            String::from_utf8_lossy(&self.head),
+            self.omitted,
+            String::from_utf8_lossy(&tail)
+        )
+    }
+}
+
+async fn capture(mut stream: impl AsyncRead + Unpin, sink: Arc<Mutex<Captured>>) {
     let mut buffer = [0_u8; 8192];
     while let Ok(count) = stream.read(&mut buffer).await {
         if count == 0 {
@@ -161,15 +250,7 @@ async fn capture(mut stream: impl AsyncRead + Unpin, sink: Arc<Mutex<Captured>>,
         let Ok(mut captured) = sink.lock() else {
             break;
         };
-        let chunk = &buffer[..count];
-        let room = MAX_OUTPUT.saturating_sub(captured.kept.len());
-        captured.kept.extend_from_slice(&chunk[..count.min(room)]);
-        captured.truncated |= count > room;
-        if tail_len > 0 {
-            captured.tail.extend(chunk);
-            let excess = captured.tail.len().saturating_sub(tail_len);
-            captured.tail.drain(..excess);
-        }
+        captured.push(&buffer[..count]);
     }
 }
 
@@ -180,29 +261,35 @@ fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Remove the working-directory marker line from captured stdout and return
-/// the directory it reported.
+/// the directory it reported. The marker is the stream's last line, so it
+/// sits in the tail unless nothing was dropped (then head and tail join).
 fn take_marker(captured: &mut Captured, marker: &str) -> Option<String> {
-    let tail = captured.tail.iter().copied().collect::<Vec<_>>();
-    let tail = String::from_utf8_lossy(&tail);
-    let at = tail.rfind(marker)?;
-    let dir = tail[at + marker.len()..]
-        .split('\n')
-        .next()?
-        .trim_end_matches('\r')
-        .to_string();
-    if let Some(position) = find_last(&captured.kept, marker.as_bytes()) {
-        let start = if position > 0 && captured.kept[position - 1] == b'\n' {
-            position - 1
-        } else {
-            position
-        };
-        let end = captured.kept[position..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map(|offset| position + offset + 1)
-            .unwrap_or(captured.kept.len());
-        captured.kept.drain(start..end);
+    let mut tail = captured.tail.drain(..).collect::<Vec<_>>();
+    if captured.omitted == 0 {
+        captured.head.append(&mut tail);
+        return strip_marker(&mut captured.head, marker);
     }
+    let dir = strip_marker(&mut tail, marker);
+    captured.tail = tail.into();
+    dir
+}
+
+fn strip_marker(bytes: &mut Vec<u8>, marker: &str) -> Option<String> {
+    let position = find_last(bytes, marker.as_bytes())?;
+    let end = bytes[position..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|offset| position + offset + 1)
+        .unwrap_or(bytes.len());
+    let dir = String::from_utf8_lossy(&bytes[position + marker.len()..end])
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
+    let start = if position > 0 && bytes[position - 1] == b'\n' {
+        position - 1
+    } else {
+        position
+    };
+    bytes.drain(start..end);
     (!dir.is_empty()).then_some(dir)
 }
 
@@ -237,8 +324,8 @@ async fn run_foreground(cwd: &Path, command: &str, timeout: Duration) -> Result<
     let stdout_sink = Arc::new(Mutex::new(Captured::default()));
     let stderr_sink = Arc::new(Mutex::new(Captured::default()));
     let readers = [
-        tokio::spawn(capture(stdout, stdout_sink.clone(), MARKER_TAIL)),
-        tokio::spawn(capture(stderr, stderr_sink.clone(), 0)),
+        tokio::spawn(capture(stdout, stdout_sink.clone())),
+        tokio::spawn(capture(stderr, stderr_sink.clone())),
     ];
     let (status, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => (Some(status?), false),
@@ -437,7 +524,7 @@ fn chunk_text(result: &Value) -> Option<String> {
     Some(out)
 }
 
-/// Run a command in the host terminal. PowerShell on Windows, `sh -c`
+/// Run a command in the host terminal. PowerShell on Windows, bash
 /// elsewhere. Executes on the real machine - the agentic counterpart to the
 /// Docker-sandboxed `run_command`.
 pub struct ShellTool {
@@ -544,6 +631,18 @@ impl ShellTool {
     }
 }
 
+/// The `shell` tool description for the host shell named `label`.
+fn shell_description(label: &str) -> String {
+    let chaining = match label {
+        "Windows PowerShell 5.1" => "This is Windows PowerShell 5.1: `&&` and `||` do not exist. Separate commands with `;` (the next one always runs) and continue only on success with `if ($LASTEXITCODE -eq 0) { ... }` or `if ($?) { ... }`.",
+        "PowerShell 7" => "Chain with `&&` / `||` (run the next command only on success / failure) or `;` (always).",
+        _ => "Chain with `&&` (stop at the first failure) or `;` (always continue).",
+    };
+    format!(
+        "Run a command on the host with {label}. The command is non-interactive: stdin is closed, so anything that prompts fails or waits until the timeout; pass flags such as --yes or --no-edit instead. Commands start in the directory the previous command ended in (initially the working folder), so `cd` persists. {chaining} timeout_secs defaults to 120 (max 600). For servers, watchers, and other long-running processes set run_in_background, then use process_output and process_kill; do not background with `&`. Output beyond 512 KB per stream keeps its beginning and end."
+    )
+}
+
 fn timeout_secs(args: &Value) -> Result<u64> {
     let secs = optional_u64(args, "timeout_secs", DEFAULT_TIMEOUT_SECS)?;
     if !(1..=MAX_TIMEOUT_SECS).contains(&secs) {
@@ -566,15 +665,12 @@ impl Tool for ShellTool {
         "shell"
     }
     fn description(&self) -> &str {
-        if cfg!(windows) {
-            "Run a PowerShell command on the host. Commands start in the directory the previous command ended in (initially the working folder), so `cd` persists. timeout_secs defaults to 120 (max 600); run_in_background returns a process_id for process_output and process_kill."
-        } else {
-            "Run a shell command (sh -c) on the host. Commands start in the directory the previous command ended in (initially the working folder), so `cd` persists. timeout_secs defaults to 120 (max 600); run_in_background returns a process_id for process_output and process_kill."
-        }
+        static DESCRIPTION: OnceLock<String> = OnceLock::new();
+        DESCRIPTION.get_or_init(|| shell_description(host_shell().label))
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
-            "command":{"type":"string"},
+            "command":{"type":"string","description":"The command line to run. Quote paths and arguments that contain spaces or special characters."},
             "timeout_secs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_SECS,"description":"Kill the command's process tree after this many seconds. Default 120."},
             "run_in_background":{"type":"boolean","description":"Start the command and return a process_id immediately, for servers and long jobs. Default false."}
         },"required":["command"]})
@@ -627,16 +723,10 @@ impl Tool for ShellTool {
             out.push('\n');
             out.push_str(stdout.trim_end_matches('\n'));
         }
-        if result["stdout_truncated"].as_bool().unwrap_or(false) {
-            out.push_str("\n[stdout truncated at 1 MiB]");
-        }
         let stderr = result.get("stderr")?.as_str()?;
         if !stderr.is_empty() {
             out.push_str("\n[stderr]\n");
             out.push_str(stderr.trim_end_matches('\n'));
-        }
-        if result["stderr_truncated"].as_bool().unwrap_or(false) {
-            out.push_str("\n[stderr truncated at 1 MiB]");
         }
         if result["cwd_reset"].as_bool().unwrap_or(false) {
             out.push_str("\n[The command left the workspace, so the working directory was reset to the workspace root.]");
@@ -657,10 +747,12 @@ impl Tool for ShellTool {
         let finished = run_foreground(&start, command, Duration::from_secs(timeout)).await?;
         let (cwd, cwd_reset) = self.settle_dir(start, finished.final_dir)?;
         Ok(json!({
-            "stdout": String::from_utf8_lossy(&finished.stdout.kept),
-            "stderr": String::from_utf8_lossy(&finished.stderr.kept),
-            "stdout_truncated": finished.stdout.truncated,
-            "stderr_truncated": finished.stderr.truncated,
+            "stdout": finished.stdout.text(),
+            "stderr": finished.stderr.text(),
+            "stdout_truncated": finished.stdout.omitted > 0,
+            "stderr_truncated": finished.stderr.omitted > 0,
+            "stdout_omitted_bytes": finished.stdout.omitted,
+            "stderr_omitted_bytes": finished.stderr.omitted,
             "exit_code": finished.exit_code,
             "timed_out": finished.timed_out,
             "timeout_secs": timeout,
@@ -777,24 +869,90 @@ mod tests {
     fn marker_is_stripped_from_output_and_reports_the_directory() {
         let marker = "__MILIM_CWD_test__";
         let mut captured = Captured::default();
-        let stream = format!("hello\n\n{marker}/tmp/work\n");
-        captured.kept.extend_from_slice(stream.as_bytes());
-        captured.tail.extend(stream.as_bytes());
+        captured.push(format!("hello\n\n{marker}/tmp/work\n").as_bytes());
         assert_eq!(
             take_marker(&mut captured, marker).as_deref(),
             Some("/tmp/work")
         );
-        assert_eq!(captured.kept, b"hello\n");
+        assert_eq!(captured.text(), "hello\n");
 
         let mut unterminated = Captured::default();
-        let stream = format!("no newline\n{marker}/tmp\n");
-        unterminated.kept.extend_from_slice(stream.as_bytes());
-        unterminated.tail.extend(stream.as_bytes());
+        unterminated.push(format!("no newline\n{marker}/tmp\n").as_bytes());
         assert_eq!(
             take_marker(&mut unterminated, marker).as_deref(),
             Some("/tmp")
         );
-        assert_eq!(unterminated.kept, b"no newline");
+        assert_eq!(unterminated.text(), "no newline");
+
+        // Past the head, the marker is found in the kept tail.
+        let mut long = Captured::default();
+        long.push(&vec![b'a'; OUTPUT_HEAD]);
+        long.push(&vec![b'b'; OUTPUT_TAIL + 10]);
+        long.push(format!("final error\n\n{marker}/tmp/deep\n").as_bytes());
+        assert_eq!(take_marker(&mut long, marker).as_deref(), Some("/tmp/deep"));
+        let text = long.text();
+        assert!(
+            text.ends_with("final error\n"),
+            "{}",
+            &text[text.len() - 40..]
+        );
+        assert!(text.contains(&format!(
+            "\n[... {} bytes of output omitted ...]\n",
+            long.omitted
+        )));
+    }
+
+    #[test]
+    fn capture_keeps_the_head_and_the_tail_of_long_output() {
+        let mut captured = Captured::default();
+        captured.push(b"first line\n");
+        for _ in 0..200 {
+            captured.push(&[b'x'; 8192]);
+        }
+        captured.push(b"\nerror: the last line\n");
+        assert_eq!(captured.head.len(), OUTPUT_HEAD);
+        assert_eq!(captured.tail.len(), OUTPUT_TAIL);
+        assert_eq!(
+            captured.omitted as usize,
+            11 + 200 * 8192 + 22 - OUTPUT_HEAD - OUTPUT_TAIL
+        );
+        let text = captured.text();
+        assert!(text.starts_with("first line\n"));
+        assert!(text.ends_with("error: the last line\n"));
+    }
+
+    #[test]
+    fn descriptions_state_the_chaining_rules_of_each_shell() {
+        assert!(shell_description("Windows PowerShell 5.1").contains("`&&` and `||` do not exist"));
+        assert!(shell_description("PowerShell 7").contains("`&&` / `||`"));
+        let bash = shell_description("bash");
+        assert!(bash.contains("with bash") && bash.contains("stdin is closed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_commands_run_in_bash_with_the_login_path() {
+        if host_shell().label != "bash" {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = runtime
+            .block_on(async {
+                shell_command(Path::new("/"), "printf '%s|%s' \"$BASH_VERSION\" \"$PATH\"")
+                    .output()
+                    .await
+            })
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (version, path) = stdout.split_once('|').unwrap();
+        assert!(!version.is_empty(), "not bash: {stdout}");
+        assert_eq!(
+            path,
+            super::super::search::helper_search_path().to_str().unwrap()
+        );
     }
 
     #[test]

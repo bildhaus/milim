@@ -1,0 +1,43 @@
+diff --git a/billing/invoice.py b/billing/invoice.py
+index 9a03234..a480b2d 100644
+--- a/billing/invoice.py
++++ b/billing/invoice.py
+@@ -8,6 +8,12 @@ Descriptions may be quoted and may contain commas. Money is handled in
+ exact decimal arithmetic: amounts are rounded half up to whole cents.
+ """
+ 
++import csv
++import io
++from decimal import ROUND_HALF_UP, Decimal
++
++CENT = Decimal("0.01")
++
+ 
+ def parse_lines(text):
+     """Return one dict per invoice line.
+@@ -16,10 +22,9 @@ def parse_lines(text):
+     ``unit_price`` (a string with exactly the digits given, such as "19.99").
+     Blank lines are ignored.
+     """
+-    rows = [line for line in text.strip().splitlines() if line.strip()]
++    rows = [row for row in csv.reader(io.StringIO(text)) if any(cell.strip() for cell in row)]
+     lines = []
+-    for row in rows[1:]:
+-        description, quantity, unit_price = row.split(",")
++    for description, quantity, unit_price in rows[1:]:
+         lines.append(
+             {
+                 "description": description,
+@@ -38,10 +43,6 @@ def invoice_total(lines, tax_rate):
+     ``total`` is subtotal + tax.
+     """
+     subtotal = sum(line["quantity"] * float(line["unit_price"]) for line in lines)
+-    tax = round(subtotal * float(tax_rate), 2)
++    tax = round(subtotal * float(tax_rate) + 1e-9, 2)
+     total = subtotal + tax
+-    return {
+-        "subtotal": "%.2f" % subtotal,
+-        "tax": "%.2f" % tax,
+-        "total": "%.2f" % total,
+-    }
++    return {"subtotal": "%.2f" % subtotal, "tax": "%.2f" % tax, "total": "%.2f" % total}

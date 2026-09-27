@@ -1,0 +1,17 @@
+{
+  "id": "multiturn-phone-dedupe",
+  "title": "Build a helper, then reuse it in a follow-up turn",
+  "category": "multi-turn",
+  "turns": [
+    {
+      "prompt": "Add a `normalizePhone(raw)` function in a new file src/phone.js and export it. It converts a US phone number written in any of these styles to E.164 form (`+15551234567`): `555-123-4567`, `(555) 123-4567`, `555.123.4567`, `5551234567`, `1-555-123-4567`, and `+1 555 123 4567`. Any string that is not a 10-digit US number, optionally preceded by the country code 1, throws a RangeError. Add tests for it.",
+      "timeout_s": 300
+    },
+    {
+      "prompt": "Now use the function you just wrote to add `dedupeContacts(list)` to src/contacts.js. Two contacts are the same person when their phone numbers normalize to the same number. Keep the first contact for each person, in input order, and if it has no `email`, take the email from its first later duplicate that has one. Contacts whose phone cannot be normalized are kept as they are. Reuse the helper instead of duplicating its logic, and add tests.",
+      "timeout_s": 300
+    }
+  ],
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

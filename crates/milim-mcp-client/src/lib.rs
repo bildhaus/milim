@@ -733,10 +733,11 @@ impl McpClient {
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    input_schema: t
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or_else(|| json!({"type": "object"})),
+                    input_schema: inline_local_refs(
+                        t.get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| json!({"type": "object"})),
+                    ),
                     effect: annotation_effect(&t, false),
                     declared_read_only: t
                         .pointer("/annotations/readOnlyHint")
@@ -1017,8 +1018,8 @@ impl ServerSlot {
 }
 
 /// An [`milim_tools::Tool`] that proxies to a remote MCP tool. Exposed under a
-/// prefixed name (`<server>__<tool>`) to avoid colliding with builtins; calls
-/// use the original server-side name.
+/// prefixed name (`<server slug>_<hash>__<tool>`) to avoid colliding with
+/// builtins and other servers; calls use the original server-side name.
 pub struct McpTool {
     slot: Arc<ServerSlot>,
     exposed_name: String,
@@ -1108,6 +1109,9 @@ impl Tool for McpTool {
         }
         result
     }
+    fn model_text(&self, result: &Value) -> Option<String> {
+        mcp_result_text(&self.model_result(result))
+    }
     fn aliases(&self) -> Vec<String> {
         self.aliases.clone()
     }
@@ -1119,55 +1123,63 @@ impl Tool for McpTool {
     }
 }
 
-struct McpListResourcesTool {
+/// Name, description, and connection shared by a server's resource and
+/// prompt tools.
+struct McpMetaTool {
     slot: Arc<ServerSlot>,
     name: String,
+    description: String,
+    aliases: Vec<String>,
 }
+
+/// The [`Tool`] methods every meta tool shares.
+macro_rules! mcp_meta_tool {
+    () => {
+        fn name(&self) -> &str {
+            &self.0.name
+        }
+
+        fn description(&self) -> &str {
+            &self.0.description
+        }
+
+        fn aliases(&self) -> Vec<String> {
+            self.0.aliases.clone()
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        fn environment_policy(&self) -> ProcessEnvironmentPolicy {
+            ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
+        }
+    };
+}
+
+struct McpListResourcesTool(McpMetaTool);
 
 #[async_trait]
 impl Tool for McpListResourcesTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        "List resources and resource templates exposed by this MCP server."
-    }
+    mcp_meta_tool!();
 
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})
     }
 
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
-        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
     async fn invoke(&self, _args: Value) -> Result<Value> {
-        let client = self.slot.client()?;
+        let client = self.0.slot.client()?;
         let resources = client.list_resources().await?;
         let resource_templates = client.list_resource_templates().await?;
         Ok(json!({ "resources": resources, "resourceTemplates": resource_templates }))
     }
 }
 
-struct McpReadResourceTool {
-    slot: Arc<ServerSlot>,
-    name: String,
-}
+struct McpReadResourceTool(McpMetaTool);
 
 #[async_trait]
 impl Tool for McpReadResourceTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        "Read a resource from this MCP server by URI."
-    }
+    mcp_meta_tool!();
 
     fn input_schema(&self) -> Value {
         json!({
@@ -1178,69 +1190,35 @@ impl Tool for McpReadResourceTool {
         })
     }
 
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
-        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
     async fn invoke(&self, args: Value) -> Result<Value> {
         let uri = args
             .get("uri")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidRequest("uri is required".into()))?;
-        self.slot.client()?.read_resource(uri).await
+        self.0.slot.client()?.read_resource(uri).await
     }
 }
 
-struct McpListPromptsTool {
-    slot: Arc<ServerSlot>,
-    name: String,
-}
+struct McpListPromptsTool(McpMetaTool);
 
 #[async_trait]
 impl Tool for McpListPromptsTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        "List prompts exposed by this MCP server."
-    }
+    mcp_meta_tool!();
 
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{},"additionalProperties":false})
     }
 
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
-        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
     async fn invoke(&self, _args: Value) -> Result<Value> {
-        Ok(json!({ "prompts": self.slot.client()?.list_prompts().await? }))
+        Ok(json!({ "prompts": self.0.slot.client()?.list_prompts().await? }))
     }
 }
 
-struct McpGetPromptTool {
-    slot: Arc<ServerSlot>,
-    name: String,
-}
+struct McpGetPromptTool(McpMetaTool);
 
 #[async_trait]
 impl Tool for McpGetPromptTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        "Get a prompt from this MCP server by name."
-    }
+    mcp_meta_tool!();
 
     fn input_schema(&self) -> Value {
         json!({
@@ -1254,21 +1232,180 @@ impl Tool for McpGetPromptTool {
         })
     }
 
-    fn effect(&self) -> ToolEffect {
-        ToolEffect::ReadOnly
-    }
-
-    fn environment_policy(&self) -> ProcessEnvironmentPolicy {
-        ProcessEnvironmentPolicy::ConfiguredIntegrationSanitized
-    }
-
     async fn invoke(&self, args: Value) -> Result<Value> {
         let name = args
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidRequest("name is required".into()))?;
         let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
-        self.slot.client()?.get_prompt(name, arguments).await
+        self.0.slot.client()?.get_prompt(name, arguments).await
+    }
+}
+
+/// Plain text of a `tools/call` result for the model: text blocks verbatim,
+/// other blocks as short placeholders, and `structuredContent` as JSON only
+/// when no text block already carries the same value (servers are asked to
+/// mirror it there).
+fn mcp_result_text(result: &Value) -> Option<String> {
+    let content = result.get("content").and_then(Value::as_array);
+    let structured = result
+        .get("structuredContent")
+        .filter(|value| !value.is_null());
+    if content.is_none() && structured.is_none() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut mirrored = false;
+    let mut images = 0;
+    for item in content.into_iter().flatten() {
+        let field = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default();
+        match field("type") {
+            "text" => {
+                let text = field("text");
+                mirrored |= structured.is_some_and(|structured| {
+                    serde_json::from_str::<Value>(text).is_ok_and(|parsed| &parsed == structured)
+                });
+                parts.push(text.to_string());
+            }
+            "image" => {
+                images += 1;
+                // Only the first image is attached for vision models.
+                parts.push(if images == 1 {
+                    "[image: attached in the next message]".to_string()
+                } else {
+                    "[image omitted]".to_string()
+                });
+            }
+            "audio" => parts.push("[audio omitted]".to_string()),
+            "resource" => {
+                let resource = &item["resource"];
+                let uri = resource["uri"].as_str().unwrap_or_default();
+                parts.push(match resource.get("text").and_then(Value::as_str) {
+                    Some(text) => format!("[resource {uri}]\n{text}"),
+                    None => format!("[binary resource {uri} omitted]"),
+                });
+            }
+            "resource_link" => parts.push(format!(
+                "[resource link: {} {}]",
+                field("name"),
+                field("uri")
+            )),
+            _ => parts.push(item.to_string()),
+        }
+    }
+    if let Some(structured) = structured.filter(|_| !mirrored) {
+        parts.push(structured.to_string());
+    }
+    let text = if parts.is_empty() {
+        "(no output)".to_string()
+    } else {
+        parts.join("\n")
+    };
+    Some(
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            format!("The tool reported an error:\n{text}")
+        } else {
+            text
+        },
+    )
+}
+
+/// Inline `$ref`s that point into the schema itself (`#/$defs/...`,
+/// `#/definitions/...`): several providers reject references in tool
+/// parameters. A recursive reference becomes an unconstrained schema, and
+/// references to other documents are kept. Schemas that would grow past a
+/// bound are left as they are.
+fn inline_local_refs(schema: Value) -> Value {
+    const MAX_INLINED_BYTES: usize = 128 * 1024;
+    if !contains_ref(&schema) {
+        return schema;
+    }
+    // The definitions are only walked through references to them.
+    let mut body = schema.clone();
+    let definitions = ["$defs", "definitions"].map(|key| {
+        body.as_object_mut()
+            .and_then(|object| object.remove(key))
+            .map(|value| (key, value))
+    });
+    let mut inlined = resolve_refs(body, &schema, &mut RefWalk::default());
+    if serde_json::to_vec(&inlined).map_or(usize::MAX, |encoded| encoded.len()) > MAX_INLINED_BYTES
+    {
+        return schema;
+    }
+    if contains_ref(&inlined) {
+        if let Some(object) = inlined.as_object_mut() {
+            object.extend(
+                definitions
+                    .into_iter()
+                    .flatten()
+                    .map(|(key, value)| (key.to_string(), value)),
+            );
+        }
+    }
+    inlined
+}
+
+fn contains_ref(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.get("$ref").is_some_and(Value::is_string) || object.values().any(contains_ref)
+        }
+        Value::Array(items) => items.iter().any(contains_ref),
+        _ => false,
+    }
+}
+
+/// References being expanded, innermost last, and how many were expanded.
+#[derive(Default)]
+struct RefWalk {
+    stack: Vec<String>,
+    expanded: usize,
+}
+
+fn resolve_refs(value: Value, root: &Value, walk: &mut RefWalk) -> Value {
+    // Past this many expansions the remaining references are kept, bounding
+    // the work a schema of mutually repeating definitions can cause.
+    const MAX_EXPANSIONS: usize = 1000;
+    match value {
+        Value::Object(mut object) => {
+            let local = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .filter(|reference| reference.starts_with('#'))
+                .map(str::to_string);
+            if let Some(reference) = local.filter(|_| walk.expanded < MAX_EXPANSIONS) {
+                if walk.stack.contains(&reference) {
+                    object.remove("$ref");
+                } else if let Some(target) = root.pointer(&reference[1..]).cloned() {
+                    object.remove("$ref");
+                    walk.expanded += 1;
+                    walk.stack.push(reference);
+                    let resolved = resolve_refs(target, root, walk);
+                    walk.stack.pop();
+                    let Value::Object(mut merged) = resolved else {
+                        return resolved;
+                    };
+                    // Keywords beside `$ref` (a description, a default) refine the target.
+                    for (key, value) in object {
+                        merged.insert(key, resolve_refs(value, root, walk));
+                    }
+                    return Value::Object(merged);
+                }
+            }
+            Value::Object(
+                object
+                    .into_iter()
+                    .map(|(key, value)| (key, resolve_refs(value, root, walk)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| resolve_refs(item, root, walk))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -1304,17 +1441,56 @@ fn lift_mcp_image(mut result: Value) -> Value {
     result
 }
 
-/// Stable provider-safe namespace derived from the persisted server id.
-fn prefix_for(cfg: &McpServerConfig) -> String {
+/// Provider tool-name limit (`^[a-zA-Z0-9_-]{1,64}$`).
+const MAX_TOOL_NAME: usize = 64;
+/// Longest server slug in exposed tool names.
+const MAX_SERVER_SLUG: usize = 20;
+
+fn server_hash(cfg: &McpServerConfig) -> u32 {
     let base = if cfg.id.trim().is_empty() {
         &cfg.name
     } else {
         &cfg.id
     };
-    let hash = base.as_bytes().iter().fold(0x811c9dc5_u32, |hash, byte| {
+    base.as_bytes().iter().fold(0x811c9dc5_u32, |hash, byte| {
         (hash ^ u32::from(*byte)).wrapping_mul(0x01000193)
-    });
-    format!("mcp_{hash:08x}")
+    })
+}
+
+/// The hash-only namespace exposed before readable names, derived from the
+/// persisted server id. Its names stay resolvable as aliases.
+fn hashed_prefix_for(cfg: &McpServerConfig) -> String {
+    format!("mcp_{:08x}", server_hash(cfg))
+}
+
+/// Readable part of a server's tool names: its name, lowercased, with runs
+/// of other characters folded to `_`.
+fn server_slug(name: &str) -> String {
+    let mut slug = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('_') {
+            slug.push('_');
+        }
+        if slug.len() >= MAX_SERVER_SLUG {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('_');
+    if slug.is_empty() {
+        "mcp".into()
+    } else {
+        slug.into()
+    }
+}
+
+/// Namespace of one server's exposed tools: its slug plus a short hash of the
+/// persisted id, so two servers with the same name stay apart. `slug` is the
+/// one recorded when the server was first saved, so renaming it does not
+/// rename its tools.
+fn prefix_for(cfg: &McpServerConfig, slug: &str) -> String {
+    format!("{}_{:04x}", server_slug(slug), server_hash(cfg) >> 16)
 }
 
 fn legacy_prefix_for(cfg: &McpServerConfig) -> String {
@@ -1364,12 +1540,58 @@ fn safe_tool_component(value: &str, max: usize) -> String {
     }
 }
 
-fn exposed_tool_name(prefix: &str, name: &str) -> String {
+/// The hash-only name a tool was exposed under before readable names.
+fn hashed_tool_name(prefix: &str, name: &str) -> String {
     format!("{prefix}__tool_{}", safe_tool_component(name, 45))
 }
 
 fn exposed_meta_name(prefix: &str, name: &str) -> String {
     format!("{prefix}__{name}")
+}
+
+/// Allocates provider-safe tool names for one server: `<prefix>__<tool>`
+/// with other characters folded to `_`, cut to the 64-character limit, and
+/// numbered (`_2`, `_3`, ...) when two tools would otherwise share a name.
+struct ToolNames {
+    prefix: String,
+    taken: HashSet<String>,
+}
+
+impl ToolNames {
+    fn new(prefix: String) -> Self {
+        Self {
+            prefix,
+            taken: HashSet::new(),
+        }
+    }
+
+    fn allocate(&mut self, name: &str) -> String {
+        let room = MAX_TOOL_NAME - self.prefix.len() - 2;
+        let mut base: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(room)
+            .collect();
+        if base.trim_matches('_').is_empty() {
+            base = "tool".into();
+        }
+        let mut candidate = format!("{}__{base}", self.prefix);
+        let mut number = 1;
+        while self.taken.contains(&candidate) {
+            number += 1;
+            let suffix = format!("_{number}");
+            let stem: String = base.chars().take(room - suffix.len()).collect();
+            candidate = format!("{}__{stem}{suffix}", self.prefix);
+        }
+        self.taken.insert(candidate.clone());
+        candidate
+    }
 }
 
 fn env_key(key: &str) -> String {
@@ -1617,7 +1839,20 @@ impl ServerRuntime {
 
 struct HubState {
     configs: Vec<McpServerConfig>,
+    /// Name slug per server id, recorded when the server is first saved so
+    /// renaming it keeps its tool names (persisted as `tool_names`).
+    tool_slugs: BTreeMap<String, String>,
     servers: HashMap<String, ServerRuntime>,
+}
+
+impl HubState {
+    /// The name slug of `cfg`'s tools: the recorded one, else its name's.
+    fn tool_slug(&self, cfg: &McpServerConfig) -> String {
+        self.tool_slugs
+            .get(&cfg.id)
+            .cloned()
+            .unwrap_or_else(|| server_slug(&cfg.name))
+    }
 }
 
 struct HubInner {
@@ -1656,8 +1891,14 @@ impl McpHub {
 
     fn open_with_secrets(dir: &Path, secrets: Result<McpSecretStore>) -> Self {
         let path = dir.join("mcp.json");
+        let mut tool_slugs = BTreeMap::new();
         let (configs, load_error) = match std::fs::read_to_string(&path) {
             Ok(data) => match serde_json::from_str::<Value>(&data).and_then(|value| {
+                tool_slugs = value
+                    .get("tool_names")
+                    .cloned()
+                    .and_then(|names| serde_json::from_value(names).ok())
+                    .unwrap_or_default();
                 serde_json::from_value::<Vec<McpServerConfig>>(
                     value.get("servers").cloned().ok_or_else(|| {
                         serde_json::Error::io(std::io::Error::other("missing servers"))
@@ -1701,6 +1942,7 @@ impl McpHub {
                 generations: AtomicU64::new(0),
                 state: RwLock::new(HubState {
                     configs,
+                    tool_slugs,
                     servers: HashMap::new(),
                 }),
             }),
@@ -1737,19 +1979,27 @@ impl McpHub {
         persist_secret_items(secrets, &cfg.id, &mut cfg.headers, HEADER_SECRET_PREFIX)?;
         cfg.env = normalized_env(cfg.env);
         cfg.headers = normalized_env(cfg.headers);
-        let (previous, mut configs) = {
+        let (previous, mut configs, mut tool_slugs) = {
             let st = self.inner.read();
+            let previous = st.configs.iter().find(|c| c.id == cfg.id).cloned();
+            let mut tool_slugs = st.tool_slugs.clone();
+            // Record the slug once: from the name the server had before this
+            // save, so renaming it now or later keeps its tool names.
+            let slug = st.tool_slug(previous.as_ref().unwrap_or(&cfg));
+            tool_slugs.entry(cfg.id.clone()).or_insert(slug);
             (
-                st.configs.iter().find(|c| c.id == cfg.id).cloned(),
+                previous,
                 st.configs
                     .iter()
                     .filter(|c| c.id != cfg.id)
                     .cloned()
                     .collect::<Vec<_>>(),
+                tool_slugs,
             )
         };
         configs.push(cfg.clone());
-        self.inner.save_configs(&configs)?;
+        tool_slugs.retain(|id, _| configs.iter().any(|c| &c.id == id));
+        self.inner.save_configs(&configs, &tool_slugs)?;
         // Tokens are bound to the server URL; drop them when it changes.
         if previous
             .is_some_and(|previous| previous.transport != cfg.transport || previous.url != cfg.url)
@@ -1758,28 +2008,38 @@ impl McpHub {
                 let _ = secrets.delete(&cfg.id, oauth::OAUTH_SECRET_KEY);
             }
         }
-        self.inner.write().configs = configs;
+        {
+            let mut st = self.inner.write();
+            st.configs = configs;
+            st.tool_slugs = tool_slugs;
+        }
         self.inner.connect_config(cfg.clone()).await;
         Ok(cfg)
     }
 
     /// Remove a server (dropping its connection, which kills the child).
     pub fn remove(&self, id: &str) -> Result<bool> {
-        let configs = {
+        let (configs, tool_slugs) = {
             let st = self.inner.read();
             if !st.configs.iter().any(|c| c.id == id) {
                 return Ok(false);
             }
-            st.configs
-                .iter()
-                .filter(|c| c.id != id)
-                .cloned()
-                .collect::<Vec<_>>()
+            let mut tool_slugs = st.tool_slugs.clone();
+            tool_slugs.remove(id);
+            (
+                st.configs
+                    .iter()
+                    .filter(|c| c.id != id)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                tool_slugs,
+            )
         };
-        self.inner.save_configs(&configs)?;
+        self.inner.save_configs(&configs, &tool_slugs)?;
         {
             let mut st = self.inner.write();
             st.configs = configs;
+            st.tool_slugs = tool_slugs;
             if let Some(mut runtime) = st.servers.remove(id) {
                 runtime.clear_connection();
                 if let Some(task) = runtime.auth_task.take() {
@@ -1833,18 +2093,13 @@ impl McpHub {
             Ok((client, defs)) => {
                 let slot = ServerSlot::new(&cfg);
                 let capabilities = client.capabilities();
-                match build_tools(&cfg, &slot, &defs, &capabilities) {
-                    Ok(tools) => McpTestResult {
-                        ok: true,
-                        connected: true,
-                        tool_count: tools.len(),
-                        capabilities,
-                        ..McpTestResult::default()
-                    },
-                    Err(e) => McpTestResult {
-                        error: Some(e.to_string()),
-                        ..McpTestResult::default()
-                    },
+                let tools = build_tools(&cfg, &cfg.name, &slot, &defs, &capabilities);
+                McpTestResult {
+                    ok: true,
+                    connected: true,
+                    tool_count: tools.len(),
+                    capabilities,
+                    ..McpTestResult::default()
                 }
             }
             Err(e) => McpTestResult {
@@ -2168,7 +2423,11 @@ impl HubInner {
         self.state.write().expect("mcp hub poisoned")
     }
 
-    fn save_configs(&self, configs: &[McpServerConfig]) -> Result<()> {
+    fn save_configs(
+        &self,
+        configs: &[McpServerConfig],
+        tool_slugs: &BTreeMap<String, String>,
+    ) -> Result<()> {
         if let Some(error) = &self.load_error {
             return Err(Error::Other(format!(
                 "refusing to overwrite unreadable MCP configuration: {error}"
@@ -2177,7 +2436,8 @@ impl HubInner {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_vec_pretty(&json!({ "servers": configs }))?;
+        let data =
+            serde_json::to_vec_pretty(&json!({ "servers": configs, "tool_names": tool_slugs }))?;
         atomic_write(&self.path, &data)?;
         Ok(())
     }
@@ -2223,6 +2483,7 @@ impl HubInner {
         retrying: bool,
     ) -> bool {
         let mut st = self.write();
+        let slug = st.tool_slug(cfg);
         let Some(runtime) = st
             .servers
             .get_mut(&cfg.id)
@@ -2236,14 +2497,7 @@ impl HubInner {
                     return true;
                 };
                 let capabilities = client.capabilities();
-                let tools = match build_tools(cfg, &slot, &defs, &capabilities) {
-                    Ok(tools) => tools,
-                    Err(e) => {
-                        runtime.state = McpConnectionState::Error;
-                        runtime.error = Some(e.to_string());
-                        return true;
-                    }
-                };
+                let tools = build_tools(cfg, &slug, &slot, &defs, &capabilities);
                 slot.set(Some(client.clone()));
                 runtime.tools = tools;
                 runtime.tool_defs = defs
@@ -2319,7 +2573,7 @@ impl HubInner {
 
     /// Re-list a live server's tools after `notifications/tools/list_changed`.
     async fn refresh_tools(&self, id: &str, generation: u64) -> Result<()> {
-        let Some((cfg, slot, client)) = ({
+        let Some((cfg, slug, slot, client)) = ({
             let st = self.read();
             let runtime = st
                 .servers
@@ -2330,13 +2584,13 @@ impl HubInner {
             let client = slot.as_ref().and_then(|slot| slot.peek());
             cfg.zip(slot)
                 .zip(client)
-                .map(|((cfg, slot), client)| (cfg, slot, client))
+                .map(|((cfg, slot), client)| (cfg.clone(), st.tool_slug(&cfg), slot, client))
         }) else {
             return Ok(());
         };
         let mut defs = client.list_tools().await?;
         apply_trust(&mut defs, cfg.trust_read_only_hints);
-        let tools = build_tools(&cfg, &slot, &defs, &client.capabilities())?;
+        let tools = build_tools(&cfg, &slug, &slot, &defs, &client.capabilities());
         let mut st = self.write();
         if let Some(runtime) = st.servers.get_mut(id).filter(|runtime| {
             runtime.generation == generation && runtime.state == McpConnectionState::Connected
@@ -2532,38 +2786,58 @@ async fn connect_one(
         })?
 }
 
-/// Build the prefixed proxy tools for one server connection.
+/// Build the prefixed proxy tools for one server connection. `slug` is the
+/// server's recorded name slug (see [`prefix_for`]). Earlier names of each
+/// tool stay registered as aliases.
 fn build_tools(
     cfg: &McpServerConfig,
+    slug: &str,
     slot: &Arc<ServerSlot>,
     defs: &[McpToolDef],
     caps: &McpCapabilities,
-) -> Result<Vec<Arc<dyn Tool>>> {
-    let prefix = prefix_for(cfg);
+) -> Vec<Arc<dyn Tool>> {
+    let hashed_prefix = hashed_prefix_for(cfg);
     let legacy_prefix = legacy_prefix_for(cfg);
-    let mut names = HashSet::new();
+    let mut names = ToolNames::new(prefix_for(cfg, slug));
+    let described = |description: &str| {
+        let description = description.trim();
+        if description.is_empty() {
+            format!("[{}] (no description)", cfg.name)
+        } else {
+            format!("[{}] {description}", cfg.name)
+        }
+    };
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    let mut meta = Vec::new();
+    if caps.resources {
+        meta.extend(["list_resources", "read_resource"]);
+    }
+    if caps.prompts {
+        meta.extend(["list_prompts", "get_prompt"]);
+    }
+    // Meta tools claim their names first so a server tool of the same name
+    // is the one that gets numbered.
+    let meta_names = meta
+        .iter()
+        .map(|kind| (*kind, names.allocate(kind)))
+        .collect::<Vec<_>>();
     for d in defs {
         if !d.model_visible {
             continue;
         }
-        let tool_name = exposed_tool_name(&prefix, &d.name);
-        let legacy_name = legacy_exposed_name(&legacy_prefix, &d.name);
-        if !names.insert(tool_name.clone()) {
-            return Err(Error::InvalidRequest(format!(
-                "MCP server exposes colliding tool names after normalization: {}",
-                d.name
-            )));
-        }
-        let aliases = (legacy_name != tool_name)
-            .then_some(legacy_name)
-            .into_iter()
-            .collect();
+        let tool_name = names.allocate(&d.name);
+        let aliases = [
+            hashed_tool_name(&hashed_prefix, &d.name),
+            legacy_exposed_name(&legacy_prefix, &d.name),
+        ]
+        .into_iter()
+        .filter(|alias| *alias != tool_name)
+        .collect();
         tools.push(Arc::new(McpTool {
             slot: slot.clone(),
             exposed_name: tool_name,
             remote_name: d.name.clone(),
-            description: d.description.clone(),
+            description: described(&d.description),
             schema: d.input_schema.clone(),
             effect: d.effect,
             aliases,
@@ -2577,27 +2851,28 @@ fn build_tools(
                 }),
         }) as Arc<dyn Tool>);
     }
-    if caps.resources {
-        tools.push(Arc::new(McpListResourcesTool {
+    for (kind, name) in meta_names {
+        let meta = McpMetaTool {
             slot: slot.clone(),
-            name: exposed_meta_name(&prefix, "list_resources"),
-        }));
-        tools.push(Arc::new(McpReadResourceTool {
-            slot: slot.clone(),
-            name: exposed_meta_name(&prefix, "read_resource"),
-        }));
+            aliases: vec![exposed_meta_name(&hashed_prefix, kind)],
+            description: described(match kind {
+                "list_resources" => {
+                    "List resources and resource templates exposed by this MCP server."
+                }
+                "read_resource" => "Read a resource from this MCP server by URI.",
+                "list_prompts" => "List prompts exposed by this MCP server.",
+                _ => "Get a prompt from this MCP server by name.",
+            }),
+            name,
+        };
+        tools.push(match kind {
+            "list_resources" => Arc::new(McpListResourcesTool(meta)),
+            "read_resource" => Arc::new(McpReadResourceTool(meta)),
+            "list_prompts" => Arc::new(McpListPromptsTool(meta)),
+            _ => Arc::new(McpGetPromptTool(meta)),
+        });
     }
-    if caps.prompts {
-        tools.push(Arc::new(McpListPromptsTool {
-            slot: slot.clone(),
-            name: exposed_meta_name(&prefix, "list_prompts"),
-        }));
-        tools.push(Arc::new(McpGetPromptTool {
-            slot: slot.clone(),
-            name: exposed_meta_name(&prefix, "get_prompt"),
-        }));
-    }
-    Ok(tools)
+    tools
 }
 
 #[cfg(test)]
@@ -2639,16 +2914,29 @@ mod tests {
     }
 
     #[test]
-    fn prefix_sanitizes() {
+    fn prefix_is_a_readable_slug_plus_a_short_id_hash() {
         let cfg = McpServerConfig {
             id: "x".into(),
             name: "GitHub MCP!".into(),
             command: "npx".into(),
             ..McpServerConfig::default()
         };
-        let prefix = prefix_for(&cfg);
-        assert!(prefix.starts_with("mcp_"));
-        assert_eq!(prefix.len(), 12);
+        let prefix = prefix_for(&cfg, &cfg.name);
+        assert_eq!(
+            prefix,
+            format!("github_mcp_{:04x}", server_hash(&cfg) >> 16)
+        );
+        assert_eq!(hashed_prefix_for(&cfg).len(), 12);
+        assert_eq!(server_slug("  --  "), "mcp");
+        assert_eq!(
+            server_slug("A very long server name that keeps going"),
+            "a_very_long_server_n"
+        );
+        let other = McpServerConfig {
+            id: "y".into(),
+            ..cfg.clone()
+        };
+        assert_ne!(prefix_for(&other, &other.name), prefix);
     }
 
     #[test]
@@ -2750,7 +3038,7 @@ mod tests {
             ui_resource_uri: None,
             raw: json!({"name":"slow"}),
         }];
-        let tools = build_tools(&cfg, &slot, &defs, &McpCapabilities::default()).unwrap();
+        let tools = build_tools(&cfg, "slow", &slot, &defs, &McpCapabilities::default());
         assert_eq!(
             tools[0].deadline_for_call(&json!({})),
             Some(Duration::from_secs(305))
@@ -2857,15 +3145,213 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn tool_def(name: &str, description: &str) -> McpToolDef {
+        McpToolDef {
+            name: name.into(),
+            description: description.into(),
+            input_schema: json!({"type":"object"}),
+            effect: ToolEffect::Unknown,
+            declared_read_only: false,
+            model_visible: true,
+            app_visible: false,
+            ui_resource_uri: None,
+            raw: json!({"name": name}),
+        }
+    }
+
     #[test]
-    fn exposed_names_are_namespaced_and_provider_safe() {
+    fn exposed_names_are_readable_provider_safe_and_distinct() {
+        let mut names = ToolNames::new("github_1a2b".into());
         assert_eq!(
-            exposed_tool_name("mcp_12345678", "Search-Web"),
-            "mcp_12345678__tool_search_web"
+            names.allocate("search-issues"),
+            "github_1a2b__search-issues"
+        );
+        assert_eq!(names.allocate("Get Issue!"), "github_1a2b__Get_Issue_");
+        assert_eq!(names.allocate("!!!"), "github_1a2b__tool");
+        assert_eq!(names.allocate("Get Issue?"), "github_1a2b__Get_Issue__2");
+        let long = "x".repeat(100);
+        let first = names.allocate(&long);
+        let second = names.allocate(&long);
+        assert_eq!(first.len(), MAX_TOOL_NAME);
+        assert_eq!(second.len(), MAX_TOOL_NAME);
+        assert!(second.ends_with("_2"));
+        for name in [&first, &second] {
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_name_slugs_survive_renames_and_restarts() {
+        let dir = temp_dir("tool-slugs");
+        let hub = McpHub::open(&dir);
+        let cfg = hub
+            .upsert(McpServerConfig {
+                id: "srv".into(),
+                name: "Old Name".into(),
+                command: "milim-test-missing-mcp-binary".into(),
+                enabled: false,
+                ..McpServerConfig::default()
+            })
+            .await
+            .unwrap();
+        let slug = |hub: &McpHub| hub.inner.read().tool_slug(&hub.config("srv").unwrap());
+        assert_eq!(slug(&hub), "old_name");
+        hub.upsert(McpServerConfig {
+            name: "New Name".into(),
+            ..cfg
+        })
+        .await
+        .unwrap();
+        assert_eq!(slug(&hub), "old_name");
+        drop(hub);
+        let reopened = McpHub::open(&dir);
+        assert_eq!(reopened.config("srv").unwrap().name, "New Name");
+        assert_eq!(slug(&reopened), "old_name");
+        reopened.remove("srv").unwrap();
+        assert!(reopened.inner.read().tool_slugs.is_empty());
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn build_tools_keeps_earlier_names_as_aliases_and_labels_descriptions() {
+        let cfg = McpServerConfig {
+            id: "srv-1".into(),
+            name: "Linear".into(),
+            command: "npx".into(),
+            ..McpServerConfig::default()
+        };
+        let slot = ServerSlot::new(&cfg);
+        let defs = vec![
+            tool_def("list_issues", "List issues."),
+            tool_def("list_resources", ""),
+            tool_def("list issues", "Same name after folding."),
+        ];
+        let caps = McpCapabilities {
+            resources: true,
+            ..McpCapabilities::default()
+        };
+        let tools = build_tools(&cfg, "linear", &slot, &defs, &caps);
+        let prefix = prefix_for(&cfg, "linear");
+        let names = tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                format!("{prefix}__list_issues"),
+                format!("{prefix}__list_resources_2"),
+                format!("{prefix}__list_issues_2"),
+                format!("{prefix}__list_resources"),
+                format!("{prefix}__read_resource"),
+            ]
+        );
+        assert_eq!(tools[0].description(), "[Linear] List issues.");
+        assert_eq!(tools[1].description(), "[Linear] (no description)");
+        assert!(tools[3]
+            .description()
+            .starts_with("[Linear] List resources"));
+        let hashed = hashed_prefix_for(&cfg);
+        assert_eq!(
+            tools[0].aliases(),
+            [
+                format!("{hashed}__tool_list_issues"),
+                "linear__list_issues".to_string()
+            ]
+        );
+        assert_eq!(tools[3].aliases(), [format!("{hashed}__list_resources")]);
+
+        let mut registry = milim_tools::ToolRegistry::new();
+        for tool in tools {
+            registry.try_register(tool).unwrap();
+        }
+        let old = format!("{hashed}__tool_list_issues");
+        assert!(registry.contains(&old));
+        assert_eq!(
+            registry.filtered(&[old]).names(),
+            [format!("{prefix}__list_issues")]
+        );
+    }
+
+    #[test]
+    fn result_text_flattens_content_and_drops_mirrored_structured_content() {
+        let mirrored = json!({
+            "content": [{"type": "text", "text": "{\"count\": 2}"}],
+            "structuredContent": {"count": 2}
+        });
+        assert_eq!(mcp_result_text(&mirrored).unwrap(), "{\"count\": 2}");
+        let mixed = json!({
+            "content": [
+                {"type": "text", "text": "line one\nline two"},
+                {"type": "image", "mimeType": "image/png", "dataOmitted": true},
+                {"type": "resource_link", "name": "report", "uri": "file:///r.txt"},
+                {"type": "resource", "resource": {"uri": "file:///a.txt", "text": "alpha"}}
+            ],
+            "structuredContent": {"rows": [1]},
+            "isError": true
+        });
+        assert_eq!(
+            mcp_result_text(&mixed).unwrap(),
+            "The tool reported an error:\nline one\nline two\n[image: attached in the next message]\n[resource link: report file:///r.txt]\n[resource file:///a.txt]\nalpha\n{\"rows\":[1]}"
         );
         assert_eq!(
-            exposed_tool_name("mcp_12345678", "!!!"),
-            "mcp_12345678__tool_tool"
+            mcp_result_text(&json!({"content": []})).unwrap(),
+            "(no output)"
+        );
+        assert!(mcp_result_text(&json!({"other": 1})).is_none());
+    }
+
+    #[test]
+    fn local_schema_references_are_inlined() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "filter": {"$ref": "#/$defs/Filter", "description": "What to match."},
+                "tree": {"$ref": "#/definitions/Node"},
+                "remote": {"$ref": "https://example.com/schema.json"}
+            },
+            "$defs": {
+                "Filter": {"type": "object", "properties": {"state": {"$ref": "#/$defs/State"}}},
+                "State": {"type": "string", "enum": ["open", "closed"]}
+            },
+            "definitions": {
+                "Node": {"type": "object", "properties": {"children": {"type": "array", "items": {"$ref": "#/definitions/Node"}}}}
+            }
+        });
+        let inlined = inline_local_refs(schema);
+        assert_eq!(
+            inlined["properties"]["filter"],
+            json!({
+                "type": "object",
+                "description": "What to match.",
+                "properties": {"state": {"type": "string", "enum": ["open", "closed"]}}
+            })
+        );
+        // The recursive reference is left unconstrained one level down.
+        assert_eq!(
+            inlined["properties"]["tree"]["properties"]["children"]["items"],
+            json!({})
+        );
+        // A remote reference stays, so the definitions stay with it.
+        assert_eq!(
+            inlined["properties"]["remote"]["$ref"],
+            "https://example.com/schema.json"
+        );
+        assert!(inlined.get("$defs").is_some());
+
+        let local_only = inline_local_refs(json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/A"}},
+            "$defs": {"A": {"type": "integer"}}
+        }));
+        assert_eq!(
+            local_only,
+            json!({"type": "object", "properties": {"a": {"type": "integer"}}})
         );
     }
 
@@ -3049,14 +3535,14 @@ mod tests {
         let grow = hub
             .tools()
             .into_iter()
-            .find(|tool| tool.name().ends_with("__tool_grow"))
+            .find(|tool| tool.name().ends_with("__grow"))
             .unwrap();
         grow.invoke(json!({})).await.unwrap();
         assert!(wait_for(|| hub.tools().len() == 3, Duration::from_secs(5)).await);
         let extra = hub
             .tools()
             .into_iter()
-            .find(|tool| tool.name().ends_with("__tool_extra_1"))
+            .find(|tool| tool.name().ends_with("__extra_1"))
             .unwrap();
         assert_eq!(extra.effect(), ToolEffect::Unknown);
         let info = hub.list().into_iter().find(|s| s.id == cfg.id).unwrap();
@@ -3076,14 +3562,14 @@ mod tests {
         let grow = hub
             .tools()
             .into_iter()
-            .find(|tool| tool.name().ends_with("__tool_grow"))
+            .find(|tool| tool.name().ends_with("__grow"))
             .unwrap();
         grow.invoke(json!({})).await.unwrap();
         assert!(wait_for(|| hub.tools().len() == 3, Duration::from_secs(5)).await);
         let extra = hub
             .tools()
             .into_iter()
-            .find(|tool| tool.name().ends_with("__tool_extra_1"))
+            .find(|tool| tool.name().ends_with("__extra_1"))
             .unwrap();
         assert_eq!(extra.effect(), ToolEffect::ReadOnly);
         drop(hub);
@@ -3103,12 +3589,12 @@ mod tests {
         let tools = hub.tools();
         let crash = tools
             .iter()
-            .find(|tool| tool.name().ends_with("__tool_crash"))
+            .find(|tool| tool.name().ends_with("__crash"))
             .unwrap()
             .clone();
         let grow = tools
             .iter()
-            .find(|tool| tool.name().ends_with("__tool_grow"))
+            .find(|tool| tool.name().ends_with("__grow"))
             .unwrap()
             .clone();
         let error = crash.invoke(json!({})).await.unwrap_err().to_string();
@@ -3156,7 +3642,7 @@ mod tests {
         let grow = hub
             .tools()
             .into_iter()
-            .find(|tool| tool.name().ends_with("__tool_grow"))
+            .find(|tool| tool.name().ends_with("__grow"))
             .unwrap();
         grow.invoke(json!({})).await.unwrap();
         assert!(wait_for(|| hub.tools().len() == 3, Duration::from_secs(5)).await);

@@ -135,6 +135,14 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Opaque provider continuation data for an assistant turn, such as
+    /// Anthropic thinking blocks with their signatures, OpenAI Responses
+    /// reasoning items, or Gemini thought signatures. It is keyed by the
+    /// adapter that produced it (for example `{"anthropic": ...}`); each
+    /// adapter replays only its own key and ignores the rest. It must be
+    /// stored and replayed byte-exact, never redacted or rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_state: Option<Value>,
 }
 
 impl ChatMessage {
@@ -147,6 +155,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
+            provider_state: None,
         }
     }
 
@@ -350,6 +359,8 @@ pub struct Delta {
 /// A streamed tool-call fragment (arguments arrive incrementally).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeltaToolCall {
+    /// Some OpenAI-compatible servers omit `index`; it then defaults to 0.
+    #[serde(default)]
     pub index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -442,13 +453,52 @@ pub struct Model {
     pub architecture: Option<ModelArchitecture>,
 }
 
-/// Optional provider-supplied pricing, currently used by OpenRouter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Optional provider-supplied pricing, currently used by OpenRouter. Each
+/// value is a USD price per token, as a decimal string.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelPricing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<String>,
+    /// Price of a prompt token served from the provider's prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cache_read: Option<String>,
+    /// Price of a prompt token written to the provider's prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cache_write: Option<String>,
+}
+
+impl ModelPricing {
+    /// Estimated USD cost of one response's usage. Cache reads and writes
+    /// (already counted in `prompt_tokens`) are charged at their own prices
+    /// when the provider publishes them, else at the prompt price. `None`
+    /// when the prompt or completion price is missing or invalid.
+    pub fn estimate_cost_usd(&self, usage: &Usage) -> Option<f64> {
+        fn price(value: Option<&str>) -> Option<f64> {
+            value?
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|price| price.is_finite() && *price >= 0.0)
+        }
+        let prompt = price(self.prompt.as_deref())?;
+        let completion = price(self.completion.as_deref())?;
+        let cache_read = usage
+            .cache_read_tokens
+            .unwrap_or(0)
+            .min(usage.prompt_tokens);
+        let cache_write = usage
+            .cache_write_tokens
+            .unwrap_or(0)
+            .min(usage.prompt_tokens - cache_read);
+        let uncached = usage.prompt_tokens - cache_read - cache_write;
+        let cost = f64::from(uncached) * prompt
+            + f64::from(cache_read) * price(self.input_cache_read.as_deref()).unwrap_or(prompt)
+            + f64::from(cache_write) * price(self.input_cache_write.as_deref()).unwrap_or(prompt)
+            + f64::from(usage.completion_tokens) * completion;
+        (cost.is_finite() && cost >= 0.0).then_some(cost)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -627,6 +677,35 @@ mod tests {
             serde_json::from_str(r#"{"id":"local/test","owned_by":"vllm","max_model_len":196608}"#)
                 .unwrap();
         assert_eq!(m.context_length, Some(196608));
+    }
+
+    #[test]
+    fn pricing_charges_cache_tokens_at_cache_prices() {
+        let model: Model = serde_json::from_str(
+            r#"{"id":"anthropic/claude-sonnet-5","pricing":{"prompt":"0.000002","completion":"0.00001","input_cache_read":"0.0000002","input_cache_write":"0.0000025"}}"#,
+        )
+        .unwrap();
+        let pricing = model.pricing.unwrap();
+        let usage = Usage {
+            cache_read_tokens: Some(8_000),
+            cache_write_tokens: Some(1_000),
+            ..Usage::new(10_000, 500)
+        };
+        // 1,000 uncached + 8,000 read + 1,000 written + 500 completion.
+        let expected =
+            1_000.0 * 0.000002 + 8_000.0 * 0.0000002 + 1_000.0 * 0.0000025 + 500.0 * 0.00001;
+        let cost = pricing.estimate_cost_usd(&usage).unwrap();
+        assert!((cost - expected).abs() < 1e-12, "{cost}");
+
+        // Without published cache prices, cached tokens cost the prompt price.
+        let plain = ModelPricing {
+            prompt: Some("0.000002".into()),
+            completion: Some("0.00001".into()),
+            ..Default::default()
+        };
+        let cost = plain.estimate_cost_usd(&usage).unwrap();
+        assert!((cost - (10_000.0 * 0.000002 + 500.0 * 0.00001)).abs() < 1e-12);
+        assert_eq!(ModelPricing::default().estimate_cost_usd(&usage), None);
     }
 
     #[test]

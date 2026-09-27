@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { attempt, changedFiles, expect, expectEqual, expectOnlyChanged, finish, load, read, runNodeTests } from "../../lib/check.mjs";
+import { attempt, changedFiles, exists, expect, expectEqual, expectOnlyChanged, finish, load, read, runNodeTests } from "../../lib/check.mjs";
 
 expectOnlyChanged((path) => path.startsWith("src/") || path.startsWith("test/") || path === "README.md");
 
@@ -53,7 +53,8 @@ const usage = readme.split("## Usage")[1]?.split("\n## ")[0] ?? "";
 expect(/--priority/.test(usage), "4. README Usage does not document --priority");
 expect(/--sort=priority/.test(usage), "4. README Usage does not document --sort=priority");
 
-const tests = changedFiles().filter((path) => path.startsWith("test/"));
+// Deleted test files are listed as changed too; only read the ones that exist.
+const tests = changedFiles().filter((path) => path.startsWith("test/") && exists(path));
 expect(tests.length > 0, "5. no tests were added or updated");
 expect(tests.some((path) => /priority/.test(read(path))), "5. tests do not exercise priority");
 runNodeTests("test");

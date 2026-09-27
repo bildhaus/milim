@@ -7,3 +7,6 @@
 *.icns binary
 *.msi binary
 *.exe binary
+
+# Eval reference patches: unified-diff context lines end in a space.
+evals/tasks/**/*.patch -whitespace

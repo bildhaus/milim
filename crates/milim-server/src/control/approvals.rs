@@ -210,6 +210,60 @@ impl RunManager {
         );
     }
 
+    /// Cancel the approvals a finished run left pending. Its runtime can no
+    /// longer receive a decision, so each is closed durably and resolved in
+    /// the timeline, which clears the prompt on every client.
+    pub(super) fn cancel_run_approvals(
+        &self,
+        state: &AppState,
+        thread_id: &str,
+        run_id: &str,
+        run_status: &str,
+    ) -> Result<()> {
+        let decision = json!({
+            "decision": "deny",
+            "reason": "run_ended",
+            "run_status": run_status,
+        });
+        for approval in self
+            .store
+            .control_cancel_run_approvals(run_id, &decision.to_string())?
+        {
+            // A runtime that is still draining must not act on a late answer.
+            state.tool_approvals.fail(
+                &approval.id,
+                "the run ended before this approval was resolved",
+            );
+            self.persist_and_emit(
+                thread_id,
+                Some(run_id),
+                "approval_resolved",
+                json!({
+                    "approval_id": approval.id,
+                    "decision": "deny",
+                    "status": "cancelled",
+                    "reason": "run_ended",
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Close a stored approval whose runtime reported that it can no longer
+    /// be delivered, so it stops showing as pending.
+    pub(super) fn fail_pending_approval(&self, approval_id: &str, message: &str) -> Result<()> {
+        if let Some(mut durable) = self.store.control_approval(approval_id)? {
+            if durable.status == "pending" {
+                durable.status = "failed".into();
+                durable.decision_json =
+                    Some(json!({ "decision": "deny", "reason": message }).to_string());
+                durable.resolved_at_ms = Some(now_ms());
+                self.store.control_put_approval(&durable)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a just-requested approval that a chat allowance already
     /// covers. Returns the matching rule key when it was auto-approved.
     pub(super) fn auto_resolve_allowed_approval(

@@ -1,0 +1,42 @@
+diff --git a/src/phone.js b/src/phone.js
+new file mode 100644
+index 0000000..ba76155
+--- /dev/null
++++ b/src/phone.js
+@@ -0,0 +1,16 @@
++/**
++ * Normalize a US phone number to E.164 (`+15551234567`). Accepts the usual
++ * separators (spaces, dashes, dots, parentheses) and an optional leading
++ * country code 1; anything else throws a RangeError.
++ */
++export function normalizePhone(raw) {
++  if (typeof raw !== "string" || !/^[\d\s().+-]+$/.test(raw)) {
++    throw new RangeError(`not a US phone number: ${raw}`);
++  }
++  let digits = raw.replace(/\D/g, "");
++  if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
++  if (digits.length !== 10) {
++    throw new RangeError(`not a US phone number: ${raw}`);
++  }
++  return `+1${digits}`;
++}
+diff --git a/test/phone.test.js b/test/phone.test.js
+new file mode 100644
+index 0000000..e6d4a77
+--- /dev/null
++++ b/test/phone.test.js
+@@ -0,0 +1,14 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { normalizePhone } from "../src/phone.js";
++
++test("normalizes common US formats", () => {
++  for (const raw of ["555-123-4567", "(555) 123-4567", "555.123.4567", "5551234567", "1-555-123-4567", "+1 555 123 4567"]) {
++    assert.equal(normalizePhone(raw), "+15551234567");
++  }
++});
++
++test("rejects other numbers", () => {
++  assert.throws(() => normalizePhone("555-1234"), RangeError);
++  assert.throws(() => normalizePhone("+44 20 7946 0958"), RangeError);
++});

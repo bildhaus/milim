@@ -1,0 +1,22 @@
+diff --git a/src/catalog.js b/src/catalog.js
+index 661ae6d..1643875 100644
+--- a/src/catalog.js
++++ b/src/catalog.js
+@@ -916,7 +916,7 @@ export const CATALOG = [
+   { sku: "SKU-0914", name: "Ivory Clock 914", category: "garden", priceCents: 12826, stock: 143 },
+   { sku: "SKU-0915", name: "Onyx Tray 915", category: "decor", priceCents: 4277, stock: 68 },
+   { sku: "SKU-0916", name: "Walnut Desk Lamp 916", category: "decor", priceCents: 22380, stock: 21 },
+-  { sku: "SKU-0917", name: "Maple Planter 917", category: "lighting", priceCents: 14086, stock: 163 },
++  { sku: "SKU-0917", name: "Maple Planter 917", category: "lighting", priceCents: 2499, stock: 163 },
+   { sku: "SKU-0918", name: "Onyx Bookshelf 918", category: "garden", priceCents: 29768, stock: 41 },
+   { sku: "SKU-0919", name: "Brass Clock 919", category: "furniture", priceCents: 39184, stock: 125 },
+   { sku: "SKU-0920", name: "Walnut Stool 920", category: "lighting", priceCents: 3093, stock: 194 },
+@@ -1202,7 +1202,7 @@ export const CATALOG = [
+   { sku: "SKU-1200", name: "Walnut Desk Lamp 1200", category: "furniture", priceCents: 6319, stock: 130 },
+   { sku: "SKU-1201", name: "Walnut Planter 1201", category: "storage", priceCents: 37348, stock: 181 },
+   { sku: "SKU-1202", name: "Brass Desk Lamp 1202", category: "decor", priceCents: 18064, stock: 63 },
+-  { sku: "SKU-1203", name: "Cedar Vase 1203", category: "furniture", priceCents: 1391, stock: 129 },
++  { sku: "SKU-1203", name: "Cedar Vase 1203", category: "furniture", priceCents: 1391, stock: 0, discontinued: true },
+   { sku: "SKU-1204", name: "Onyx Vase 1204", category: "lighting", priceCents: 1862, stock: 114 },
+   { sku: "SKU-1205", name: "Maple Clock 1205", category: "garden", priceCents: 31500, stock: 17 },
+   { sku: "SKU-1206", name: "Onyx Clock 1206", category: "lighting", priceCents: 35296, stock: 113 },

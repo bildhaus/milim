@@ -1,0 +1,15 @@
+diff --git a/src/queue.js b/src/queue.js
+index 1f068ff..57077aa 100644
+--- a/src/queue.js
++++ b/src/queue.js
+@@ -32,7 +32,9 @@ export class JobQueue {
+ 
+   async #run(job, index) {
+     try {
+-      this.results[index] = { ok: true, value: job() };
++      // Await the job: a rejection is reported, never retried, and async
++      // work counts against the concurrency limit.
++      this.results[index] = { ok: true, value: await job() };
+     } catch (error) {
+       this.results[index] = { ok: false, error: error.message };
+     } finally {

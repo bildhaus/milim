@@ -1,0 +1,15 @@
+diff --git a/src/formatters.js b/src/formatters.js
+index 6f06a5e..f7b6f3a 100644
+--- a/src/formatters.js
++++ b/src/formatters.js
+@@ -795,8 +795,8 @@ export function formatBytes(bytes) {
+   }
+   let value = bytes;
+   let unit = 0;
+-  while (value >= 1000 && unit < units.length - 1) {
+-    value /= 1000;
++  while (value >= 1024 && unit < units.length - 1) {
++    value /= 1024;
+     unit += 1;
+   }
+   return `${value.toFixed(1)} ${units[unit]}`;

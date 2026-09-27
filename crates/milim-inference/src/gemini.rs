@@ -10,9 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use milim_core::api::openai::{
     ChatMessage, Content, ContentPart, DeltaFunction, DeltaToolCall, Model, ReasoningEffort, Tool,
@@ -21,10 +20,10 @@ use milim_core::api::openai::{
 use milim_core::provider_error::upstream_stream_error;
 use milim_core::{Error, Result};
 
-use crate::http_error::stream_read_error;
 use crate::service::{
     normalize_finish_reason, CompletionRequest, DeltaEvent, EventStream, ModelService, StreamEvent,
 };
+use crate::stall;
 
 #[cfg(not(test))]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,13 +42,21 @@ pub struct GeminiBackend {
     base_url: String,
     api_key: Option<String>,
     client: reqwest::Client,
+    /// Generation streams, whose idle budget is enforced per request.
+    stream_client: reqwest::Client,
     signatures: Arc<Mutex<ThoughtSignatures>>,
 }
+
+/// This adapter's key in `ChatMessage::provider_state`: the turn's thought
+/// signatures, `{"signatures": {call_id: signature}, "text_signature": ..}`.
+const STATE_KEY: &str = "gemini";
 
 /// Thought signatures Gemini attached to the function calls it streamed,
 /// keyed by the call id milim assigned. Gemini 3 rejects a follow-up request
 /// whose current-turn function call lacks its signature, so each one is sent
-/// back with the call it came from. Bounded; the oldest entries go first.
+/// back with the call it came from. Each turn's signatures also travel in its
+/// provider state, which wins on replay; this bounded cache (oldest entries
+/// go first) covers history recorded without it.
 #[derive(Debug, Default)]
 struct ThoughtSignatures {
     by_call: HashMap<String, String>,
@@ -103,6 +110,7 @@ impl GeminiBackend {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
             client: default_client(),
+            stream_client: stall::streaming_client(),
             signatures: Arc::default(),
         }
     }
@@ -208,12 +216,14 @@ impl ModelService for GeminiBackend {
             "{}?alt=sse",
             self.endpoint(&format!("{}:streamGenerateContent", model_path(&req.model)))
         );
-        let resp = self
-            .auth(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream)?;
+        let idle = stall::stream_idle_timeout(&req.model, req.reasoning_effort);
+        let resp = stall::send(
+            self.auth(self.stream_client.post(endpoint)).json(&body),
+            idle,
+            &self.label,
+            "streamGenerateContent",
+        )
+        .await?;
 
         if !resp.status().is_success() {
             return Err(crate::http_error::http_status_error(
@@ -227,47 +237,51 @@ impl ModelService for GeminiBackend {
         let label = self.label.clone();
         let signatures = self.signatures.clone();
         let stream = async_stream::stream! {
-            let mut bytes = resp.bytes_stream();
-            let mut buf: Vec<u8> = Vec::new();
+            let mut lines = stall::SseLines::new(resp.bytes_stream(), idle, &label);
             let mut state = GeminiStreamState {
                 signatures: signatures.clone(),
                 ..GeminiStreamState::default()
             };
 
-            while let Some(chunk) = bytes.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
+            while let Some(line) = lines.next().await {
+                let line = match line {
+                    Ok(line) => line,
                     Err(e) => {
-                        yield Err(stream_read_error(&label, e));
+                        yield Err(e);
                         return;
                     }
                 };
-                buf.extend_from_slice(&chunk);
-
-                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line_bytes);
-                    match parse_sse_line(line.trim_end(), &mut state) {
-                        GeminiLine::Delta(d) => {
-                            if !d.is_empty() {
-                                yield Ok(StreamEvent::Delta(d));
-                            }
+                match parse_sse_line(&line, &mut state) {
+                    GeminiLine::Delta(d) => {
+                        if !d.is_empty() {
+                            yield Ok(StreamEvent::Delta(d));
                         }
-                        GeminiLine::Error { code, status, message } => {
-                            yield Err(upstream_stream_error(
-                                &label,
-                                "streamGenerateContent",
-                                code,
-                                status.as_deref(),
-                                &message,
-                            ));
-                            return;
-                        }
-                        GeminiLine::Ignore => {}
                     }
+                    GeminiLine::Error { code, status, message } => {
+                        yield Err(upstream_stream_error(
+                            &label,
+                            "streamGenerateContent",
+                            code,
+                            status.as_deref(),
+                            &message,
+                        ));
+                        return;
+                    }
+                    GeminiLine::Ignore => {}
                 }
             }
 
+            // The last chunk of a complete response carries `finishReason`.
+            if state.finish_reason.is_none() {
+                yield Err(stall::ended_early());
+                return;
+            }
+            if let Some(provider_state) = state.provider_state() {
+                yield Ok(StreamEvent::Delta(DeltaEvent {
+                    provider_state: Some(provider_state),
+                    ..Default::default()
+                }));
+            }
             yield Ok(StreamEvent::Done {
                 finish_reason: gemini_finish_reason(&state.finish_reason, state.saw_tool_call),
                 usage: state.usage,
@@ -306,6 +320,24 @@ struct GeminiStreamState {
     saw_tool_call: bool,
     next_tool_index: u32,
     signatures: Arc<Mutex<ThoughtSignatures>>,
+    /// This turn's function-call signatures by call id.
+    call_signatures: Map<String, Value>,
+    /// A signature Gemini attached to a text part of this turn.
+    text_signature: Option<String>,
+}
+
+impl GeminiStreamState {
+    /// This turn's signatures as `provider_state`, when there are any.
+    fn provider_state(&self) -> Option<Value> {
+        if self.call_signatures.is_empty() && self.text_signature.is_none() {
+            return None;
+        }
+        let mut state = json!({ "signatures": self.call_signatures });
+        if let Some(signature) = &self.text_signature {
+            state["text_signature"] = json!(signature);
+        }
+        Some(json!({ STATE_KEY: state }))
+    }
 }
 
 enum GeminiLine {
@@ -350,7 +382,10 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
 
     if let Some(usage) = v.get("usageMetadata") {
         let prompt = opt_u32(usage, "promptTokenCount").unwrap_or(0);
-        let completion = opt_u32(usage, "candidatesTokenCount").unwrap_or(0);
+        // Thinking tokens are billed as output but reported apart from the
+        // candidates.
+        let completion = opt_u32(usage, "candidatesTokenCount").unwrap_or(0)
+            + opt_u32(usage, "thoughtsTokenCount").unwrap_or(0);
         // `promptTokenCount` already includes implicitly cached tokens.
         state.usage = Usage {
             total_tokens: opt_u32(usage, "totalTokenCount").unwrap_or(prompt + completion),
@@ -376,17 +411,18 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     delta.content.get_or_insert_with(String::new).push_str(text);
                 }
+                let signature = part
+                    .get("thoughtSignature")
+                    .or_else(|| part.get("thought_signature"))
+                    .and_then(Value::as_str)
+                    .filter(|signature| !signature.is_empty());
                 if let Some(call) = part.get("functionCall") {
                     let index = state.next_tool_index;
                     state.next_tool_index += 1;
                     state.saw_tool_call = true;
                     let id = next_call_id();
-                    if let Some(signature) = part
-                        .get("thoughtSignature")
-                        .or_else(|| part.get("thought_signature"))
-                        .and_then(Value::as_str)
-                        .filter(|signature| !signature.is_empty())
-                    {
+                    if let Some(signature) = signature {
+                        state.call_signatures.insert(id.clone(), json!(signature));
                         if let Ok(mut signatures) = state.signatures.lock() {
                             signatures.insert(id.clone(), signature.to_string());
                         }
@@ -400,6 +436,9 @@ fn parse_sse_line(line: &str, state: &mut GeminiStreamState) -> GeminiLine {
                             arguments: call.get("args").map(|args| args.to_string()),
                         },
                     });
+                } else if let Some(signature) = signature {
+                    // Streaming may deliver it on a trailing empty text part.
+                    state.text_signature = Some(signature.to_string());
                 }
             }
         }
@@ -511,13 +550,29 @@ fn message_to_gemini(
         "user"
     };
     let mut parts = content_parts(msg)?;
+    // Signatures saved with this turn win over the in-process cache.
+    let saved = msg
+        .provider_state
+        .as_ref()
+        .and_then(|state| state.get(STATE_KEY))
+        .filter(|_| msg.role == "assistant");
+    if let Some(signature) = saved.and_then(|state| state.get("text_signature")) {
+        if let Some(part) = parts
+            .iter_mut()
+            .rev()
+            .find(|part| part.get("text").is_some())
+        {
+            part["thoughtSignature"] = signature.clone();
+        }
+    }
 
     if let Some(calls) = &msg.tool_calls {
         let known = |call: &milim_core::api::openai::ToolCall| {
-            call.id
-                .as_ref()
-                .and_then(|id| signatures.by_call.get(id))
-                .cloned()
+            let id = call.id.as_ref()?;
+            saved
+                .and_then(|state| state.get("signatures")?.get(id)?.as_str())
+                .map(str::to_string)
+                .or_else(|| signatures.by_call.get(id).cloned())
         };
         // Gemini signs only the first call of a parallel batch. Calls it never
         // signed here get the documented placeholder on the first part only.
@@ -696,6 +751,7 @@ fn gemini_tools(tools: &[Tool]) -> Vec<Value> {
                 .parameters
                 .clone()
                 .unwrap_or_else(|| json!({"type":"object"}));
+            inline_local_refs(&mut parameters);
             sanitize_gemini_schema(&mut parameters);
             tool.insert("parameters".to_string(), parameters);
             Value::Object(tool)
@@ -703,10 +759,88 @@ fn gemini_tools(tools: &[Tool]) -> Vec<Value> {
         .collect()
 }
 
+/// Replace local `$ref`s (`#/$defs/..`, `#/definitions/..`, or any other
+/// `#` pointer) with the schema they point to, since Gemini's `Schema` proto
+/// has no references. Keywords beside a `$ref` win over the target's, and a
+/// recursive reference becomes a plain object.
+fn inline_local_refs(schema: &mut Value) {
+    let root = schema.clone();
+    inline_refs(schema, &root, &mut Vec::new());
+}
+
+fn inline_refs(node: &mut Value, root: &Value, expanding: &mut Vec<String>) {
+    match node {
+        Value::Object(map) => {
+            let reference = map.get("$ref").and_then(Value::as_str).map(str::to_string);
+            if let Some(reference) = reference {
+                if let Some(target) = reference.strip_prefix('#').and_then(|p| root.pointer(p)) {
+                    let target = if expanding.contains(&reference) {
+                        json!({ "type": "object" })
+                    } else {
+                        let mut target = target.clone();
+                        expanding.push(reference);
+                        inline_refs(&mut target, root, expanding);
+                        expanding.pop();
+                        target
+                    };
+                    map.remove("$ref");
+                    if let Value::Object(target) = target {
+                        for (key, value) in target {
+                            map.entry(key).or_insert(value);
+                        }
+                    }
+                }
+            }
+            for (key, value) in map.iter_mut() {
+                if key != "$defs" && key != "definitions" {
+                    inline_refs(value, root, expanding);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                inline_refs(item, root, expanding);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fold one `allOf` member into its parent schema: properties and required
+/// lists merge, any other keyword keeps the parent's value.
+fn merge_all_of(into: &mut Map<String, Value>, member: Value) {
+    let Value::Object(member) = member else {
+        return;
+    };
+    for (key, value) in member {
+        if let Some(existing) = into.get_mut(&key) {
+            match (existing, value) {
+                (Value::Object(properties), Value::Object(more)) if key == "properties" => {
+                    for (name, schema) in more {
+                        properties.entry(name).or_insert(schema);
+                    }
+                }
+                (Value::Array(required), Value::Array(more)) if key == "required" => {
+                    for name in more {
+                        if !required.contains(&name) {
+                            required.push(name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            into.insert(key, value);
+        }
+    }
+}
+
 /// Gemini's `parameters` is a strict OpenAPI 3.0 `Schema` proto, not full JSON
 /// Schema: unknown keywords are a 400 and `type` must be a single value.
 /// Strip what the proto cannot represent and fold nullable type unions into
-/// `nullable: true`.
+/// `nullable: true`. `oneOf` becomes the proto's `anyOf` and `allOf` members
+/// merge into the schema; run [`inline_local_refs`] first so referenced
+/// definitions survive.
 fn sanitize_gemini_schema(schema: &mut Value) {
     const UNSUPPORTED: &[&str] = &[
         "$schema",
@@ -743,6 +877,15 @@ fn sanitize_gemini_schema(schema: &mut Value) {
 
     match schema {
         Value::Object(map) => {
+            // For tool arguments "exactly one of" and "any of" read the same.
+            if let Some(one_of) = map.remove("oneOf") {
+                map.entry("anyOf").or_insert(one_of);
+            }
+            if let Some(Value::Array(members)) = map.remove("allOf") {
+                for member in members {
+                    merge_all_of(map, member);
+                }
+            }
             for key in UNSUPPORTED {
                 map.remove(*key);
             }
@@ -932,6 +1075,68 @@ mod schema_tests {
     }
 
     #[test]
+    fn inlines_local_refs_and_folds_one_of_and_all_of() {
+        let mut schema = json!({
+            "type": "object",
+            "$defs": {
+                "path": { "type": "string", "description": "A file path." },
+                "node": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "children": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+                    }
+                }
+            },
+            "definitions": { "mode": { "type": "string", "enum": ["r", "w"] } },
+            "properties": {
+                "target": { "$ref": "#/$defs/path", "description": "Where to write." },
+                "mode": { "$ref": "#/definitions/mode" },
+                "tree": { "$ref": "#/$defs/node" },
+                "value": { "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/path" }] },
+                "options": { "allOf": [
+                    { "type": "object", "properties": { "a": { "type": "integer" } }, "required": ["a"] },
+                    { "properties": { "b": { "type": "boolean" } }, "required": ["b"] }
+                ]},
+                "missing": { "$ref": "https://example.com/schema.json" }
+            }
+        });
+        inline_local_refs(&mut schema);
+        sanitize_gemini_schema(&mut schema);
+
+        assert!(schema.get("$defs").is_none());
+        assert!(schema.get("definitions").is_none());
+        let props = &schema["properties"];
+        assert_eq!(
+            props["target"],
+            json!({"type": "string", "description": "Where to write."})
+        );
+        assert_eq!(props["mode"], json!({"type": "string", "enum": ["r", "w"]}));
+        // A recursive definition expands once; the self-reference inside it
+        // becomes a plain object.
+        let tree = &props["tree"]["properties"];
+        assert_eq!(tree["name"]["type"], "string");
+        assert_eq!(
+            tree["children"],
+            json!({"type": "array", "items": {"type": "object"}})
+        );
+        assert_eq!(
+            props["value"]["anyOf"],
+            json!([{"type": "string"}, {"type": "string", "description": "A file path."}])
+        );
+        assert_eq!(
+            props["options"],
+            json!({
+                "type": "object",
+                "properties": { "a": { "type": "integer" }, "b": { "type": "boolean" } },
+                "required": ["a", "b"]
+            })
+        );
+        // A remote reference cannot be resolved; it degrades to an object.
+        assert_eq!(props["missing"], json!({"type": "object"}));
+    }
+
+    #[test]
     fn gemini_tools_use_sanitized_parameters() {
         use milim_core::api::openai::ToolFunction;
         let tool = Tool {
@@ -971,6 +1176,7 @@ mod thought_signature_tests {
             ),
             tool_call_id: None,
             reasoning_content: None,
+            provider_state: None,
         }
     }
 
@@ -1008,6 +1214,34 @@ mod thought_signature_tests {
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["thoughtSignature"], SKIP_THOUGHT_SIGNATURE);
         assert!(parts[1].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn provider_state_signatures_survive_a_restart() {
+        let mut state = GeminiStreamState::default();
+        let line = r#"data: {"candidates":[{"content":{"parts":[{"text":"Let me look."},{"functionCall":{"name":"list_dir","args":{}},"thoughtSignature":"sig-call"},{"text":"","thoughtSignature":"sig-text"}]},"finishReason":"STOP"}]}"#;
+        let GeminiLine::Delta(delta) = parse_sse_line(line, &mut state) else {
+            panic!("expected a delta");
+        };
+        let id = delta.tool_calls[0].id.clone().unwrap();
+        let provider_state = state.provider_state().unwrap();
+        assert_eq!(
+            provider_state,
+            json!({"gemini": {"signatures": {id.clone(): "sig-call"}, "text_signature": "sig-text"}})
+        );
+
+        // A new process has an empty cache; the saved state still signs.
+        let mut message = assistant_calls(&[&id]);
+        message.content = Some(Content::Text("Let me look.".into()));
+        message.provider_state = Some(provider_state);
+        let contents =
+            build_contents(&[message], &Mutex::new(ThoughtSignatures::default())).unwrap();
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(
+            parts[0],
+            json!({"text": "Let me look.", "thoughtSignature": "sig-text"})
+        );
+        assert_eq!(parts[1]["thoughtSignature"], "sig-call");
     }
 
     #[test]

@@ -3,9 +3,14 @@
 
 use std::sync::Arc;
 
-use milim_control_contract::{ControlCommandResultV1, ControlCommandStatusV1, ControlCommandV1};
+use milim_control_contract::{
+    ControlAttachmentV1, ControlCommandResultV1, ControlCommandStatusV1, ControlCommandV1,
+    FrozenRunConfigV1,
+};
 use milim_core::{Error, Result};
-use milim_storage::{ControlInboxRecord, ControlQueuedTurnRecord, ControlRunRecord};
+use milim_storage::{
+    ControlInboxRecord, ControlQueuedTurnRecord, ControlRunRecord, ControlThreadRecord,
+};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -62,16 +67,7 @@ impl RunManager {
                 )));
             }
         }
-        let mut config = resolve_frozen_config(&state, &self.store, &thread, payload.attachments)?;
-        config.linked_thread_grants = self.freeze_linked_thread_grants(&thread_id)?;
-        let bound_agent_id = thread_agent_id(&thread);
-        if config.agent.is_none() {
-            if let Some(agent_id) = bound_agent_id {
-                return Err(Error::InvalidRequest(format!(
-                    "thread is bound to missing Agent {agent_id}; replace or clear the binding before sending"
-                )));
-            }
-        }
+        let config = self.resolve_turn_config(&state, &thread, payload.attachments, "sending")?;
         let accepted = AcceptedTurnV1 {
             text: payload.text,
             client_message_id: payload.client_message_id,
@@ -265,11 +261,11 @@ impl RunManager {
             .into_iter()
             .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
             .collect::<Vec<_>>();
-        let user = messages
+        let user_index = messages
             .iter()
-            .rev()
-            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
             .ok_or_else(|| Error::InvalidRequest("thread has no user turn to regenerate".into()))?;
+        let user = &messages[user_index];
         let text = user
             .get("promptContent")
             .or_else(|| user.get("content"))
@@ -287,10 +283,16 @@ impl RunManager {
             .transpose()
             .map_err(|error| Error::Other(format!("stored attachments are invalid: {error}")))?
             .unwrap_or_default();
-        if let Some(assistant_id) = messages
+        // Only the reply to the last user turn is replaced: an earlier turn's
+        // reply (when the last run saved none) and a `/compact` checkpoint
+        // row are kept.
+        if let Some(assistant_id) = messages[user_index + 1..]
             .iter()
             .rev()
-            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .find(|message| {
+                message.get("role").and_then(Value::as_str) == Some("assistant")
+                    && message.get("compaction").is_none_or(Value::is_null)
+            })
             .and_then(|message| message.get("id"))
             .and_then(Value::as_str)
         {
@@ -306,8 +308,9 @@ impl RunManager {
                 )?;
             }
         }
-        // A failed or cancelled run persists no assistant message; the renderer
-        // shows its error from stream events under a placeholder id. Retire that
+        // A failed or cancelled run that produced no output (or ran on an
+        // account runtime) persists no assistant message; the renderer shows
+        // its error from stream events under a placeholder id. Retire that
         // placeholder too so the regenerated reply replaces it after reload.
         if let Some(last_run_id) = self.last_run_id_in_timeline(&thread_id)? {
             let has_assistant = messages.iter().any(|message| {
@@ -376,6 +379,27 @@ impl RunManager {
                 "native_session_id": native_session_id,
             }),
         })
+    }
+
+    /// Resolve the thread's current settings into the config a turn runs
+    /// with. `action` names what a missing Agent binding blocks.
+    pub(super) fn resolve_turn_config(
+        &self,
+        state: &AppState,
+        thread: &ControlThreadRecord,
+        attachments: Vec<ControlAttachmentV1>,
+        action: &str,
+    ) -> Result<FrozenRunConfigV1> {
+        let mut config = resolve_frozen_config(state, &self.store, thread, attachments)?;
+        config.linked_thread_grants = self.freeze_linked_thread_grants(&thread.id)?;
+        if config.agent.is_none() {
+            if let Some(agent_id) = thread_agent_id(thread) {
+                return Err(Error::InvalidRequest(format!(
+                    "thread is bound to missing Agent {agent_id}; replace or clear the binding before {action}"
+                )));
+            }
+        }
+        Ok(config)
     }
 
     /// The run id of the most recent run recorded in a thread's timeline.
@@ -465,19 +489,28 @@ impl RunManager {
                 },
             );
         }
-        let claimed_mail = match self
-            .store
-            .control_claim_mailbox_replies(&thread_id, &run_id, 20)
+        if let Err(error) =
+            self.launch_turn(state, thread_id.clone(), run_id.clone(), accepted, stop_rx)
         {
-            Ok(items) => items,
-            Err(error) => {
-                self.active
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&thread_id);
-                return Err(error);
-            }
-        };
+            self.abandon_unlaunched_run(&thread_id, &run_id, &error);
+            return Err(error);
+        }
+        Ok(run_id)
+    }
+
+    /// Record an accepted run and spawn its task. The caller has already
+    /// reserved the thread's active slot for `run_id`.
+    fn launch_turn(
+        self: &Arc<Self>,
+        state: AppState,
+        thread_id: String,
+        run_id: String,
+        mut accepted: AcceptedTurnV1,
+        stop_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
+        let claimed_mail = self
+            .store
+            .control_claim_mailbox_replies(&thread_id, &run_id, 20)?;
         accepted.config.claimed_mailbox_ids =
             claimed_mail.iter().map(|item| item.id.clone()).collect();
         accepted.mailbox_context = claimed_mail
@@ -485,7 +518,7 @@ impl RunManager {
             .filter_map(mailbox_context_from_record)
             .collect();
         let now = now_ms();
-        let mut run_record = ControlRunRecord {
+        let run_record = ControlRunRecord {
             id: run_id.clone(),
             thread_id: thread_id.clone(),
             status: "accepted".into(),
@@ -554,20 +587,9 @@ impl RunManager {
             privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
             thread_id: thread_id.clone(),
             run_id: run_id.clone(),
+            sent_step: Default::default(),
         };
-        if let Err(error) = journal.commit_composition(&accepted) {
-            self.active
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&thread_id);
-            run_record.status = "failed".into();
-            run_record.updated_at_ms = now_ms();
-            run_record.completed_at_ms = Some(run_record.updated_at_ms);
-            run_record.error_json =
-                Some(milim_core::provider_error::run_error_value(&error).to_string());
-            let _ = self.store.control_put_run(&run_record);
-            return Err(error);
-        }
+        journal.commit_composition(&accepted)?;
         if accepted.append_user {
             let user_message_id = accepted
                 .client_message_id
@@ -601,14 +623,47 @@ impl RunManager {
                 )?;
             }
         }
+        let guard = RunTaskGuard::new(self.clone(), state.clone(), &thread_id, &run_id);
         let manager = self.clone();
-        let spawned_run_id = run_id.clone();
         tokio::spawn(async move {
             manager
-                .run_turn(state, thread_id, spawned_run_id, accepted, stop_rx)
+                .run_turn(state, thread_id, run_id, accepted, stop_rx, guard)
                 .await;
         });
-        Ok(run_id)
+        Ok(())
+    }
+
+    /// Undo a run whose task never started, so it neither keeps the thread
+    /// busy nor stays listed as an active run.
+    fn abandon_unlaunched_run(&self, thread_id: &str, run_id: &str, error: &Error) {
+        self.release_active_run(thread_id, run_id);
+        if let Ok(Some(mut run)) = self.store.control_run(run_id) {
+            if run.completed_at_ms.is_none() {
+                run.status = "failed".into();
+                run.updated_at_ms = now_ms();
+                run.completed_at_ms = Some(run.updated_at_ms);
+                run.error_json =
+                    Some(milim_core::provider_error::run_error_value(error).to_string());
+                let _ = self.store.control_put_run(&run);
+            }
+        }
+    }
+
+    /// Free the thread's active slot if `run_id` still holds it.
+    fn release_active_run(&self, thread_id: &str, run_id: &str) -> bool {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active
+            .get(thread_id)
+            .is_some_and(|active_run| active_run.run_id == run_id)
+        {
+            active.remove(thread_id);
+            true
+        } else {
+            false
+        }
     }
 
     async fn run_turn(
@@ -618,10 +673,12 @@ impl RunManager {
         run_id: String,
         accepted: AcceptedTurnV1,
         mut stop: watch::Receiver<bool>,
+        mut guard: RunTaskGuard,
     ) {
-        let mut run = match self.store.control_run(&run_id).ok().flatten() {
-            Some(run) => run,
-            None => return,
+        // Nothing can run without its record; the guard fails the run and
+        // releases the thread.
+        let Some(mut run) = self.store.control_run(&run_id).ok().flatten() else {
+            return;
         };
         run.status = "running".into();
         run.updated_at_ms = now_ms();
@@ -665,14 +722,11 @@ impl RunManager {
                 privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
                 thread_id: thread_id.clone(),
                 run_id: run_id.clone(),
+                sent_step: Default::default(),
             };
             let _ = journal.commit_failure(0, error);
         }
 
-        self.turn_checkpoints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&run_id);
         let limited = matches!(&outcome, Ok(RunOutcome::Limited));
         let (status, error) = match outcome {
             Ok(RunOutcome::Completed | RunOutcome::Limited) => ("completed", None),
@@ -682,43 +736,93 @@ impl RunManager {
                 Some(milim_core::provider_error::run_error_value(&error)),
             ),
         };
-        run.status = status.into();
-        run.updated_at_ms = now_ms();
-        run.completed_at_ms = Some(run.updated_at_ms);
-        run.error_json = error.as_ref().map(Value::to_string);
-        let _ = self.store.control_put_run(&run);
-        let _ = self.persist_and_emit(
-            &thread_id,
-            Some(&run_id),
-            "run_status",
-            json!({ "run_id": run_id, "status": status, "error": error }),
-        );
-        if status != "completed" {
-            let failure = error
-                .as_ref()
-                .and_then(|value| value.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or(if status == "cancelled" {
-                    "The linked thread run was cancelled."
-                } else {
-                    "The linked thread run failed."
-                });
-            let _ = self.complete_mailbox_exchange(&run_id, None, Some(failure));
-        }
-        let _ = self.store.control_retarget_pending_steers(&run_id);
-        self.active
+        let drain = status != "cancelled" && !limited;
+        self.finish_run(state, &thread_id, &run_id, status, error, drain)
+            .await;
+        guard.finished = true;
+    }
+
+    /// Record a run's terminal status and release its thread. This holds the
+    /// thread lock that sends, steers, and queue resumes take, so each of
+    /// them either sees the run still active or sees it fully finished: its
+    /// approvals closed, unclaimed steers queued, and the queue drained.
+    async fn finish_run(
+        self: &Arc<Self>,
+        state: AppState,
+        thread_id: &str,
+        run_id: &str,
+        status: &str,
+        error: Option<Value>,
+        drain: bool,
+    ) {
+        let lease = self.lock_for_thread(thread_id);
+        let _thread = lease.lock().await;
+        self.turn_checkpoints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&thread_id);
+            .remove(run_id);
+        self.turn_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(run_id);
+        // A guard finishing after a panic must not overwrite a status the
+        // run already recorded.
+        let run = self.store.control_run(run_id).ok().flatten();
+        let status = match &run {
+            Some(run) if run.completed_at_ms.is_some() => run.status.clone(),
+            _ => status.to_string(),
+        };
+        let _ = self.cancel_run_approvals(&state, thread_id, run_id, &status);
+        if let Some(mut run) = run.filter(|run| run.completed_at_ms.is_none()) {
+            run.status = status.clone();
+            run.updated_at_ms = now_ms();
+            run.completed_at_ms = Some(run.updated_at_ms);
+            run.error_json = error.as_ref().map(Value::to_string);
+            let _ = self.store.control_put_run(&run);
+            let _ = self.persist_and_emit(
+                thread_id,
+                Some(run_id),
+                "run_status",
+                json!({ "run_id": run_id, "status": status, "error": error }),
+            );
+            if status != "completed" {
+                let failure = error
+                    .as_ref()
+                    .and_then(|value| value.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(if status == "cancelled" {
+                        "The linked thread run was cancelled."
+                    } else {
+                        "The linked thread run failed."
+                    });
+                let _ = self.complete_mailbox_exchange(run_id, None, Some(failure));
+            }
+        }
+        let _ = self.store.control_retarget_pending_steers(run_id);
+        if !self.release_active_run(thread_id, run_id) {
+            return;
+        }
+        self.emit(
+            "run.updated",
+            Some(thread_id),
+            self.store
+                .control_thread(thread_id)
+                .ok()
+                .flatten()
+                .as_ref()
+                .map(|thread| thread.epoch.as_str()),
+            None,
+            json!({ "run_id": run_id, "status": status }),
+        );
         let interrupt_queue_id = self
             .queue_interrupts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&thread_id);
+            .remove(thread_id);
         if let Some(queue_id) = interrupt_queue_id {
-            let _ = self.start_queued_turn(state, thread_id, &queue_id, true);
-        } else if status != "cancelled" && !limited {
-            self.drain_queue(state, thread_id);
+            let _ = self.start_queued_turn(state, thread_id.to_string(), &queue_id, true);
+        } else if drain {
+            self.drain_queue(state, thread_id.to_string());
         }
     }
 
@@ -730,7 +834,45 @@ impl RunManager {
         reasoning: String,
         metrics: Option<Value>,
     ) -> Result<String> {
+        self.complete_assistant_message_with(
+            thread_id,
+            run_id,
+            content,
+            reasoning,
+            metrics,
+            super::delta::AssistantReplay::default(),
+        )
+    }
+
+    /// Persist a completed run's assistant message with its model-replay
+    /// fields and complete the run's linked-thread exchange.
+    pub(super) fn complete_assistant_message_with(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        content: String,
+        reasoning: String,
+        metrics: Option<Value>,
+        replay: super::delta::AssistantReplay,
+    ) -> Result<String> {
         let mailbox_content = content.clone();
+        let message_id =
+            self.persist_assistant_message(thread_id, run_id, content, reasoning, metrics, replay)?;
+        self.complete_mailbox_exchange(run_id, Some(&mailbox_content), None)?;
+        Ok(message_id)
+    }
+
+    /// Persist a run's assistant message without touching its linked-thread
+    /// exchange; a stopped or failed run leaves that to its terminal status.
+    pub(super) fn persist_assistant_message(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        content: String,
+        reasoning: String,
+        metrics: Option<Value>,
+        replay: super::delta::AssistantReplay,
+    ) -> Result<String> {
         let message_id = Uuid::new_v4().to_string();
         let mut message = json!({
             "id": message_id,
@@ -741,6 +883,15 @@ impl RunManager {
             "ledgerVersion": 1,
             "metrics": metrics,
         });
+        if let Some(prompt_content) = replay.prompt_content {
+            message["promptContent"] = Value::String(prompt_content);
+        }
+        if let Some(work_log) = replay.work_log {
+            message["workLog"] = work_log;
+        }
+        if let Some(interruption) = replay.interruption {
+            message["interruption"] = Value::String(interruption);
+        }
         if let Some(checkpoint) = self
             .turn_checkpoints
             .lock()
@@ -748,6 +899,16 @@ impl RunManager {
             .get(run_id)
         {
             message["workspaceCheckpoint"] = checkpoint.clone();
+        }
+        // The turn's context replays before its user message on later turns,
+        // exactly as sent, so the provider's cached prefix still matches.
+        if let Some(turn_context) = self
+            .turn_contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(run_id)
+        {
+            message["turnContext"] = Value::String(turn_context.clone());
         }
         self.persist_message_and_event(
             thread_id,
@@ -757,7 +918,6 @@ impl RunManager {
             "assistant_message_projected",
             json!({"ledger_version": 1}),
         )?;
-        self.complete_mailbox_exchange(run_id, Some(&mailbox_content), None)?;
         Ok(message_id)
     }
 
@@ -793,4 +953,63 @@ impl RunManager {
 
 pub(super) fn stream_placeholder_message_id(run_id: &str) -> String {
     format!("{STREAM_PLACEHOLDER_PREFIX}{run_id}")
+}
+
+/// Owned by a run's task until the run finishes. If the task ends any other
+/// way (a panic unwinds through it, or the runtime drops it), the guard
+/// finishes the run as failed, so a dead run never leaves its thread busy,
+/// its approvals actionable, or its queue stuck.
+pub(super) struct RunTaskGuard {
+    manager: Arc<RunManager>,
+    state: AppState,
+    thread_id: String,
+    run_id: String,
+    finished: bool,
+}
+
+impl RunTaskGuard {
+    pub(super) fn new(
+        manager: Arc<RunManager>,
+        state: AppState,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Self {
+        Self {
+            manager,
+            state,
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+            finished: false,
+        }
+    }
+}
+
+impl Drop for RunTaskGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let manager = self.manager.clone();
+        let state = self.state.clone();
+        let thread_id = self.thread_id.clone();
+        let run_id = self.run_id.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let error = json!({
+                        "code": "run_task_ended",
+                        "message": "The run stopped unexpectedly before it finished.",
+                    });
+                    manager
+                        .finish_run(state, &thread_id, &run_id, "failed", Some(error), true)
+                        .await;
+                });
+            }
+            // No runtime means the process is exiting; restart reconciliation
+            // marks the run interrupted.
+            Err(_) => {
+                manager.release_active_run(&thread_id, &run_id);
+            }
+        }
+    }
 }

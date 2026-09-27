@@ -1,0 +1,8 @@
+code,name,rate_per_usd,minor_units
+USD,US Dollar,1,2
+EUR,Euro,0.92,2
+GBP,Pound Sterling,0.79,2
+CHF,Swiss Franc,0.9,2
+JPY,Japanese Yen,151.5,0
+KRW,South Korean Won,1352,0
+BHD,Bahraini Dinar,0.376,3

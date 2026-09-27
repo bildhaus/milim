@@ -1,0 +1,8 @@
+{
+  "id": "background-server-query",
+  "title": "Start a local service, query it, and stop it",
+  "category": "background-process",
+  "prompt": "This repository contains a small inventory service. Start it with `npm start` (it prints its URL once it is ready), then ask it for the low-stock report of the `north` warehouse (GET /stats/low-stock?warehouse=north). Write ANSWER.json as `{ \"count\": <count from the response>, \"request_id\": \"<request_id from that response>\" }`, and stop the service when you are done. Do not modify any existing file.",
+  "timeout_s": 240,
+  "check": "node check.mjs"
+}

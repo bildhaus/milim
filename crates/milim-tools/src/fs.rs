@@ -18,21 +18,34 @@ use milim_core::{Error, Result};
 
 use crate::{Tool, ToolConcurrency, ToolEffect};
 
-/// Lines `read_file` returns when the caller gives no `limit`.
-const DEFAULT_READ_LINES: usize = 2000;
+/// Lines `read_file` returns when the caller gives no `limit`, and at most.
+const MAX_READ_LINES: usize = crate::MODEL_TEXT_BUDGET_LINES;
 /// Longer lines are cut so one minified line cannot fill the reply.
 const MAX_LINE_CHARS: usize = 2000;
-/// Upper bound on the text one `read_file` call returns.
-const MAX_READ_BYTES: usize = 256 * 1024;
+/// Upper bound on one `read_file` reply as the model sees it, line numbers
+/// included, so the agent loop never cuts a page's middle.
+const MAX_READ_BYTES: usize = crate::MODEL_TEXT_BUDGET_BYTES;
+/// Bytes the rendered line-number prefix and line break add to each line.
+const LINE_PREFIX_BYTES: usize = 8;
 /// Leading bytes inspected to tell text from binary content.
 const SNIFF_BYTES: u64 = 8192;
 const MAX_LIST_ENTRIES: usize = 1000;
 
-/// Resolve `rel` under `root`, rejecting absolute paths and `..` traversal.
+/// Resolve `rel` under `root`, rejecting `..` traversal and symlinks. An
+/// absolute path is accepted when it names a location inside `root`.
 pub fn resolve_workspace_path(root: &Path, rel: &str) -> Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root)?;
+    let within;
+    // A rooted path counts as absolute even without a drive (`/etc` on
+    // Windows), so it gets the same containment check and message.
+    let rel = if Path::new(rel).has_root() {
+        within = absolute_within(&canonical_root, Path::new(rel))?;
+        within.as_path()
+    } else {
+        Path::new(rel)
+    };
     let mut out = canonical_root.clone();
-    let components = Path::new(rel)
+    let components = rel
         .components()
         .map(|component| match component {
             Component::Normal(value) => Ok(value.to_os_string()),
@@ -75,6 +88,46 @@ pub fn resolve_workspace_path(root: &Path, rel: &str) -> Result<PathBuf> {
         }
     }
     Ok(out)
+}
+
+/// The part of absolute `path` below `canonical_root`. The deepest existing
+/// ancestor is canonicalized first, so aliases of the root (`/tmp` for
+/// `/private/tmp`) match while a link that leaves the root does not.
+fn absolute_within(canonical_root: &Path, path: &Path) -> Result<PathBuf> {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(Error::InvalidRequest("'..' is not allowed in paths".into()));
+    }
+    let mut existing = path;
+    let mut rest = Vec::new();
+    let canonical = loop {
+        match std::fs::canonicalize(existing) {
+            Ok(canonical) => break Some(canonical),
+            Err(_) => match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name);
+                    existing = parent;
+                }
+                _ => break None,
+            },
+        }
+    };
+    let inside = canonical.and_then(|canonical| {
+        let mut full = canonical;
+        full.extend(rest.iter().rev());
+        full.strip_prefix(canonical_root)
+            .ok()
+            .map(Path::to_path_buf)
+    });
+    inside.ok_or_else(|| {
+        Error::InvalidRequest(format!(
+            "{} is outside the workspace root {}; use a path inside it (relative paths resolve from the root)",
+            path.display(),
+            canonical_root.display()
+        ))
+    })
 }
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -126,11 +179,66 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     result.map_err(Into::into)
 }
 
+/// Largest image `read_file` attaches for vision models (base64 stays under
+/// the 5 MB per-image cap providers enforce).
+const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024;
+
+/// A `read_file` result: a PNG, JPEG, GIF, or WebP image as an `image` field
+/// (which the agent loop attaches as an image message for vision models), or
+/// otherwise a text line range from [`read_text_range`].
+pub fn read_file_result(path: &Path, offset: u64, limit: usize) -> Result<Value> {
+    match read_image(path)? {
+        Some(image) => Ok(image),
+        None => read_text_range(path, offset, limit),
+    }
+}
+
+fn read_image(path: &Path) -> Result<Option<Value>> {
+    use base64::Engine as _;
+
+    let metadata = std::fs::metadata(path)?;
+    if metadata.is_dir() {
+        return Ok(None);
+    }
+    let mut head = Vec::new();
+    std::fs::File::open(path)?.take(16).read_to_end(&mut head)?;
+    let Some((kind, mime)) = image_kind(&head).and_then(|kind| {
+        let mime = match kind {
+            "PNG" => "image/png",
+            "JPEG" => "image/jpeg",
+            "GIF" => "image/gif",
+            "WebP" => "image/webp",
+            _ => return None,
+        };
+        Some((kind, mime))
+    }) else {
+        return Ok(None);
+    };
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err(Error::InvalidRequest(format!(
+            "{} is a {kind} image of {} bytes; read_file attaches images up to {} MiB",
+            path.display(),
+            metadata.len(),
+            MAX_IMAGE_BYTES / (1024 * 1024)
+        )));
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(Some(json!({
+        "image_kind": kind,
+        "bytes": bytes.len(),
+        "image": {
+            "mime": mime,
+            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        },
+    })))
+}
+
 /// Read a line range of a text file as a `read_file` result. `offset` is the
-/// 1-based first line (0 is treated as 1) and `limit` the maximum line count.
-/// Lines are returned without their line endings; lines longer than 2000
-/// characters are cut, and the reply stops early at 256 KiB. Binary files and
-/// images are rejected with an error that names what they are.
+/// 1-based first line (0 is treated as 1) and `limit` the maximum line count
+/// (at most 1000). Lines are returned without their line endings; lines longer
+/// than 2000 characters are cut, and the reply stops early once its rendered
+/// text would pass 40 KiB. Binary files and images are rejected with an error
+/// that names what they are.
 pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> {
     let metadata = std::fs::metadata(path)?;
     if metadata.is_dir() {
@@ -144,7 +252,7 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
     (&mut file).take(SNIFF_BYTES).read_to_end(&mut head)?;
     if let Some(kind) = image_kind(&head) {
         return Err(Error::InvalidRequest(format!(
-            "{} is a {kind} image ({} bytes); read_file only returns text",
+            "{} is a {kind} image ({} bytes); read_file returns text, or PNG, JPEG, GIF, and WebP images",
             path.display(),
             metadata.len()
         )));
@@ -159,10 +267,11 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
     file.seek(SeekFrom::Start(0))?;
 
     let start = offset.max(1);
-    let limit = limit.max(1);
+    let limit = limit.clamp(1, MAX_READ_LINES);
     let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     let mut content = String::new();
+    let mut rendered = 0_usize;
     let mut total = 0_u64;
     let mut shown = 0_usize;
     let mut cut_lines = 0_usize;
@@ -190,7 +299,7 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
             }
             None => text.into_owned(),
         };
-        if shown > 0 && content.len() + line.len() + 1 > MAX_READ_BYTES {
+        if shown > 0 && rendered + line.len() + LINE_PREFIX_BYTES > MAX_READ_BYTES {
             full = true;
             continue;
         }
@@ -198,6 +307,7 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
             content.push('\n');
         }
         content.push_str(&line);
+        rendered += line.len() + LINE_PREFIX_BYTES;
         shown += 1;
     }
     if total > 0 && start > total {
@@ -215,6 +325,7 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
         "next_offset": (!eof).then_some(last + 1),
         "eof": eof,
         "cut_lines": cut_lines,
+        "size_limited": full,
     }))
 }
 
@@ -270,6 +381,10 @@ pub fn fs_tools(root: impl Into<PathBuf>) -> Vec<Arc<dyn Tool>> {
     ]
 }
 
+/// Schema description of a `path` argument for workspace-scoped file tools.
+pub const PATH_DESCRIPTION: &str =
+    "Path relative to the working folder, or an absolute path inside it.";
+
 /// Read a UTF-8 file within the workspace.
 pub struct ReadFileTool {
     root: Arc<PathBuf>,
@@ -279,16 +394,16 @@ impl ReadFileTool {
     /// JSON schema shared by every `read_file` implementation.
     pub fn schema() -> Value {
         json!({"type":"object","properties":{
-            "path":{"type":"string"},
+            "path":{"type":"string","description":PATH_DESCRIPTION},
             "offset":{"type":"integer","minimum":1,"description":"1-based line number to start from, default 1."},
-            "limit":{"type":"integer","minimum":1,"description":"Maximum number of lines, default 2000."}
+            "limit":{"type":"integer","minimum":1,"maximum":MAX_READ_LINES,"description":"Maximum number of lines, default and maximum 1000. A reply also stops at about 40 KB; the hint at the end gives the next offset."}
         },"required":["path"],"additionalProperties":false})
     }
 
     /// The `(offset, limit)` line window requested by `read_file` arguments.
     pub fn line_window(args: &Value) -> Result<(u64, usize)> {
         let offset = optional_u64(args, "offset", 1)?;
-        let limit = usize::try_from(optional_u64(args, "limit", DEFAULT_READ_LINES as u64)?)
+        let limit = usize::try_from(optional_u64(args, "limit", MAX_READ_LINES as u64)?)
             .unwrap_or(usize::MAX);
         Ok((offset, limit))
     }
@@ -316,6 +431,12 @@ impl ReadFileTool {
     /// Numbered-line text for the model: `  12\t<line>`, followed by a hint
     /// when the file continues past the returned range.
     pub fn render_for_model(result: &Value) -> Option<String> {
+        if let Some(kind) = result.get("image_kind").and_then(Value::as_str) {
+            return Some(format!(
+                "{kind} image ({} bytes), attached below as an image.",
+                result["bytes"]
+            ));
+        }
         let content = result.get("content")?.as_str()?;
         let start = result.get("offset")?.as_u64()?;
         let shown = result.get("lines")?.as_u64()?;
@@ -328,9 +449,14 @@ impl ReadFileTool {
             let _ = writeln!(out, "{:>6}\t{line}", start + index as u64);
         }
         if let Some(next) = result.get("next_offset").and_then(Value::as_u64) {
+            let cap = if result["size_limited"].as_bool().unwrap_or(false) {
+                format!("; one read returns at most {} KB", MAX_READ_BYTES / 1024)
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
-                "\n(Showing lines {start}-{} of {total}. Continue with offset={next}.)",
+                "\n(Showing lines {start}-{} of {total}{cap}. Continue with offset={next}.)",
                 next - 1
             );
         }
@@ -351,7 +477,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a UTF-8 text file from the workspace. Returns numbered lines; use offset/limit (in lines) for large files."
+        "Read a UTF-8 text file from the workspace. Returns numbered lines, up to 1000 lines or about 40 KB per call; page through larger files with offset/limit. PNG, JPEG, GIF, and WebP files are returned as images."
     }
     fn input_schema(&self) -> Value {
         Self::schema()
@@ -368,7 +494,7 @@ impl Tool for ReadFileTool {
     async fn invoke(&self, args: Value) -> Result<Value> {
         let path = Self::resolve_read_path(&self.root, arg_str(&args, "path")?)?;
         let (offset, limit) = Self::line_window(&args)?;
-        read_text_range(&path, offset, limit)
+        read_file_result(&path, offset, limit)
     }
 }
 
@@ -432,7 +558,7 @@ impl Tool for ListDirTool {
         "List entries of a directory in the workspace (path defaults to root)."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"}}})
+        json!({"type":"object","properties":{"path":{"type":"string","description":PATH_DESCRIPTION}}})
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
@@ -460,6 +586,14 @@ pub struct WriteFileTool {
 }
 
 impl WriteFileTool {
+    /// JSON schema shared by every `write_file` implementation.
+    pub fn schema() -> Value {
+        json!({"type":"object","properties":{
+            "path":{"type":"string","description":PATH_DESCRIPTION},
+            "content":{"type":"string","description":"The complete new file content."}
+        },"required":["path","content"]})
+    }
+
     /// The `write_file` result for `content` written to `path`.
     pub fn result(path: &str, content: &str, created: bool) -> Value {
         json!({
@@ -491,10 +625,10 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write a UTF-8 text file into the workspace (overwrites)."
+        "Create a UTF-8 text file in the workspace, or replace an existing file's entire content. Parent directories are created."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})
+        WriteFileTool::schema()
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::Mutating
@@ -617,7 +751,123 @@ mod tests {
         let tools = fs_tools(root.clone());
         let read = tools.iter().find(|t| t.name() == "read_file").unwrap();
         assert!(read.invoke(json!({"path":"../secret"})).await.is_err());
-        assert!(read.invoke(json!({"path":"/etc/passwd"})).await.is_err());
+        let error = read
+            .invoke(json!({"path":"/etc/passwd"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside the workspace root"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn absolute_paths_inside_the_workspace_are_accepted() {
+        let root = tmp();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "inside").unwrap();
+        let tools = fs_tools(root.clone());
+        let by = |n: &str| tools.iter().find(|t| t.name() == n).unwrap().clone();
+        let absolute = root.join("src/a.txt");
+        let read = by("read_file")
+            .invoke(json!({"path": absolute}))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "inside");
+        // A not-yet-existing file under an absolute path resolves as well.
+        by("write_file")
+            .invoke(json!({"path": root.join("src/new/b.txt"), "content": "new"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/new/b.txt")).unwrap(),
+            "new"
+        );
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            resolve_workspace_path(&root, canonical.join("src").to_str().unwrap()).unwrap(),
+            canonical.join("src")
+        );
+        let dotted = format!("{}/src/../src/a.txt", root.display());
+        assert!(resolve_workspace_path(&root, &dotted).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_paths_through_a_link_that_leaves_the_workspace_are_rejected() {
+        let root = tmp();
+        let outside = tmp();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let error = resolve_workspace_path(&root, root.join("link/secret.txt").to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside the workspace root"), "{error}");
+        assert!(
+            resolve_workspace_path(&root, root.join("link/new.txt").to_str().unwrap()).is_err()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn reads_fit_the_model_budget_and_continue_where_they_stopped() {
+        let root = tmp();
+        let line = "x".repeat(99);
+        let lines = (0..3000).map(|_| line.as_str()).collect::<Vec<_>>();
+        std::fs::write(root.join("big.txt"), lines.join("\n")).unwrap();
+        let read = read_text_range(&root.join("big.txt"), 1, usize::MAX).unwrap();
+        let shown = read["lines"].as_u64().unwrap();
+        assert!(shown < 1000, "{shown}");
+        assert_eq!(read["next_offset"], shown + 1);
+        assert_eq!(read["size_limited"], true);
+        let text = ReadFileTool::render_for_model(&read).unwrap();
+        assert!(
+            text.len() <= crate::MODEL_TEXT_BUDGET_BYTES + 200,
+            "{}",
+            text.len()
+        );
+        assert!(text.ends_with(&format!(
+            "one read returns at most 40 KB. Continue with offset={}.)",
+            shown + 1
+        )));
+
+        std::fs::write(root.join("short.txt"), "a\n".repeat(5000)).unwrap();
+        let read = read_text_range(&root.join("short.txt"), 1, 5000).unwrap();
+        assert_eq!(read["lines"], 1000);
+        assert_eq!(read["next_offset"], 1001);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn images_are_returned_for_vision_models() {
+        use base64::Engine as _;
+
+        let root = tmp();
+        let png = b"\x89PNG\r\n\x1a\nrest-of-image".to_vec();
+        std::fs::write(root.join("pixel.png"), &png).unwrap();
+        std::fs::write(root.join("icon.ico"), b"\x00\x00\x01\x00rest").unwrap();
+        let tools = fs_tools(root.clone());
+        let read = tools.iter().find(|t| t.name() == "read_file").unwrap();
+        let result = read.invoke(json!({"path":"pixel.png"})).await.unwrap();
+        assert_eq!(result["image"]["mime"], "image/png");
+        assert_eq!(
+            result["image"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        assert_eq!(
+            read.model_text(&result).unwrap(),
+            format!(
+                "PNG image ({} bytes), attached below as an image.",
+                png.len()
+            )
+        );
+        let error = read
+            .invoke(json!({"path":"icon.ico"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ICO image"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

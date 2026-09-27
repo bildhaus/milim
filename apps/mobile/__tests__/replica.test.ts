@@ -404,3 +404,130 @@ test('provider retries drop the failed attempt and compaction and approval timeo
   ]);
   expect(transcript.find(entry => entry.kind === 'approval')).toMatchObject({label: 'Approval timed out'});
 });
+
+describe('run lifecycle endings', () => {
+  const runItem = (seq: number, type: string, data: any, runId = 'run-end'): TimelineItemV1 => ({
+    ...item(seq, type, data),
+    run_id: runId,
+  });
+  const activityOf = (transcript: ReturnType<typeof projectTranscript>) => {
+    const activity = transcript.find(entry => entry.kind === 'activity');
+    if (!activity || activity.kind !== 'activity') throw new Error('missing activity group');
+    return activity;
+  };
+  const pending: PendingApprovalV1 = {
+    id: 'approval-end',
+    run_id: 'run-end',
+    thread_id: 't',
+    kind: 'command',
+    request: {name: 'shell', arguments: '{"command":"ls"}'},
+    status: 'pending',
+    created_at_ms: 2,
+  };
+
+  test('a stopped run settles its activity from run_status alone', () => {
+    const activity = activityOf(projectTranscript([
+      runItem(1, 'tool_started', {id: 'read', name: 'read_file', status: 'running'}),
+      runItem(2, 'run_status', {run_id: 'run-end', status: 'cancelled', error: null}),
+    ]));
+    expect(activity).toMatchObject({status: 'warning', label: 'Work paused'});
+  });
+
+  test('a run interrupted by a restart reports why it stopped', () => {
+    const activity = activityOf(projectTranscript([
+      runItem(1, 'tool_started', {id: 'read', name: 'read_file', status: 'running'}),
+      runItem(2, 'run_status', {
+        run_id: 'run-end',
+        status: 'interrupted',
+        error: {code: 'process_restarted', message: 'milim stopped before this run completed.'},
+      }),
+    ]));
+    expect(activity).toMatchObject({status: 'failed', label: 'Work stopped'});
+    expect(activity.rows.at(-1)).toMatchObject({
+      label: 'milim stopped before this run completed.',
+      status: 'failed',
+    });
+  });
+
+  test('a failure already reported by the runtime is not repeated', () => {
+    const activity = activityOf(projectTranscript([
+      runItem(1, 'tool_started', {id: 'cmd', name: 'command', status: 'running'}),
+      runItem(2, 'turn_failed', {message: 'Tests failed'}),
+      runItem(3, 'run_status', {run_id: 'run-end', status: 'failed', error: {message: 'Tests failed'}}),
+    ]));
+    expect(activity.status).toBe('failed');
+    expect(activity.rows.filter(row => row.label === 'Tests failed')).toHaveLength(1);
+  });
+
+  test('a completed run stays completed', () => {
+    const activity = activityOf(projectTranscript([
+      runItem(1, 'tool_started', {id: 'read', name: 'read_file', status: 'running'}),
+      runItem(2, 'done', {}),
+      runItem(3, 'run_status', {run_id: 'run-end', status: 'completed', error: null}),
+    ]));
+    expect(activity.status).toBe('completed');
+    expect(activity.rows).toHaveLength(1);
+  });
+
+  test('a cancelled approval is not actionable even while bootstrap still lists it', () => {
+    const transcript = projectTranscript([
+      runItem(1, 'approval_requested', {approval_id: 'approval-end', name: 'shell', arguments: '{}'}),
+      runItem(2, 'approval_resolved', {
+        approval_id: 'approval-end',
+        decision: 'deny',
+        status: 'cancelled',
+        reason: 'run_ended',
+      }),
+    ], [pending]);
+    expect(transcript.find(entry => entry.kind === 'approval')).toMatchObject({
+      status: 'completed',
+      label: 'Approval cancelled',
+      approval: null,
+    });
+  });
+
+  test('an approval closes with its run when no resolution was recorded', () => {
+    const transcript = projectTranscript([
+      runItem(1, 'approval_requested', {approval_id: 'approval-end', name: 'shell', arguments: '{}'}),
+      runItem(2, 'run_status', {run_id: 'run-end', status: 'failed', error: {message: 'boom'}}),
+    ], [pending]);
+    expect(transcript.find(entry => entry.kind === 'approval')).toMatchObject({
+      status: 'completed',
+      label: 'Approval cancelled',
+      approval: null,
+    });
+  });
+
+  test('an approval interrupted by a restart says so', () => {
+    const transcript = projectTranscript([
+      runItem(1, 'approval_requested', {approval_id: 'approval-end', name: 'shell', arguments: '{}'}),
+      runItem(2, 'approval_resolved', {
+        approval_id: 'approval-end',
+        decision: 'deny',
+        status: 'interrupted',
+        reason: 'process_restarted',
+      }),
+    ]);
+    expect(transcript.find(entry => entry.kind === 'approval')).toMatchObject({
+      label: 'Approval interrupted',
+      approval: null,
+    });
+  });
+
+  test('incremental projection settles a run exactly like a full rebuild', () => {
+    const initial = [
+      item(1, 'message', {id: 'user-1', role: 'user', content: 'hello'}),
+      runItem(2, 'tool_started', {id: 'read', name: 'read_file', status: 'running'}),
+      runItem(3, 'approval_requested', {approval_id: 'approval-end', name: 'shell', arguments: '{}'}),
+    ];
+    const first = projectTranscriptIncrementally(null, initial, [pending]);
+    expect(first.projected.find(entry => entry.kind === 'approval')).toMatchObject({status: 'approval'});
+    const ended = [
+      ...initial,
+      runItem(4, 'run_status', {run_id: 'run-end', status: 'cancelled', error: null}),
+    ];
+    const next = projectTranscriptIncrementally(first, ended, [pending]);
+    expect(next.projected).toEqual(projectTranscript(ended, [pending]));
+    expect(activityOf(next.projected).label).toBe('Work paused');
+  });
+});

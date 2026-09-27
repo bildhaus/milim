@@ -13,6 +13,10 @@ pub struct AgentRunLimits {
 
 pub(crate) struct RunBudget {
     started: Instant,
+    /// Time excluded from the run time limit: waiting for a person to
+    /// decide tool approvals.
+    paused: Duration,
+    paused_since: Option<Instant>,
     limits: AgentRunLimits,
     cost: f64,
     cost_unknown: bool,
@@ -22,6 +26,8 @@ impl RunBudget {
     pub(crate) fn new(limits: AgentRunLimits) -> Self {
         Self {
             started: Instant::now(),
+            paused: Duration::ZERO,
+            paused_since: None,
             limits,
             cost: 0.0,
             cost_unknown: false,
@@ -33,24 +39,10 @@ impl RunBudget {
             .cost_usd
             .filter(|value| value.is_finite() && *value >= 0.0)
             .or_else(|| {
-                self.limits.pricing.as_ref().and_then(|pricing| {
-                    if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
-                        return None;
-                    }
-                    let prompt = pricing.prompt.as_deref()?.parse::<f64>().ok()?;
-                    let completion = pricing.completion.as_deref()?.parse::<f64>().ok()?;
-                    if !prompt.is_finite()
-                        || prompt < 0.0
-                        || !completion.is_finite()
-                        || completion < 0.0
-                    {
-                        return None;
-                    }
-                    Some(
-                        f64::from(usage.prompt_tokens) * prompt
-                            + f64::from(usage.completion_tokens) * completion,
-                    )
-                })
+                if usage.prompt_tokens == 0 && usage.completion_tokens == 0 {
+                    return None;
+                }
+                self.limits.pricing.as_ref()?.estimate_cost_usd(&usage)
             });
         if let Some(cost) = cost {
             self.cost += cost;
@@ -60,14 +52,34 @@ impl RunBudget {
     }
 
     pub(crate) fn reason(&self) -> Option<String> {
-        self.reason_at(self.started.elapsed())
+        self.reason_at(self.elapsed())
     }
 
     /// Time left before the run time limit, when one is set.
     pub(crate) fn remaining_time(&self) -> Option<Duration> {
         self.limits
             .max_duration
-            .map(|limit| limit.saturating_sub(self.started.elapsed()))
+            .map(|limit| limit.saturating_sub(self.elapsed()))
+    }
+
+    /// Stop the run clock until [`Self::resume_clock`].
+    pub(crate) fn pause_clock(&mut self) {
+        self.paused_since.get_or_insert_with(Instant::now);
+    }
+
+    pub(crate) fn resume_clock(&mut self) {
+        if let Some(since) = self.paused_since.take() {
+            self.paused += since.elapsed();
+        }
+    }
+
+    /// Run time counted against the limit.
+    fn elapsed(&self) -> Duration {
+        let paused = self.paused
+            + self
+                .paused_since
+                .map_or(Duration::ZERO, |since| since.elapsed());
+        self.started.elapsed().saturating_sub(paused)
     }
 
     fn reason_at(&self, elapsed: Duration) -> Option<String> {
@@ -119,6 +131,26 @@ mod tests {
     }
 
     #[test]
+    fn spend_budget_prices_cached_input_at_the_cache_rate() {
+        let mut budget = RunBudget::new(AgentRunLimits {
+            max_cost_usd: Some(1.0),
+            pricing: Some(ModelPricing {
+                prompt: Some("0.001".into()),
+                completion: Some("0.002".into()),
+                input_cache_read: Some("0.0001".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        budget.record(Usage {
+            cache_read_tokens: Some(900),
+            ..Usage::new(1_000, 10)
+        });
+        // 100 uncached + 900 cached input tokens, 10 output tokens.
+        assert!((budget.cost - (0.1 + 0.09 + 0.02)).abs() < 1e-9);
+    }
+
+    #[test]
     fn time_budget_stops_only_when_the_deadline_is_reached() {
         let budget = RunBudget::new(AgentRunLimits {
             max_duration: Some(Duration::from_secs(10)),
@@ -132,5 +164,24 @@ mod tests {
         assert!(RunBudget::new(AgentRunLimits::default())
             .reason_at(Duration::from_secs(100_000))
             .is_none());
+    }
+
+    #[test]
+    fn paused_time_does_not_count_against_the_time_limit() {
+        let mut budget = RunBudget::new(AgentRunLimits {
+            max_duration: Some(Duration::from_millis(40)),
+            ..Default::default()
+        });
+        budget.pause_clock();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            budget.reason().is_none(),
+            "the clock is stopped while paused"
+        );
+        budget.resume_clock();
+        assert!(budget.reason().is_none());
+        assert!(budget.remaining_time().unwrap() > Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(budget.reason().unwrap().contains("time limit"));
     }
 }

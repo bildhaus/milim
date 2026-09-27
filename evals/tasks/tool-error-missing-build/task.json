@@ -1,0 +1,8 @@
+{
+  "id": "tool-error-missing-build",
+  "title": "Recover from a failing first command, then fix the root cause",
+  "category": "tool-error-recovery",
+  "prompt": "Amounts converted to Japanese yen come out 100 times too large. Run the tests, find the root cause, and fix it. Do not change the tests or the rate data in data/.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

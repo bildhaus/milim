@@ -121,13 +121,8 @@ pub(super) async fn response_metrics_value(
     Ok(Value::Object(metrics))
 }
 
+/// Catalog-price estimate for a response the provider did not price, with
+/// cached prompt tokens at the provider's cache prices where published.
 pub(super) fn estimate_usage_cost_usd(pricing: &ModelPricing, usage: Usage) -> Option<f64> {
-    let prompt = pricing.prompt.as_deref()?.trim().parse::<f64>().ok()?;
-    let completion = pricing.completion.as_deref()?.trim().parse::<f64>().ok()?;
-    if !prompt.is_finite() || prompt < 0.0 || !completion.is_finite() || completion < 0.0 {
-        return None;
-    }
-    let cost =
-        f64::from(usage.prompt_tokens) * prompt + f64::from(usage.completion_tokens) * completion;
-    (cost.is_finite() && cost >= 0.0).then_some(cost)
+    pricing.estimate_cost_usd(&usage)
 }

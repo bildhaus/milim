@@ -1,0 +1,95 @@
+diff --git a/src/admin.js b/src/admin.js
+index e74d5a3..9942e87 100644
+--- a/src/admin.js
++++ b/src/admin.js
+@@ -1,10 +1,10 @@
+ import { createUser } from "./users.js";
+ 
+ export function promoteInvite(invite) {
+-  const user = createUser(invite.name, invite.email, true);
+-  return { user, permissions: user.isAdmin ? ["read", "write", "admin"] : ["read"] };
++  const user = createUser({ name: invite.name, email: invite.email, role: "admin" });
++  return { user, permissions: user.role === "admin" ? ["read", "write", "admin"] : ["read"] };
+ }
+ 
+ export function isPrivileged(user) {
+-  return user.isAdmin === true;
++  return user.role === "admin";
+ }
+diff --git a/src/seed.js b/src/seed.js
+index da83f95..1c4388a 100644
+--- a/src/seed.js
++++ b/src/seed.js
+@@ -2,8 +2,8 @@ import { createUser } from "./users.js";
+ 
+ export function seedUsers() {
+   return [
+-    createUser("Root", "ROOT@example.com", true),
+-    createUser("Guest", "guest@example.com", false),
+-    createUser(" Dana ", "Dana@Example.com"),
++    createUser({ name: "Root", email: "ROOT@example.com", role: "admin" }),
++    createUser({ name: "Guest", email: "guest@example.com" }),
++    createUser({ name: " Dana ", email: "Dana@Example.com" }),
+   ];
+ }
+diff --git a/src/signup.js b/src/signup.js
+index cfc55f8..22953a7 100644
+--- a/src/signup.js
++++ b/src/signup.js
+@@ -1,6 +1,6 @@
+ import { createUser } from "./users.js";
+ 
+ export function signup(form) {
+-  const user = createUser(form.name, form.email);
++  const user = createUser({ name: form.name, email: form.email });
+   return { user, welcome: `Welcome, ${user.name}!` };
+ }
+diff --git a/src/users.js b/src/users.js
+index 957b061..0deac2d 100644
+--- a/src/users.js
++++ b/src/users.js
+@@ -1,12 +1,20 @@
+ let nextId = 1;
++const ROLES = new Set(["admin", "member"]);
+ 
+ export function resetIds() {
+   nextId = 1;
+ }
+ 
+-export function createUser(name, email, isAdmin = false) {
+-  if (!name || !email.includes("@")) {
++export function createUser(options) {
++  if (options === null || typeof options !== "object" || Array.isArray(options)) {
++    throw new TypeError("createUser expects an options object");
++  }
++  const { name, email, role = "member" } = options;
++  if (!ROLES.has(role)) {
++    throw new RangeError(`unknown role: ${role}`);
++  }
++  if (!name || typeof email !== "string" || !email.includes("@")) {
+     throw new Error("invalid user");
+   }
+-  return { id: nextId++, name: name.trim(), email: email.toLowerCase(), isAdmin };
++  return { id: nextId++, name: name.trim(), email: email.toLowerCase(), role };
+ }
+diff --git a/test/users.test.js b/test/users.test.js
+index 04d7b6d..fe7407e 100644
+--- a/test/users.test.js
++++ b/test/users.test.js
+@@ -8,7 +8,7 @@ import { seedUsers } from "../src/seed.js";
+ beforeEach(() => resetIds());
+ 
+ test("createUser normalizes fields", () => {
+-  assert.deepEqual(createUser(" Ann ", "ANN@x.io"), { id: 1, name: "Ann", email: "ann@x.io", isAdmin: false });
++  assert.deepEqual(createUser({ name: " Ann ", email: "ANN@x.io" }), { id: 1, name: "Ann", email: "ann@x.io", role: "member" });
+ });
+ 
+ test("signup welcomes a member", () => {
+@@ -25,6 +25,6 @@ test("invites become admins", () => {
+ 
+ test("seed data", () => {
+   const users = seedUsers();
+-  assert.deepEqual(users.map((user) => user.isAdmin), [true, false, false]);
++  assert.deepEqual(users.map((user) => user.role), ["admin", "member", "member"]);
+   assert.equal(users[2].email, "dana@example.com");
+ });

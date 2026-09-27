@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use super::approvals::normalized_approval_kind;
 use super::attachments::control_account_images;
-use super::delta::{DeltaBuffer, DELTA_FLUSH_INTERVAL};
+use super::delta::{DeltaBuffer, DELTA_FLUSH_INTERVAL, WORK_LOG_LATEST_CHARS};
 use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::response_metrics_value;
@@ -21,6 +21,10 @@ use super::preview_runtime::managed_preview_runtime_context;
 use super::run_config::frozen_harness_instructions;
 use super::{now_ms, AcceptedTurnV1, RunManager, RunOutcome};
 use crate::AppState;
+
+/// How long a thread's next runtime turn waits for the previous runtime to
+/// finish exiting.
+const HARNESS_CLEANUP_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl RunManager {
     pub(super) async fn run_harness(
@@ -109,6 +113,7 @@ impl RunManager {
             privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
             thread_id: thread_id.to_string(),
             run_id: run_id.to_string(),
+            sent_step: Default::default(),
         };
         let boundary_request = json!({
             "adapter": accepted.config.adapter,
@@ -135,6 +140,9 @@ impl RunManager {
                 "visibility": "harness_boundary",
             }),
         )?;
+        if !self.wait_for_harness_cleanup(thread_id, stop).await {
+            return Ok(RunOutcome::Cancelled);
+        }
         let mut stream = crate::routes::account_harness_stream(
             state,
             &headers,
@@ -169,6 +177,20 @@ impl RunManager {
             let Some(event) = event else {
                 break;
             };
+            if event.is_terminal() {
+                // The visible turn ends here, but the native process still
+                // has cleanup to finish; dropping the stream would kill it.
+                let drain = crate::routes::drain_harness_after_terminal(
+                    &accepted.config.adapter,
+                    std::mem::replace(&mut stream, Box::pin(futures::stream::empty())),
+                );
+                let mut drains = self
+                    .harness_drains
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                drains.retain(|_, drain| !drain.is_finished());
+                drains.insert(thread_id.to_string(), drain);
+            }
             let value = serde_json::to_value(&event)
                 .map_err(|error| Error::Other(format!("serialize harness event: {error}")))?;
             if let Some(usage) = value
@@ -294,6 +316,17 @@ impl RunManager {
                         }
                     }
                 }
+                "approval_failed" => {
+                    if let Some(id) = value.get("approval_id").and_then(Value::as_str) {
+                        self.fail_pending_approval(
+                            id,
+                            value
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("approval delivery failed"),
+                        )?;
+                    }
+                }
                 _ => {}
             }
             if is_delta {
@@ -316,6 +349,7 @@ impl RunManager {
                             &[],
                             "stop",
                             committed_usage,
+                            None,
                         )
                         .await?;
                     let metrics = response_metrics_value(
@@ -362,6 +396,30 @@ impl RunManager {
             "account runtime ended without a terminal event".into(),
         ))
     }
+
+    /// Wait until the thread's previous account runtime has exited. Claude
+    /// holds its session lock until then, so resuming the session sooner
+    /// fails. A runtime that is slow to exit delays the turn only briefly;
+    /// session recovery handles one that is still holding the lock. Returns
+    /// false when the run is stopped while waiting.
+    pub(super) async fn wait_for_harness_cleanup(
+        &self,
+        thread_id: &str,
+        stop: &mut watch::Receiver<bool>,
+    ) -> bool {
+        let previous = self
+            .harness_drains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(thread_id);
+        let Some(previous) = previous else {
+            return true;
+        };
+        tokio::select! {
+            _ = tokio::time::timeout(HARNESS_CLEANUP_WAIT, previous) => true,
+            Ok(_) = stop.wait_for(|stopped| *stopped) => false,
+        }
+    }
 }
 
 pub(super) fn account_runtime_prompt(
@@ -390,10 +448,17 @@ pub(super) fn account_runtime_prompt(
         .skip(start)
         .filter_map(|message| {
             let role = message.get("role")?.as_str()?;
-            let content = message
-                .get("promptContent")
-                .or_else(|| message.get("content"))?
-                .as_str()?;
+            // An assistant turn from milim's own tool loop carries its work
+            // log, so the runtime learns what that turn already did.
+            let content = if role == "assistant" {
+                super::provider::assistant_replay_text(message, WORK_LOG_LATEST_CHARS)
+            } else {
+                message
+                    .get("promptContent")
+                    .or_else(|| message.get("content"))?
+                    .as_str()?
+                    .to_string()
+            };
             Some(format!("{}:\n{}", uppercase_role(role), content))
         })
         .collect::<Vec<_>>()

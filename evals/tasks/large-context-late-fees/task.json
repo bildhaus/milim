@@ -1,0 +1,8 @@
+{
+  "id": "large-context-late-fees",
+  "title": "Collect rules scattered through 650 KB of meeting notes",
+  "category": "large-context",
+  "prompt": "Implement `lateFee` in src/fees.js. Its rules were worked out over fourteen weekly meetings, and the notes are in docs/meetings/ (one file per week, oldest first). The rules are spread across the notes and some were changed in later weeks, so read all of them; when two decisions conflict, the most recent one wins. Only src/fees.js has to change, but you may add tests under test/.",
+  "timeout_s": 900,
+  "check": "node check.mjs"
+}

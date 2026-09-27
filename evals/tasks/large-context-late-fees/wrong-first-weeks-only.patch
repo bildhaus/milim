@@ -1,0 +1,37 @@
+diff --git a/src/fees.js b/src/fees.js
+index c67f9e2..beb2d99 100644
+--- a/src/fees.js
++++ b/src/fees.js
+@@ -1,7 +1,20 @@
++const DAY_MS = 86_400_000;
++const GRACE_DAYS = 7;
++// 1.5% expressed per mille, so the fee stays in integer arithmetic.
++const RATE_PER_MILLE = 20;
++const CAP_CENTS = 4_000;
++const ENTERPRISE_FLAT_CENTS = 2_500;
++
++const dayNumber = (isoDate) => Date.parse(`${isoDate}T00:00:00Z`) / DAY_MS;
++
+ /**
+  * Late fee, in cents, for an invoice that is still unpaid on `asOf`.
+  *
+  * The rules were agreed in the weekly product syncs; see docs/meetings/.
++ * Final rules: no fee until the invoice is more than 10 days past due
++ * (2024-03-18); nonprofits are exempt (2024-03-11); enterprise pays a flat
++ * $25.00 (2024-04-01); everyone else pays 1.5% of the amount (2024-02-19),
++ * at most $40.00 (2024-02-26), rounded half up to the cent (2024-04-08).
+  *
+  * @param {{ amountCents: number, dueDate: string, customerType: "standard" | "nonprofit" | "enterprise" }} invoice
+  *   `amountCents` is a non-negative integer and `dueDate` is YYYY-MM-DD.
+@@ -9,5 +22,10 @@
+  * @returns {number} The fee in cents.
+  */
+ export function lateFee(invoice, asOf) {
+-  throw new Error("not implemented");
++  if (invoice.customerType === "nonprofit") return 0;
++  const daysLate = dayNumber(asOf) - dayNumber(invoice.dueDate);
++  if (!(daysLate > GRACE_DAYS)) return 0;
++  if (invoice.customerType === "enterprise") return ENTERPRISE_FLAT_CENTS;
++  const fee = Math.floor((invoice.amountCents * RATE_PER_MILLE + 500) / 1_000);
++  return Math.min(fee, CAP_CENTS);
+ }

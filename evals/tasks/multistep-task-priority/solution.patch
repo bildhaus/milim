@@ -1,0 +1,142 @@
+diff --git a/README.md b/README.md
+index 8d07f29..703042d 100644
+--- a/README.md
++++ b/README.md
+@@ -5,11 +5,16 @@ A tiny in-memory todo list used from the command line.
+ ## Usage
+ 
+ ```
+-todo add <text>          Add a task
++todo add <text> [--priority=low|normal|high]
++                         Add a task (priority defaults to normal)
+ todo done <id>           Mark a task done
+-todo list [--all]        List open tasks (or all tasks)
++todo list [--all] [--sort=priority]
++                         List open tasks (or all tasks), optionally high
++                         priority first
+ ```
+ 
++Listed tasks show their priority: `[!]` high, `[ ]` normal, `[-]` low.
++
+ ## Development
+ 
+ Run `npm test`.
+diff --git a/src/cli.js b/src/cli.js
+index 4eb30a3..81b030d 100644
+--- a/src/cli.js
++++ b/src/cli.js
+@@ -1,23 +1,39 @@
+ #!/usr/bin/env node
+ import { addTask, completeTask, createStore } from "./store.js";
+-import { openTasks } from "./query.js";
++import { openTasks, sortByPriority } from "./query.js";
++
++const MARKERS = { high: "[!]", normal: "[ ]", low: "[-]" };
+ 
+ function format(task) {
+-  return `${task.id}. ${task.done ? "(done) " : ""}${task.text}`;
++  return `${task.id}. ${MARKERS[task.priority ?? "normal"]} ${task.done ? "(done) " : ""}${task.text}`;
++}
++
++/** Split `--name=value` flags from the other arguments. */
++function parseArgs(args) {
++  const flags = {};
++  const rest = [];
++  for (const arg of args) {
++    const match = /^--([\w-]+)(?:=(.*))?$/.exec(arg);
++    if (match) flags[match[1]] = match[2] ?? true;
++    else rest.push(arg);
++  }
++  return { flags, rest };
+ }
+ 
+ /** Run one command against `store` and return the output lines. */
+ export function run(store, argv) {
+   const [command, ...args] = argv;
++  const { flags, rest } = parseArgs(args);
+   switch (command) {
+     case "add": {
+-      const task = addTask(store, args.join(" "));
++      const task = addTask(store, rest.join(" "), flags.priority === undefined ? {} : { priority: flags.priority });
+       return [`Added ${format(task)}`];
+     }
+     case "done":
+-      return [`Completed ${format(completeTask(store, Number(args[0])))}`];
++      return [`Completed ${format(completeTask(store, Number(rest[0])))}`];
+     case "list": {
+-      const tasks = args.includes("--all") ? store.tasks : openTasks(store.tasks);
++      let tasks = flags.all ? store.tasks : openTasks(store.tasks);
++      if (flags.sort === "priority") tasks = sortByPriority(tasks);
+       return tasks.map(format);
+     }
+     default:
+diff --git a/src/query.js b/src/query.js
+index 4740ea0..bd09290 100644
+--- a/src/query.js
++++ b/src/query.js
+@@ -1,3 +1,10 @@
++const RANK = { high: 0, normal: 1, low: 2 };
++
+ export function openTasks(tasks) {
+   return tasks.filter((task) => !task.done);
+ }
++
++/** A new array ordered high, normal, low; ties keep their input order. */
++export function sortByPriority(tasks) {
++  return [...tasks].sort((a, b) => RANK[a.priority ?? "normal"] - RANK[b.priority ?? "normal"]);
++}
+diff --git a/src/store.js b/src/store.js
+index 8ee4d00..d1ac217 100644
+--- a/src/store.js
++++ b/src/store.js
+@@ -1,12 +1,18 @@
++export const PRIORITIES = ["low", "normal", "high"];
++
+ export function createStore() {
+   return { nextId: 1, tasks: [] };
+ }
+ 
+-export function addTask(store, text) {
++export function addTask(store, text, options = {}) {
+   if (typeof text !== "string" || text.trim() === "") {
+     throw new TypeError("task text is required");
+   }
+-  const task = { id: store.nextId++, text: text.trim(), done: false };
++  const priority = options.priority ?? "normal";
++  if (!PRIORITIES.includes(priority)) {
++    throw new RangeError(`priority must be low, normal, or high, got ${priority}`);
++  }
++  const task = { id: store.nextId++, text: text.trim(), done: false, priority };
+   store.tasks.push(task);
+   return task;
+ }
+diff --git a/test/priority.test.js b/test/priority.test.js
+new file mode 100644
+index 0000000..cea0c73
+--- /dev/null
++++ b/test/priority.test.js
+@@ -0,0 +1,24 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { addTask, createStore } from "../src/store.js";
++import { sortByPriority } from "../src/query.js";
++import { run } from "../src/cli.js";
++
++test("priority defaults to normal and is validated", () => {
++  const store = createStore();
++  assert.equal(addTask(store, "a").priority, "normal");
++  assert.throws(() => addTask(store, "b", { priority: "urgent" }), RangeError);
++});
++
++test("sortByPriority is stable and pure", () => {
++  const tasks = [{ id: 1, priority: "low" }, { id: 2, priority: "high" }, { id: 3, priority: "high" }];
++  assert.deepEqual(sortByPriority(tasks).map((task) => task.id), [2, 3, 1]);
++  assert.deepEqual(tasks.map((task) => task.id), [1, 2, 3]);
++});
++
++test("cli priority flags", () => {
++  const store = createStore();
++  run(store, ["add", "--priority=low", "Dust"]);
++  run(store, ["add", "Pay", "--priority=high"]);
++  assert.deepEqual(run(store, ["list", "--sort=priority"]), ["2. [!] Pay", "1. [-] Dust"]);
++});

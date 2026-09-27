@@ -1,0 +1,69 @@
+diff --git a/config/clients.js b/config/clients.js
+index a7b519e..f2c14be 100644
+--- a/config/clients.js
++++ b/config/clients.js
+@@ -5,54 +5,54 @@ export const CLIENTS = {
+     auth: {
+       baseUrl: "https://auth.staging.internal",
+       timeoutMs: 2000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     payments: {
+       baseUrl: "https://payments.staging.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     paymentWebhooks: {
+       baseUrl: "https://payment-webhooks.staging.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     search: {
+       baseUrl: "https://search.staging.internal",
+       timeoutMs: 1500,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     notifications: {
+       baseUrl: "https://notifications.staging.internal",
+       timeoutMs: 3000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+   },
+   production: {
+     auth: {
+       baseUrl: "https://auth.internal",
+       timeoutMs: 2000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     payments: {
+       baseUrl: "https://payments.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     paymentWebhooks: {
+       baseUrl: "https://payment-webhooks.internal",
+       timeoutMs: 5000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     search: {
+       baseUrl: "https://search.internal",
+       timeoutMs: 1500,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+     notifications: {
+       baseUrl: "https://notifications.internal",
+       timeoutMs: 3000,
+-      retry: { attempts: 3, backoffMs: 250 },
++      retry: { attempts: 5, backoffMs: 250 },
+     },
+   },
+ };

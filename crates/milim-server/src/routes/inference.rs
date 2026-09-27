@@ -414,6 +414,7 @@ fn response_input_item(item: Value) -> Result<ChatMessage, Error> {
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
             reasoning_content: None,
+            provider_state: None,
         }),
         "function_call" => Ok(ChatMessage {
             role: "assistant".to_string(),
@@ -440,6 +441,7 @@ fn response_input_item(item: Value) -> Result<ChatMessage, Error> {
             }]),
             tool_call_id: None,
             reasoning_content: None,
+            provider_state: None,
         }),
         _ => {
             let role = item
@@ -459,6 +461,7 @@ fn response_input_item(item: Value) -> Result<ChatMessage, Error> {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
+                provider_state: None,
             })
         }
     }

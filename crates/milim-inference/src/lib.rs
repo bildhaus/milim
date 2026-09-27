@@ -5,7 +5,8 @@
 //! into. Ships runtime backends plus an opt-in deterministic test backend:
 //!   - `test_backend::TestBackend` - deterministic, no native deps (feature
 //!     `test-backend`, for tests).
-//!   - [`remote::RemoteBackend`] - OpenAI-compatible upstream passthrough.
+//!   - [`remote::RemoteBackend`] - OpenAI-compatible upstream passthrough
+//!     (OpenAI's reasoning models go through the Responses API).
 //!   - [`unavailable::UnavailableBackend`] - explicit runtime fallback when no
 //!     real model service is configured.
 //!
@@ -15,8 +16,10 @@ pub mod anthropic;
 pub mod gemini;
 mod http_error;
 mod image_input;
+mod openai_responses;
 pub mod remote;
 pub mod service;
+mod stall;
 #[cfg(any(test, feature = "test-backend"))]
 pub mod test_backend;
 pub mod unavailable;

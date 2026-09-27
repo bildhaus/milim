@@ -39,6 +39,29 @@ jobs:
         if: matrix.os != 'ubuntu-latest'
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
 
+  # Agent-eval graders without a model (evals/README.md): every task's check
+  # must fail on its untouched fixture and pass with the reference solution.
+  evals:
+    name: Eval graders
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          # Node-only job: the root packageManager field would otherwise
+          # make setup-node look for pnpm to cache its store.
+          package-manager-cache: false
+      - name: Syntax
+        run: for file in evals/*.mjs evals/lib/*.mjs evals/fixtures-gen/*.mjs; do node --check "$file"; done
+      - name: Fixtures match their generators
+        run: node evals/fixtures-gen/generate.mjs --check
+      - name: Validate graders against reference solutions
+        run: node evals/validate.mjs --strict
+      - name: Task list loads
+        run: node evals/run.mjs --dry-run
+
   msrv:
     name: Rust MSRV
     runs-on: ubuntu-latest

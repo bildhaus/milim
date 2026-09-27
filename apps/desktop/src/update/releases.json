@@ -1,4 +1,9 @@
 {
+  "0.2.74": {
+    "version": "0.2.74",
+    "summary": "milim 0.2.74 makes provider agents remember their own work between turns, recover from overflowing context and interrupted streams, keep long conversations prompt-cached, and run host tools and approvals without stalling other chats.",
+    "items": []
+  },
   "0.2.73": {
     "version": "0.2.73",
     "summary": "milim 0.2.73 gives provider models a stronger coding harness with file search, safer edits, and background commands, fixes Gemini 3 tool use, checkpoints every turn from any client, and adds remote MCP servers, hooks, and custom slash commands.",

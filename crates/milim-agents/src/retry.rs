@@ -7,6 +7,9 @@ use milim_core::provider_error::{classify_provider_error, ProviderErrorKind};
 
 /// Retries after the first attempt of one model step.
 pub(crate) const MAX_PROVIDER_RETRIES: u32 = 4;
+/// Error for a provider stream that ended without its completion event
+/// (adapters raise the same text when their terminal marker is missing).
+pub(crate) const STREAM_ENDED_EARLY: &str = "provider stream ended before a completion event";
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
@@ -19,8 +22,9 @@ pub(crate) struct Retryable {
 }
 
 /// Classify a provider error. Only throttling, overload, server errors,
-/// request timeouts/conflicts, and connection failures are retryable; every
-/// other 4xx (auth, quota, context length, bad request) is final.
+/// request timeouts/conflicts, connection failures, and streams cut off
+/// before their completion event are retryable; every other 4xx (auth,
+/// quota, context length, bad request) is final.
 pub(crate) fn retryable(message: &str) -> Option<Retryable> {
     let info = classify_provider_error(message);
     let retry_after = info
@@ -70,6 +74,12 @@ pub(crate) fn retryable(message: &str) -> Option<Retryable> {
         Some(_) => None,
         None => {
             let text = message.to_ascii_lowercase();
+            if text.contains("stream ended before") {
+                return Some(Retryable {
+                    reason: "incomplete stream".into(),
+                    retry_after: None,
+                });
+            }
             [
                 "connection closed",
                 "connection aborted",
@@ -87,6 +97,22 @@ pub(crate) fn retryable(message: &str) -> Option<Retryable> {
             })
         }
     }
+}
+
+/// Whether the provider rejected the request because the prompt does not
+/// fit the model's context window.
+pub(crate) fn context_overflow(message: &str) -> bool {
+    classify_provider_error(message).kind == ProviderErrorKind::ContextLength
+}
+
+/// Whether a raw finish reason says generation stopped because the context
+/// window filled up. Adapters that normalize it to `length` are handled as
+/// an ordinary output cut-off instead.
+pub(crate) fn context_overflow_finish(reason: &str) -> bool {
+    matches!(
+        reason.to_ascii_lowercase().as_str(),
+        "model_context_window_exceeded" | "context_window_exceeded" | "context_length_exceeded"
+    )
 }
 
 /// Wait before retry `attempt` (1-based): exponential backoff from `base`
@@ -145,6 +171,29 @@ mod tests {
         assert!(retryable("x chat/completions -> 409 Conflict: ").is_some());
         assert!(retryable("upstream error: error sending request for url (https://x)").is_some());
         assert!(retryable("error decoding response body: connection closed").is_some());
+        assert_eq!(
+            retryable(STREAM_ENDED_EARLY).unwrap().reason,
+            "incomplete stream"
+        );
+        assert!(retryable(
+            "upstream error: anthropic messages stream ended before a completion event"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn recognizes_context_overflow() {
+        assert!(context_overflow(
+            "prompt is too long: 210000 tokens > 200000 maximum"
+        ));
+        assert!(context_overflow(
+            "x chat/completions -> 400 Bad Request: context_length_exceeded"
+        ));
+        assert!(!context_overflow(
+            "x chat/completions -> 400 Bad Request: invalid schema"
+        ));
+        assert!(context_overflow_finish("model_context_window_exceeded"));
+        assert!(!context_overflow_finish("length"));
     }
 
     #[test]

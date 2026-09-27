@@ -11,6 +11,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { catalogFiles, formattersFiles } from "./large-files.mjs";
 import { mediumServiceFiles } from "./medium-service.mjs";
+import { meetingNotesFiles } from "./meeting-notes.mjs";
 
 const TASKS = join(dirname(fileURLToPath(import.meta.url)), "..", "tasks");
 
@@ -19,6 +20,7 @@ const GENERATED = {
   "grep-cache-config": () => mediumServiceFiles("cache"),
   "large-file-catalog-edit": catalogFiles,
   "large-file-function-fix": formattersFiles,
+  "large-context-late-fees": meetingNotesFiles,
 };
 
 function listFiles(root) {

@@ -1,0 +1,25 @@
+diff --git a/src/duration.js b/src/duration.js
+index 570d8ef..8f1c39b 100644
+--- a/src/duration.js
++++ b/src/duration.js
+@@ -15,11 +15,17 @@ export function parseDuration(text) {
+   if (typeof text !== "string" || text.trim() === "") {
+     throw new TypeError("duration must be a non-empty string");
+   }
+-  const match = /^\s*(\d+)(ms|s|m|h|d)\s*$/.exec(text);
+-  if (!match) {
++  const trimmed = text.trim();
++  // One or more <digits><unit> parts, optionally separated by whitespace.
++  // `ms` is listed before `m` and `s` so "10m5ms" is not read as "10m5m" + "s".
++  if (!/^(\d+(ms|s|m|h|d)\s*)+$/.test(trimmed)) {
+     throw new TypeError(`invalid duration: ${text}`);
+   }
+-  return Number(match[1]) * UNIT_MS[match[2]];
++  let total = 0;
++  for (const [, count, unit] of trimmed.matchAll(/(\d+)(ms|s|m|h|d)/g)) {
++    total += Number(count) * UNIT_MS[unit];
++  }
++  return total;
+ }
+ 
+ /** Format milliseconds as the shortest compound duration, e.g. "1h30m". */

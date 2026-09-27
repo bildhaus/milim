@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use milim_core::{Error, Result};
 use milim_tools::{
-    atomic_write, read_text_range, resolve_workspace_path, Tool, ToolConcurrency, ToolEffect,
+    atomic_write, read_file_result, resolve_workspace_path, Tool, ToolConcurrency, ToolEffect,
 };
 
 use diagnostics::DiagnosticsTool;
@@ -72,7 +72,7 @@ impl FileStamp {
 enum Freshness {
     /// Unchanged since this run last read or wrote it.
     Current,
-    /// Never read in this run; the edit proceeds with a note.
+    /// Never read or written in this run.
     Unread,
 }
 
@@ -116,6 +116,23 @@ impl RunState {
             .unwrap_or_default()
     }
 
+    /// Refuse changes to an existing file this run has not read, or that
+    /// changed on disk after this run read it. `shown` names the file in
+    /// the error, which tells the model what to do instead.
+    fn require_read(&self, path: &Path, shown: &str, tool: &str) -> Result<()> {
+        match self.freshness(path)? {
+            Freshness::Current => Ok(()),
+            Freshness::Unread => Err(Error::InvalidRequest(format!(
+                "{shown} has not been read in this run. Call read_file on it first, then retry {tool}{}.",
+                if tool == "write_file" {
+                    " (or change part of it with edit_file after reading)"
+                } else {
+                    ""
+                }
+            ))),
+        }
+    }
+
     /// Refuse edits to files that changed on disk after this run read them.
     fn freshness(&self, path: &Path) -> Result<Freshness> {
         let recorded = self
@@ -132,6 +149,31 @@ impl RunState {
             ))),
         }
     }
+}
+
+/// Hold the process-wide lock for one file while a tool reads, checks, and
+/// rewrites it, so edits from different runs cannot interleave between the
+/// freshness check and the write. Other files and other tools never wait.
+async fn lock_file(path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+    type Locks = Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>;
+    static LOCKS: OnceLock<Locks> = OnceLock::new();
+    let key = RunState::key(path);
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Locks::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(&key).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
 }
 
 thread_local! {
@@ -319,6 +361,20 @@ impl PathDisplay {
     }
 }
 
+/// Schema description of a `path` argument for this binding.
+fn path_description(ctx: &HostCtx) -> &'static str {
+    if ctx.full_access() {
+        "Absolute path, or a path relative to the working folder."
+    } else {
+        milim_tools::PATH_DESCRIPTION
+    }
+}
+
+/// A `path` schema property for this binding.
+fn path_schema(ctx: &HostCtx) -> Value {
+    json!({"type":"string","description":path_description(ctx)})
+}
+
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -402,13 +458,15 @@ impl Tool for ReadFileTool {
     }
     fn description(&self) -> &str {
         if self.ctx.full_access() {
-            "Read a UTF-8 text file from anywhere on the host. Relative paths use the working folder. Returns numbered lines; offset/limit select a line range (default: the first 2000 lines)."
+            "Read a file from anywhere on the host (relative paths use the working folder). Returns numbered lines, up to 1000 lines or about 40 KB per call; page through larger files with offset/limit. PNG, JPEG, GIF, and WebP files are returned as images. Read a file before editing or overwriting it."
         } else {
-            "Read a UTF-8 text file from the working folder (path is relative to it). Returns numbered lines; offset/limit select a line range (default: the first 2000 lines)."
+            "Read a file from the working folder. Returns numbered lines, up to 1000 lines or about 40 KB per call; page through larger files with offset/limit. PNG, JPEG, GIF, and WebP files are returned as images. Read a file before editing or overwriting it."
         }
     }
     fn input_schema(&self) -> Value {
-        milim_tools::ReadFileTool::schema()
+        let mut schema = milim_tools::ReadFileTool::schema();
+        schema["properties"]["path"] = path_schema(&self.ctx);
+        schema
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
@@ -423,7 +481,7 @@ impl Tool for ReadFileTool {
     async fn invoke(&self, args: Value) -> Result<Value> {
         let path = read_path(&self.ctx.ws, arg_str(&args, "path")?)?;
         let (offset, limit) = milim_tools::ReadFileTool::line_window(&args)?;
-        let result = read_text_range(&path, offset, limit)?;
+        let result = read_file_result(&path, offset, limit)?;
         self.ctx.run.record(&path);
         Ok(result)
     }
@@ -624,7 +682,7 @@ impl Tool for ReadFileAnchorsTool {
         }
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+        json!({"type":"object","properties":{"path":path_schema(&self.ctx)},"required":["path"]})
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
@@ -667,7 +725,7 @@ impl Tool for ListDirTool {
         }
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"}}})
+        json!({"type":"object","properties":{"path":path_schema(&self.ctx)}})
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
@@ -696,13 +754,15 @@ impl Tool for WriteFileTool {
     }
     fn description(&self) -> &str {
         if self.ctx.full_access() {
-            "Create or overwrite a UTF-8 text file anywhere on the host. Relative paths use the working folder."
+            "Create a new UTF-8 text file anywhere on the host (relative paths use the working folder), or replace an existing file's entire content. Prefer edit_file for changes to an existing file; overwriting one requires reading it with read_file first in this run. Parent directories are created."
         } else {
-            "Create or overwrite a UTF-8 text file in the working folder."
+            "Create a new UTF-8 text file in the working folder, or replace an existing file's entire content. Prefer edit_file for changes to an existing file; overwriting one requires reading it with read_file first in this run. Parent directories are created."
         }
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})
+        let mut schema = milim_tools::WriteFileTool::schema();
+        schema["properties"]["path"] = path_schema(&self.ctx);
+        schema
     }
     fn effect(&self) -> ToolEffect {
         ToolEffect::Mutating
@@ -715,6 +775,13 @@ impl Tool for WriteFileTool {
         let rel = arg_str(&args, "path")?;
         let path = safe_join(&self.ctx.ws, rel)?;
         let content = arg_str(&args, "content")?;
+        let _lock = lock_file(&path).await;
+        if path.is_dir() {
+            return Err(Error::InvalidRequest(format!("{rel} is a directory")));
+        }
+        if path.exists() {
+            self.ctx.run.require_read(&path, rel, "write_file")?;
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -746,7 +813,7 @@ impl Tool for PatchFileTool {
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
-            "path":{"type":"string"},
+            "path":path_schema(&self.ctx),
             "ops":{"type":"array","items":{"type":"object","properties":{
                 "op":{"type":"string","enum":["replace_range","insert_before","insert_after","delete_range"]},
                 "anchor":{"type":"string","description":"LINE#HASH anchor for insert ops"},
@@ -770,6 +837,7 @@ impl Tool for PatchFileTool {
             return Err(Error::InvalidRequest("ops must not be empty".into()));
         }
 
+        let _lock = lock_file(&path).await;
         let content = std::fs::read_to_string(&path)?;
         if has_mixed_newlines(&content) {
             return Err(Error::InvalidRequest(
@@ -919,6 +987,7 @@ mod tests {
         };
         let tools = tools_for(ctx);
         let edit = tool(&tools, "edit_file");
+        block_on(tool(&tools, "read_file").invoke(json!({"path": "lib.rs"}))).unwrap();
         let edited =
             block_on(edit.invoke(json!({"path": "lib.rs", "old": "main", "new": "start"})))
                 .unwrap();
@@ -1212,7 +1281,17 @@ mod tests {
 
         let read = block_on(registry.call("read_file", json!({"path": saved}))).unwrap();
         assert_eq!(read["content"], "saved output");
+        let found = block_on(registry.call(
+            "grep",
+            json!({"pattern":"saved", "path": saved, "output_mode":"content"}),
+        ))
+        .unwrap();
+        assert!(found["output"]
+            .as_str()
+            .unwrap()
+            .ends_with(":1:saved output"));
         assert!(block_on(registry.call("read_file", json!({"path": outside}))).is_err());
+        assert!(block_on(registry.call("grep", json!({"pattern":"x","path": outside}))).is_err());
         assert!(
             block_on(registry.call("write_file", json!({"path": saved, "content": "no"}))).is_err()
         );
@@ -1300,11 +1379,18 @@ mod tests {
             "edit_file",
             json!({"path":"notes.txt","old":"alpha","new":"ALPHA"}),
         ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            unread,
+            "invalid request: notes.txt has not been read in this run. Call read_file on it first, then retry edit_file."
+        );
+        block_on(other_run.call("read_file", json!({"path":"notes.txt"}))).unwrap();
+        block_on(other_run.call(
+            "edit_file",
+            json!({"path":"notes.txt","old":"alpha","new":"ALPHA"}),
+        ))
         .unwrap();
-        assert!(unread["notes"][0]
-            .as_str()
-            .unwrap()
-            .contains("not read earlier in this run"));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "ALPHA\nBETA\nGAMMA\n"
@@ -1318,6 +1404,7 @@ mod tests {
         let path = root.join("main.py");
         std::fs::write(&path, "def run():\r\n    value = 1\r\n    return value\r\n").unwrap();
         let registry = run_registry(&root);
+        block_on(registry.call("read_file", json!({"path":"main.py"}))).unwrap();
 
         let text = model_text(
             &registry,
@@ -1339,6 +1426,141 @@ mod tests {
             error.contains("most similar region is lines 2-3"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_file_overwrites_only_files_read_or_written_in_the_run() {
+        let root = temp_workspace();
+        std::fs::write(root.join("existing.txt"), "keep me\n").unwrap();
+        let registry = run_registry(&root);
+        let error = block_on(registry.call(
+            "write_file",
+            json!({"path":"existing.txt","content":"replaced\n"}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error
+                .contains("existing.txt has not been read in this run. Call read_file on it first"),
+            "{error}"
+        );
+        assert!(error.contains("edit_file"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing.txt")).unwrap(),
+            "keep me\n"
+        );
+        block_on(registry.call("read_file", json!({"path":"existing.txt"}))).unwrap();
+        block_on(registry.call(
+            "write_file",
+            json!({"path":"existing.txt","content":"replaced\n"}),
+        ))
+        .unwrap();
+        std::fs::write(root.join("existing.txt"), "changed elsewhere\n").unwrap();
+        let stale = block_on(registry.call(
+            "write_file",
+            json!({"path":"existing.txt","content":"again\n"}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(stale.contains("changed on disk"), "{stale}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_file_applies_several_edits_atomically() {
+        let root = temp_workspace();
+        std::fs::write(root.join("app.py"), "a = 1\nb = 2\nc = 3\n").unwrap();
+        let registry = run_registry(&root);
+        block_on(registry.call("read_file", json!({"path":"app.py"}))).unwrap();
+        let error = block_on(registry.call(
+            "edit_file",
+            json!({"path":"app.py","edits":[
+                {"old":"a = 1","new":"a = 10"},
+                {"old":"missing","new":"x"}
+            ]}),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("edit 2 of 2"), "{error}");
+        assert!(error.contains("No edit was applied"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.py")).unwrap(),
+            "a = 1\nb = 2\nc = 3\n"
+        );
+        let text = model_text(
+            &registry,
+            "edit_file",
+            json!({"path":"app.py","edits":[
+                {"old":"a = 1","new":"a = 10"},
+                {"old":"a = 10\nb = 2","new":"a = 10\nb = 20"}
+            ]}),
+        );
+        assert!(
+            text.starts_with("Edited app.py: 2 edits, 2 replacements."),
+            "{text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("app.py")).unwrap(),
+            "a = 10\nb = 20\nc = 3\n"
+        );
+        assert!(block_on(registry.call(
+            "edit_file",
+            json!({"path":"app.py","old":"c","new":"d","edits":[{"old":"c","new":"d"}]}),
+        ))
+        .is_err());
+        assert!(block_on(
+            registry.call("edit_file", json!({"path":"new.py","old":"c","new":"d"}),)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("use write_file"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_tools_accept_absolute_paths_inside_the_workspace() {
+        let root = temp_workspace();
+        std::fs::write(root.join("notes.txt"), "one\n").unwrap();
+        let registry = run_registry(&root);
+        let absolute = root.join("notes.txt");
+        block_on(registry.call("read_file", json!({"path": absolute}))).unwrap();
+        block_on(registry.call(
+            "edit_file",
+            json!({"path": absolute, "old":"one","new":"two"}),
+        ))
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "two\n");
+        let found = block_on(registry.call("grep", json!({"pattern":"two","path": root}))).unwrap();
+        assert_eq!(found["files"], json!(["notes.txt"]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_locks_serialize_one_path_only() {
+        let root = temp_workspace();
+        block_on(async {
+            let held = lock_file(&root.join("a.txt")).await;
+            let other = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                lock_file(&root.join("b.txt")),
+            )
+            .await;
+            assert!(other.is_ok(), "another file waited");
+            let same = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                lock_file(&root.join("a.txt")),
+            )
+            .await;
+            assert!(same.is_err(), "the same file did not wait");
+            drop(held);
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                lock_file(&root.join("a.txt")),
+            )
+            .await
+            .is_ok());
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1492,6 +1714,27 @@ mod tests {
         );
         assert!(
             block_on(registry.call("shell", json!({"command":"true","timeout_secs":601}))).is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_shell_output_keeps_its_tail_and_the_working_directory() {
+        let root = temp_workspace();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let registry = run_registry(&root);
+        let text = model_text(
+            &registry,
+            "shell",
+            json!({"command": "cd sub && seq 1 200000 && echo 'error: final' >&2"}),
+        );
+        assert!(text.starts_with("exit code: 0\n1\n2\n"), "{}", &text[..40]);
+        assert!(text.contains("bytes of output omitted"));
+        assert!(
+            text.ends_with("\n200000\n[stderr]\nerror: final\n[cwd: sub]"),
+            "{}",
+            &text[text.len() - 80..]
         );
         let _ = std::fs::remove_dir_all(root);
     }

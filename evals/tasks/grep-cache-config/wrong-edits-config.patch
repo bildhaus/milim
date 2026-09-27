@@ -1,0 +1,11 @@
+diff --git a/src/lib/config.js b/src/lib/config.js
+index 086ff99..966c7cc 100644
+--- a/src/lib/config.js
++++ b/src/lib/config.js
+@@ -4,5 +4,6 @@ export const config = {
+   port: Number(env.PORT ?? 8080),
+   defaultQuota: Number(env.DEFAULT_QUOTA ?? 1000),
+   cacheTtlSeconds: Number(env.CACHE_TTL_SECONDS ?? 60),
++  cacheTTL: Number(env.CACHE_TTL_SECONDS ?? 60),
+   logLevel: env.LOG_LEVEL ?? "info",
+ };

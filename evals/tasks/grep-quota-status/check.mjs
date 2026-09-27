@@ -1,6 +1,11 @@
-import { attempt, expectEqual, expectOnlyChanged, finish, load, runNodeTests } from "../../lib/check.mjs";
+import { attempt, changedLineCounts, expect, expectEqual, expectOnlyChanged, finish, load, runNodeTests } from "../../lib/check.mjs";
 
-expectOnlyChanged((path) => path === "src/handlers/usage.js" || path.startsWith("test/"));
+// The fix may live wherever it reads best (usually src/handlers/usage.js,
+// possibly a shared helper in src/lib/), but it must stay small.
+expectOnlyChanged((path) => path.startsWith("src/") || path.startsWith("test/"));
+const sourceChanges = Object.entries(changedLineCounts()).filter(([path]) => path.startsWith("src/"));
+const changedLines = sourceChanges.reduce((sum, [, count]) => sum + count, 0);
+expect(sourceChanges.length <= 3 && changedLines <= 40, `change is not minimal: ${changedLines} line(s) in ${sourceChanges.length} source file(s)`);
 runNodeTests("test");
 
 await attempt("quota response", async () => {
@@ -14,6 +19,7 @@ await attempt("quota response", async () => {
   expectEqual(over.body?.error?.code, "QUOTA_EXCEEDED", "over quota code");
   expectEqual(over.body?.error?.message, "usage quota exceeded", "over quota message");
   expectEqual(over.body?.error?.details, { limit: 5, used: 6 }, "over quota details");
+  expectEqual(handle({ method: "GET", path: "/users/missing" }).status, 404, "other errors unchanged");
 });
 
 finish();

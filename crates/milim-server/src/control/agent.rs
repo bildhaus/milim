@@ -9,15 +9,18 @@ use milim_storage::ControlApprovalRecord;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use super::delta::{DeltaBuffer, DELTA_FLUSH_INTERVAL};
+use super::delta::{
+    failed_run_marker, AssistantReplay, DeltaBuffer, WorkLog, DELTA_FLUSH_INTERVAL,
+    RUN_LIMIT_MARKER, STOPPED_BY_USER_MARKER,
+};
 use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::{provider_context_window, provider_pricing, response_metrics_value};
 use super::preview_runtime::managed_preview_runtime_context;
 use super::provider::control_chat_messages;
 use super::run_config::{
-    compose_labeled_instructions, frozen_run_instructions, parse_reasoning_effort,
-    sampling_from_generation,
+    compose_labeled_instructions, frozen_instruction_layers, frozen_run_instructions,
+    parse_reasoning_effort, sampling_from_generation,
 };
 use super::{now_ms, AcceptedTurnV1, RunManager, RunOutcome};
 use crate::AppState;
@@ -64,30 +67,33 @@ impl RunManager {
                 enabled_skills: accepted.config.enabled_skills.clone(),
                 avatar: "sparkles".into(),
             });
-        let mut messages = control_chat_messages(&self.store, thread_id)?;
-        if let Some(context) = managed_preview_runtime_context(&accepted.preview_runtime) {
-            messages.insert(0, ChatMessage::text("system", context));
-        }
-        if let Some(context) = linked_run_context(&accepted.config, &accepted.mailbox_context) {
-            messages.insert(0, ChatMessage::text("system", context));
-        }
+        let messages = control_chat_messages(&self.store, thread_id)?;
+        let turn_context = [
+            linked_run_context(&accepted.config, &accepted.mailbox_context),
+            managed_preview_runtime_context(&accepted.preview_runtime),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|context| ChatMessage::text("system", context))
+        .collect();
         let reasoning_effort = accepted
             .config
             .reasoning_effort
             .as_deref()
             .and_then(parse_reasoning_effort);
-        let journal = Arc::new(RunJournal {
-            store: self.store.clone(),
-            privacy: state.privacy.clone(),
-            privacy_mode: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
-            thread_id: thread_id.to_string(),
-            run_id: run_id.to_string(),
-        });
-        let mut stream = crate::routes::control_agent_stream(
+        let journal = Arc::new(RunJournal::new(
+            self.store.clone(),
+            state.privacy.clone(),
+            crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            thread_id,
+            run_id,
+        ));
+        let (mut stream, sent_turn_context) = crate::routes::control_agent_stream(
             state,
             &agent,
             &accepted.config.model,
             messages,
+            turn_context,
             accepted.config.workspace.as_deref(),
             &accepted.config.privacy,
             &accepted.config.approval_mode,
@@ -100,6 +106,7 @@ impl RunManager {
             thread_id,
             run_id,
             accepted.config.linked_thread_grants.clone(),
+            frozen_instruction_layers(&accepted.config),
             reasoning_effort,
             sampling_from_generation(&accepted.config.generation, thread_id),
             accepted.config.run_limits.as_ref(),
@@ -107,12 +114,26 @@ impl RunManager {
             provider_context_window(state, &accepted.config.model).await,
             journal.clone(),
         )?;
+        if let Some(turn_context) = sent_turn_context {
+            self.turn_contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(run_id.to_string(), turn_context);
+        }
         let mut deltas = DeltaBuffer::new(self, thread_id, run_id);
+        let mut work_log = WorkLog::default();
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
                         deltas.flush()?;
+                        self.persist_interrupted_output(
+                            thread_id,
+                            run_id,
+                            deltas,
+                            &work_log,
+                            STOPPED_BY_USER_MARKER.into(),
+                        )?;
                         return Ok(RunOutcome::Cancelled);
                     }
                     None
@@ -150,10 +171,39 @@ impl RunManager {
                     deltas.flush_if_due()?;
                     continue;
                 }
+                milim_agents::AgentEvent::Notice { text } => {
+                    deltas.push_notice(text);
+                    deltas.flush_if_due()?;
+                    continue;
+                }
                 milim_agents::AgentEvent::Reasoning { text } => {
                     deltas.push_reasoning(text);
                     deltas.flush_if_due()?;
                     continue;
+                }
+                milim_agents::AgentEvent::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    deltas.flush()?;
+                    deltas.mark_step_boundary();
+                    work_log.record_call(call_id.as_deref(), name, arguments);
+                }
+                milim_agents::AgentEvent::ToolResult {
+                    call_id,
+                    name,
+                    result,
+                    ..
+                } => {
+                    deltas.flush()?;
+                    deltas.mark_step_boundary();
+                    work_log.record_result(call_id.as_deref(), name, result);
+                }
+                milim_agents::AgentEvent::Hook(_) => {
+                    deltas.flush()?;
+                    deltas.mark_step_boundary();
                 }
                 milim_agents::AgentEvent::ToolApprovalRequired {
                     approval_id,
@@ -249,13 +299,19 @@ impl RunManager {
                         None,
                     )
                     .await?;
+                    let replay = AssistantReplay::from_run(
+                        &deltas,
+                        &work_log,
+                        stopped_at_limit.then(|| RUN_LIMIT_MARKER.to_string()),
+                    );
                     let (content, reasoning) = deltas.into_output();
-                    self.complete_assistant_message(
+                    self.complete_assistant_message_with(
                         thread_id,
                         run_id,
                         content,
                         reasoning,
                         Some(metrics),
+                        replay,
                     )?;
                     return Ok(if *stopped_at_limit {
                         RunOutcome::Limited
@@ -266,6 +322,14 @@ impl RunManager {
                 milim_agents::AgentEvent::Error { message } => {
                     deltas.flush()?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
+                    // The run error wins over a failure to keep its output.
+                    let _ = self.persist_interrupted_output(
+                        thread_id,
+                        run_id,
+                        deltas,
+                        &work_log,
+                        failed_run_marker(message),
+                    );
                     return Err(Error::Other(message.clone()));
                 }
                 _ => {
@@ -274,8 +338,37 @@ impl RunManager {
             }
             self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
         }
-        Err(Error::Other(
-            "Agent stream ended without a terminal event".into(),
-        ))
+        let error = Error::Other("Agent stream ended without a terminal event".into());
+        deltas.flush()?;
+        let _ = self.persist_interrupted_output(
+            thread_id,
+            run_id,
+            deltas,
+            &work_log,
+            failed_run_marker(&error.to_string()),
+        );
+        Err(error)
+    }
+
+    /// Keep what a stopped or failed run produced: its partial text and work
+    /// log, marked with why it ended, so the next turn replays them instead
+    /// of two user messages in a row. A run that produced nothing keeps
+    /// nothing; `provider::control_chat_messages` marks that gap on replay.
+    /// The linked-thread exchange is left for the run's terminal status.
+    pub(super) fn persist_interrupted_output(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        deltas: DeltaBuffer<'_>,
+        work_log: &WorkLog,
+        marker: String,
+    ) -> Result<()> {
+        let replay = AssistantReplay::from_run(&deltas, work_log, Some(marker));
+        let (content, reasoning) = deltas.into_output();
+        if content.trim().is_empty() && reasoning.trim().is_empty() && replay.work_log.is_none() {
+            return Ok(());
+        }
+        self.persist_assistant_message(thread_id, run_id, content, reasoning, None, replay)?;
+        Ok(())
     }
 }

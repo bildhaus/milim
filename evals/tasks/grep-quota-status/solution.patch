@@ -1,0 +1,16 @@
+diff --git a/src/handlers/usage.js b/src/handlers/usage.js
+index c3f8e7c..01e35c8 100644
+--- a/src/handlers/usage.js
++++ b/src/handlers/usage.js
+@@ -7,10 +7,7 @@ export function recordUsage(req) {
+   const used = (db.get("usage", account)?.used ?? 0) + (req.body.units ?? 1);
+   const limit = db.get("plans", account)?.limit ?? config.defaultQuota;
+   if (used > limit) {
+-    return {
+-      status: 500,
+-      body: { error: { code: "QUOTA_EXCEEDED", message: "usage quota exceeded", details: { limit, used } } },
+-    };
++    return errorResponse("QUOTA_EXCEEDED", { limit, used });
+   }
+   db.upsert("usage", account, { used });
+   return ok({ account, used, limit });

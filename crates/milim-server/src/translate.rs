@@ -112,6 +112,7 @@ fn ollama_message(m: OllamaMessage) -> ChatMessage {
         tool_calls: m.tool_calls,
         tool_call_id: None,
         reasoning_content: m.thinking,
+        provider_state: None,
     }
 }
 
@@ -186,6 +187,7 @@ pub fn anthropic_to_completion(req: MessagesRequest) -> Result<CompletionRequest
                         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
                         tool_call_id: None,
                         reasoning_content: None,
+                        provider_state: None,
                     });
                 }
                 // Tool results map to OpenAI `tool` role messages.
@@ -197,6 +199,7 @@ pub fn anthropic_to_completion(req: MessagesRequest) -> Result<CompletionRequest
                         tool_calls: None,
                         tool_call_id: Some(id),
                         reasoning_content: None,
+                        provider_state: None,
                     });
                 }
             }
@@ -352,6 +355,7 @@ pub fn anthropic_stop_reason(finish: &str) -> String {
     match finish {
         "tool_calls" => "tool_use",
         "length" => "max_tokens",
+        "context_window_exceeded" => "model_context_window_exceeded",
         "stop" => "end_turn",
         other => other,
     }

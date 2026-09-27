@@ -19,6 +19,9 @@ pub const MAX_STOP_CONTINUATIONS: usize = 3;
 pub struct InterceptedCall<'a> {
     pub call_id: Option<&'a str>,
     pub name: &'a str,
+    /// The tool's other registered names (canonical name and aliases), so a
+    /// matcher written for an earlier name still matches.
+    pub other_names: &'a [String],
     pub arguments: &'a Value,
 }
 

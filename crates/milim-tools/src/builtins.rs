@@ -10,7 +10,8 @@ use crate::html::{html_to_text, TextFlavor};
 use crate::{Tool, ToolConcurrency, ToolEffect, ToolUiDescriptor};
 
 /// Max characters of rendered content returned by one `http_fetch` page.
-const MAX_FETCH_CHARS: usize = 60_000;
+/// Rendered content one `http_fetch` call returns; longer pages continue with `offset`.
+const MAX_FETCH_PAGE_BYTES: usize = crate::MODEL_TEXT_BUDGET_BYTES;
 const MAX_FETCH_BYTES: usize = 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_CHART_SERIES: usize = 8;
@@ -472,8 +473,30 @@ fn fetch_page(
         (body.to_string(), "raw")
     };
     let total = content.chars().count();
-    let page = content.chars().skip(offset).take(MAX_FETCH_CHARS).collect();
-    (page, total, rendered)
+    (
+        page_within_budget(content.chars().skip(offset)),
+        total,
+        rendered,
+    )
+}
+
+/// The leading characters that fit the model text budget in bytes and lines.
+fn page_within_budget(chars: impl Iterator<Item = char>) -> String {
+    let mut page = String::new();
+    let mut lines = 1;
+    for ch in chars {
+        if page.len() + ch.len_utf8() > MAX_FETCH_PAGE_BYTES {
+            break;
+        }
+        if ch == '\n' {
+            if lines == crate::MODEL_TEXT_BUDGET_LINES {
+                break;
+            }
+            lines += 1;
+        }
+        page.push(ch);
+    }
+    page
 }
 
 #[async_trait]
@@ -746,20 +769,16 @@ mod tests {
         );
         assert_eq!((page.as_str(), format), ("sniffed", "markdown"));
 
-        let long = "é".repeat(MAX_FETCH_CHARS + 10);
+        // Pages are cut by bytes, while offsets count characters.
+        let fits = MAX_FETCH_PAGE_BYTES / 2;
+        let long = "é".repeat(fits + 10);
         let (page, total, _) = fetch_page(&long, "text/plain", &url, FetchFormat::Markdown, 0);
-        assert_eq!(
-            (page.chars().count(), total),
-            (MAX_FETCH_CHARS, MAX_FETCH_CHARS + 10)
-        );
-        let (page, _, _) = fetch_page(
-            &long,
-            "text/plain",
-            &url,
-            FetchFormat::Markdown,
-            MAX_FETCH_CHARS,
-        );
+        assert_eq!((page.chars().count(), total), (fits, fits + 10));
+        let (page, _, _) = fetch_page(&long, "text/plain", &url, FetchFormat::Markdown, fits);
         assert_eq!(page.chars().count(), 10);
+        let lines = "a\n".repeat(3000);
+        let (page, _, _) = fetch_page(&lines, "text/plain", &url, FetchFormat::Markdown, 0);
+        assert_eq!(page.split('\n').count(), crate::MODEL_TEXT_BUDGET_LINES);
     }
 
     #[tokio::test]

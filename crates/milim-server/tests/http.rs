@@ -5827,7 +5827,7 @@ async fn mcp_server_tools_follow_chat_approval_policy() {
                 .post(format!("{base}/agents/run"))
                 .json(&json!({
                     "model": "tool-listing",
-                    "messages": [{ "role": "user", "content": "list tools" }],
+                    "messages": [{ "role": "user", "content": "list the MCP server tools" }],
                     "tool_approval_policy": policy,
                     "interactive_tool_approval": interactive
                 }))
@@ -5900,13 +5900,13 @@ async fn external_mcp_read_only_hints_require_server_trust() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|tool| tool["name"].as_str().unwrap().contains("__tool_"))
+                .filter(|tool| tool["name"].as_str().unwrap().starts_with("hints_"))
                 .map(|tool| {
                     (
                         tool["name"]
                             .as_str()
                             .unwrap()
-                            .rsplit("__tool_")
+                            .rsplit("__")
                             .next()
                             .unwrap()
                             .to_string(),
@@ -5946,7 +5946,7 @@ async fn external_mcp_read_only_hints_require_server_trust() {
     assert_eq!(untrusted["lookup"], "unknown");
     assert_eq!(untrusted["erase"], "mutating");
     let offered = guarded().await;
-    assert!(!offered.contains("__tool_lookup"), "{offered}");
+    assert!(!offered.contains("__lookup"), "{offered}");
     assert_eq!(hub.list()[0].declared_read_only_tools, 2);
 
     hub.upsert(milim_mcp_client::McpServerConfig {
@@ -5959,8 +5959,8 @@ async fn external_mcp_read_only_hints_require_server_trust() {
     assert_eq!(trusted["lookup"], "read_only");
     assert_eq!(trusted["erase"], "mutating");
     let offered = guarded().await;
-    assert!(offered.contains("__tool_lookup"), "{offered}");
-    assert!(!offered.contains("__tool_erase"), "{offered}");
+    assert!(offered.contains("__lookup"), "{offered}");
+    assert!(!offered.contains("__erase"), "{offered}");
 
     drop(hub);
     let _ = fs::remove_dir_all(root);
@@ -7877,8 +7877,8 @@ async fn native_agent_runs_index_skills_and_load_project_skills() {
         "index only: {skills}"
     );
     assert!(
-        !skills.contains("Mailer"),
-        "explicit skills leave the index: {skills}"
+        skills.contains("- Mailer: Send email"),
+        "the index stays the same when a skill is mentioned: {skills}"
     );
     assert!(
         system_texts(messages)

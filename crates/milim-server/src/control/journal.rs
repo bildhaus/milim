@@ -1,20 +1,28 @@
 //! Run ledger: the per-run journal that records model requests, responses,
 //! tool results, and composition artifacts, plus the Agent step hook.
 
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use milim_control_contract::ResolvedRunCompositionV1;
-use milim_core::api::openai::{ChatMessage, ToolCall, Usage};
+use milim_core::api::openai::{ChatMessage, Content, ContentPart, ToolCall, Usage};
 use milim_core::{Error, Result};
 use milim_inference::CompletionRequest;
 use milim_storage::{ControlRunArtifactRecord, UserDataStore};
+use regex::{Captures, Regex};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::preview_runtime::managed_preview_runtime_context;
+use super::provider::with_image_attachments;
 use super::replay::completion_request_value;
 use super::{now_ms, parse_value, AcceptedTurnV1};
+
+#[cfg(test)]
+#[path = "ledger_tests.rs"]
+mod ledger_tests;
 
 pub(super) struct RunJournal {
     pub(super) store: Arc<UserDataStore>,
@@ -22,6 +30,28 @@ pub(super) struct RunJournal {
     pub(super) privacy_mode: crate::privacy::PrivacyMode,
     pub(super) thread_id: String,
     pub(super) run_id: String,
+    /// The latest committed model step as the model saw it; see [`SentStep`].
+    pub(super) sent_step: Mutex<Option<SentStep>>,
+}
+
+/// The latest model step exactly as the Agent loop sent it and the model
+/// answered.
+///
+/// The ledger keeps a privacy-processed, credential-scrubbed copy of each
+/// step for inspection and replay. Rebuilding the next step from that copy
+/// would show the model text it never saw: masked credentials, redaction
+/// placeholders the outbound privacy gate would otherwise apply consistently
+/// itself, and a changed prefix that defeats prompt caching. So the journal
+/// keeps the exact step in memory and rebuilds from it. Each part is recorded
+/// only after its ledger commit succeeds, so a step still contains only what
+/// the ledger committed; a journal without the copy falls back to the ledger.
+#[derive(Debug, Default)]
+pub(super) struct SentStep {
+    step: usize,
+    messages: Vec<ChatMessage>,
+    response_committed: bool,
+    assistant: Option<ChatMessage>,
+    tool_results: Vec<ChatMessage>,
 }
 
 impl std::fmt::Debug for RunJournal {
@@ -36,6 +66,23 @@ impl std::fmt::Debug for RunJournal {
 }
 
 impl RunJournal {
+    pub(super) fn new(
+        store: Arc<UserDataStore>,
+        privacy: Arc<crate::privacy::PrivacyGate>,
+        privacy_mode: crate::privacy::PrivacyMode,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Self {
+        Self {
+            store,
+            privacy,
+            privacy_mode,
+            thread_id: thread_id.to_string(),
+            run_id: run_id.to_string(),
+            sent_step: Mutex::default(),
+        }
+    }
+
     pub(super) fn append_event(&self, step: usize, event_type: &str, data: Value) -> Result<()> {
         self.store.control_append_run_event(
             &self.run_id,
@@ -106,6 +153,34 @@ impl RunJournal {
         self.artifact_value(digest)
     }
 
+    fn sent_step(&self) -> std::sync::MutexGuard<'_, Option<SentStep>> {
+        self.sent_step
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The next step's messages from the exact copy of the previous one, if
+    /// this journal committed that step's request and response itself.
+    fn rebuild_sent_messages_for_step(
+        &self,
+        step: usize,
+        memory_cache: &[ChatMessage],
+    ) -> Option<Vec<ChatMessage>> {
+        let sent = self.sent_step();
+        let sent = sent
+            .as_ref()
+            .filter(|sent| sent.step + 1 == step && sent.response_committed)?;
+        let had_tool_calls = sent
+            .assistant
+            .as_ref()
+            .is_some_and(|message| message.tool_calls.is_some());
+        let mut messages = sent.messages.clone();
+        messages.extend(sent.assistant.clone());
+        messages.extend(sent.tool_results.iter().cloned());
+        messages.extend(image_follow_ups(memory_cache, had_tool_calls));
+        Some(messages)
+    }
+
     fn rebuild_messages_for_step(
         &self,
         step: usize,
@@ -113,6 +188,9 @@ impl RunJournal {
     ) -> Result<Option<Vec<ChatMessage>>> {
         if step <= 1 {
             return Ok(None);
+        }
+        if let Some(messages) = self.rebuild_sent_messages_for_step(step, memory_cache) {
+            return Ok(Some(messages));
         }
         let previous_step_id = format!("step-{}", step - 1);
         let events = self
@@ -154,29 +232,20 @@ impl RunJournal {
                 .unwrap_or_else(|| json!([])),
         )
         .map_err(|error| Error::Other(format!("decode stored provider tool calls: {error}")))?;
-        let content = response
-            .get("content")
-            .and_then(Value::as_str)
-            .filter(|content| !content.is_empty())
-            .map(|content| milim_core::api::openai::Content::Text(content.to_string()));
-        // A step without tool calls only continues after an output-limit cut
-        // off; its partial text replays as plain assistant text, and a turn
-        // with no text at all is dropped rather than sent empty.
-        let had_tool_calls = !tool_calls.is_empty();
-        if content.is_some() || had_tool_calls {
-            messages.push(ChatMessage {
-                role: "assistant".into(),
-                content,
-                name: None,
-                tool_calls: had_tool_calls.then_some(tool_calls),
-                tool_call_id: None,
-                reasoning_content: response
-                    .get("reasoning")
-                    .and_then(Value::as_str)
-                    .filter(|reasoning| !reasoning.is_empty())
-                    .map(str::to_string),
-            });
-        }
+        let text = |key: &str| response.get(key).and_then(Value::as_str).unwrap_or("");
+        let assistant = replayed_assistant_message(
+            text("content"),
+            text("reasoning"),
+            tool_calls,
+            response
+                .get("provider_state")
+                .filter(|state| !state.is_null())
+                .cloned(),
+        );
+        let had_tool_calls = assistant
+            .as_ref()
+            .is_some_and(|message| message.tool_calls.is_some());
+        messages.extend(assistant);
         for event in previous
             .iter()
             .filter(|event| event.event_type == "tool_result_committed")
@@ -186,44 +255,12 @@ impl RunJournal {
                 .get("model_content")
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Other("stored tool result has no model_content".into()))?;
-            messages.push(ChatMessage {
-                role: "tool".into(),
-                content: Some(milim_core::api::openai::Content::Text(
-                    model_content.to_string(),
-                )),
-                name: None,
-                tool_calls: None,
-                tool_call_id: result
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                reasoning_content: None,
-            });
+            messages.push(tool_result_message(
+                result.get("call_id").and_then(Value::as_str),
+                model_content,
+            ));
         }
-
-        // Binary tool images are referenced rather than duplicated in the
-        // ledger. Keep only those image follow-ups from the in-process cache;
-        // all text and JSON above is rebuilt from SQLite. Only a step that
-        // ran tools can have produced new image follow-ups.
-        if let Some(last_tool_call) = memory_cache
-            .iter()
-            .rposition(|message| message.role == "assistant" && message.tool_calls.is_some())
-            .filter(|_| had_tool_calls)
-        {
-            messages.extend(
-                memory_cache[last_tool_call + 1..]
-                    .iter()
-                    .filter(|message| {
-                        message.role == "user"
-                            && matches!(
-                                message.content.as_ref(),
-                                Some(milim_core::api::openai::Content::Parts(parts))
-                                    if parts.iter().any(|part| matches!(part, milim_core::api::openai::ContentPart::ImageUrl { .. }))
-                            )
-                    })
-                    .cloned(),
-            );
-        }
+        messages.extend(image_follow_ups(memory_cache, had_tool_calls));
         Ok(Some(messages))
     }
 
@@ -242,6 +279,67 @@ impl RunJournal {
             }),
         )
     }
+}
+
+/// The assistant turn a later step replays for a committed response. A step
+/// without tool calls only continues after an output-limit cut off or a stop
+/// hook; its text replays as plain assistant text, and a turn with no text at
+/// all is dropped rather than sent empty.
+fn replayed_assistant_message(
+    content: &str,
+    reasoning: &str,
+    tool_calls: Vec<ToolCall>,
+    provider_state: Option<Value>,
+) -> Option<ChatMessage> {
+    if content.is_empty() && tool_calls.is_empty() {
+        return None;
+    }
+    Some(ChatMessage {
+        role: "assistant".into(),
+        content: (!content.is_empty()).then(|| Content::Text(content.to_string())),
+        name: None,
+        tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+        tool_call_id: None,
+        reasoning_content: (!reasoning.is_empty()).then(|| reasoning.to_string()),
+        provider_state,
+    })
+}
+
+fn tool_result_message(call_id: Option<&str>, model_content: &str) -> ChatMessage {
+    ChatMessage {
+        role: "tool".into(),
+        content: Some(Content::Text(model_content.to_string())),
+        name: None,
+        tool_calls: None,
+        tool_call_id: call_id.map(str::to_string),
+        reasoning_content: None,
+        provider_state: None,
+    }
+}
+
+/// Binary tool images are referenced rather than duplicated in the ledger,
+/// so the image follow-ups of the last tool-call turn come from the loop's
+/// in-process messages. Only a step that ran tools can have produced them.
+fn image_follow_ups(memory_cache: &[ChatMessage], had_tool_calls: bool) -> Vec<ChatMessage> {
+    let Some(last_tool_call) = memory_cache
+        .iter()
+        .rposition(|message| message.role == "assistant" && message.tool_calls.is_some())
+        .filter(|_| had_tool_calls)
+    else {
+        return Vec::new();
+    };
+    memory_cache[last_tool_call + 1..]
+        .iter()
+        .filter(|message| {
+            message.role == "user"
+                && matches!(
+                    message.content.as_ref(),
+                    Some(Content::Parts(parts))
+                        if parts.iter().any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+                )
+        })
+        .cloned()
+        .collect()
 }
 
 pub(super) struct ModelInputResolver<'a> {
@@ -303,8 +401,8 @@ impl ModelInputResolver<'_> {
             Value::Object(values) => values
                 .iter()
                 .map(|(key, value)| {
-                    if credential_field_name(key) {
-                        Ok((key.clone(), Value::String("[REDACTED_CREDENTIAL]".into())))
+                    if credential_field(key, value) {
+                        Ok((key.clone(), Value::String(REDACTED_CREDENTIAL.into())))
                     } else {
                         self.resolve_value(value).map(|value| (key.clone(), value))
                     }
@@ -445,7 +543,12 @@ pub(super) fn resolved_run_composition(
     })
 }
 
-fn credential_field_name(key: &str) -> bool {
+const REDACTED_CREDENTIAL: &str = "[REDACTED_CREDENTIAL]";
+
+/// A JSON field that holds a credential: a non-empty string under a
+/// credential name. Objects under such names (a tool schema's `password`
+/// property, for example) are walked like any other value.
+fn credential_field(key: &str, value: &Value) -> bool {
     let normalized = key
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
@@ -462,28 +565,139 @@ fn credential_field_name(key: &str) -> bool {
             | "clientsecret"
             | "password"
             | "secret"
-    )
+    ) && value.as_str().is_some_and(|text| !text.is_empty())
 }
 
-fn scrub_credential_text(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let markers = [
-        "bearer ",
-        "authorization:",
-        "api_key=",
-        "api-key=",
-        "apikey=",
-        "openai_api_key=",
-        "anthropic_api_key=",
-        "device_key=",
-        "client_secret=",
-        "sk-",
-    ];
-    if markers.iter().any(|marker| lower.contains(marker)) {
-        "[REDACTED_CREDENTIAL]".into()
-    } else {
-        text.to_string()
+/// The credential shapes the ledger scrubs. Each rule marks only the secret
+/// span, so the surrounding text survives and a JSON document embedded in a
+/// string (tool-call arguments) stays valid JSON.
+#[derive(Clone, Copy)]
+enum CredentialRule {
+    /// A PEM private key block, replaced whole.
+    PrivateKey,
+    /// A provider token with a recognizable prefix, replaced whole.
+    PrefixedToken,
+    /// The value of an `Authorization` header.
+    AuthorizationHeader,
+    /// A bearer token outside an `Authorization` header.
+    Bearer,
+    /// The value of a credential-named `key=value` or `"key": "value"` pair.
+    KeyValue,
+}
+
+fn credential_rules() -> &'static [(CredentialRule, Regex)] {
+    static RULES: OnceLock<Vec<(CredentialRule, Regex)>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        vec![
+            (
+                CredentialRule::PrivateKey,
+                Regex::new(
+                    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+                )
+                .unwrap(),
+            ),
+            (
+                CredentialRule::PrefixedToken,
+                Regex::new(
+                    r"(?:sk-(?:proj-|ant-|or-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})",
+                )
+                .unwrap(),
+            ),
+            (
+                CredentialRule::AuthorizationHeader,
+                Regex::new(
+                    r#"(?i)authorization(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?(?:(bearer|basic|token|bot|digest)\s+)?([A-Za-z0-9._~+/-]{8,}=*)"#,
+                )
+                .unwrap(),
+            ),
+            (
+                CredentialRule::Bearer,
+                Regex::new(r"(?i)bearer\s+([A-Za-z0-9._~+/-]{16,}=*)").unwrap(),
+            ),
+            (
+                CredentialRule::KeyValue,
+                Regex::new(
+                    r#"(?i)(?:api[_-]?key|device[_-]?key|secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?([^\s"'\\&;,]{8,})"#,
+                )
+                .unwrap(),
+            ),
+        ]
+    })
+}
+
+/// Whether a value in credential position looks like a secret rather than a
+/// reference (`$TOKEN`, `${KEY}`, `<your key>`), a marker (`[EMAIL_1]`), or
+/// an ordinary word.
+fn secret_like(value: &str) -> bool {
+    !value.starts_with(['$', '{', '<', '%', '*', '['])
+        && value.len() >= 8
+        && (value.len() >= 20 || value.bytes().any(|byte| byte.is_ascii_digit()))
+}
+
+/// Whether a match at `start` begins a token rather than continuing a word,
+/// counting an escape like `\n` inside JSON-encoded text as a separator.
+fn starts_token(text: &str, start: usize) -> bool {
+    let before = &text.as_bytes()[..start];
+    match before {
+        [] => true,
+        [.., b'\\', b'n' | b'r' | b't'] => true,
+        [.., last] => !(last.is_ascii_alphanumeric() || matches!(last, b'_' | b'-')),
     }
+}
+
+fn credential_span(
+    rule: CredentialRule,
+    text: &str,
+    captures: &Captures<'_>,
+) -> Option<Range<usize>> {
+    let whole = captures.get(0)?;
+    match rule {
+        CredentialRule::PrivateKey => Some(whole.range()),
+        CredentialRule::PrefixedToken => {
+            let token = whole.as_str();
+            (starts_token(text, whole.start())
+                && (!token.starts_with("sk-") || token.bytes().any(|byte| byte.is_ascii_digit())))
+            .then(|| whole.range())
+        }
+        CredentialRule::AuthorizationHeader => {
+            let value = captures.get(2)?;
+            (captures.get(1).is_some() || secret_like(value.as_str())).then(|| value.range())
+        }
+        CredentialRule::Bearer => {
+            let value = captures.get(1)?;
+            (starts_token(text, whole.start()) && secret_like(value.as_str()))
+                .then(|| value.range())
+        }
+        CredentialRule::KeyValue => {
+            let value = captures.get(1)?;
+            secret_like(value.as_str()).then(|| value.range())
+        }
+    }
+}
+
+/// Replace each credential span in `text` with a marker, leaving the rest of
+/// the text untouched.
+fn scrub_credential_text(text: &str) -> String {
+    let mut scrubbed = Cow::Borrowed(text);
+    for (rule, regex) in credential_rules() {
+        let spans = regex
+            .captures_iter(&scrubbed)
+            .filter_map(|captures| credential_span(*rule, &scrubbed, &captures))
+            .collect::<Vec<_>>();
+        if spans.is_empty() {
+            continue;
+        }
+        let mut next = String::with_capacity(scrubbed.len());
+        let mut cursor = 0;
+        for span in spans {
+            next.push_str(&scrubbed[cursor..span.start]);
+            next.push_str(REDACTED_CREDENTIAL);
+            cursor = span.end;
+        }
+        next.push_str(&scrubbed[cursor..]);
+        scrubbed = Cow::Owned(next);
+    }
+    scrubbed.into_owned()
 }
 
 fn scrub_credential_value(value: &Value) -> Value {
@@ -494,8 +708,8 @@ fn scrub_credential_value(value: &Value) -> Value {
             values
                 .iter()
                 .map(|(key, value)| {
-                    if credential_field_name(key) {
-                        (key.clone(), Value::String("[REDACTED_CREDENTIAL]".into()))
+                    if credential_field(key, value) {
+                        (key.clone(), Value::String(REDACTED_CREDENTIAL.into()))
                     } else {
                         (key.clone(), scrub_credential_value(value))
                     }
@@ -504,6 +718,19 @@ fn scrub_credential_value(value: &Value) -> Value {
         ),
         _ => value.clone(),
     }
+}
+
+/// The model-visible user message for a steering input. Its image
+/// attachments ride along exactly as they do on a replayed user turn.
+fn steering_chat_message(accepted: &AcceptedTurnV1) -> Result<ChatMessage> {
+    let mut message = json!({
+        "role": "user",
+        "content": accepted.text,
+        "attachments": accepted.config.attachments,
+    });
+    with_image_attachments(&mut message);
+    serde_json::from_value(message)
+        .map_err(|error| Error::Other(format!("invalid steering message: {error}")))
 }
 
 #[async_trait::async_trait]
@@ -547,7 +774,7 @@ impl milim_agents::AgentStepHook for RunJournal {
                     {
                         messages.push(ChatMessage::text("system", context));
                     }
-                    messages.push(ChatMessage::text("user", accepted.text.clone()));
+                    messages.push(steering_chat_message(&accepted)?);
                     let message = json!({
                         "id": Uuid::new_v4().to_string(),
                         "role": "user",
@@ -610,7 +837,13 @@ impl milim_agents::AgentStepHook for RunJournal {
             step,
             "model_request_resolved",
             json!({ "artifact_digest": digest, "privacy": self.privacy_mode.as_str() }),
-        )
+        )?;
+        *self.sent_step() = Some(SentStep {
+            step,
+            messages: request.messages.clone(),
+            ..SentStep::default()
+        });
+        Ok(())
     }
 
     async fn commit_model_response(
@@ -621,20 +854,25 @@ impl milim_agents::AgentStepHook for RunJournal {
         tool_calls: &[ToolCall],
         finish_reason: &str,
         usage: Usage,
+        provider_state: Option<&Value>,
     ) -> Result<()> {
-        let content = self.privacy_processed_text(content)?;
-        let reasoning = self.privacy_processed_text(reasoning)?;
-        let tool_calls = self.privacy_processed_value(
+        let stored_tool_calls = self.privacy_processed_value(
             &serde_json::to_value(tool_calls)
                 .map_err(|error| Error::Other(format!("serialize tool calls: {error}")))?,
         )?;
-        let response = json!({
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": tool_calls,
+        let mut response = json!({
+            "content": self.privacy_processed_text(content)?,
+            "reasoning": self.privacy_processed_text(reasoning)?,
+            "tool_calls": stored_tool_calls,
             "finish_reason": finish_reason,
             "usage": usage,
         });
+        // Opaque provider continuation data (thinking signatures, encrypted
+        // reasoning) is only valid byte-exact, so it bypasses privacy
+        // processing and credential scrubbing.
+        if let Some(state) = provider_state {
+            response["provider_state"] = state.clone();
+        }
         let digest = self.put_artifact("provider_response", &response)?;
         self.append_event(
             step,
@@ -644,7 +882,17 @@ impl milim_agents::AgentStepHook for RunJournal {
                 "finish_reason": finish_reason,
                 "usage": usage,
             }),
-        )
+        )?;
+        if let Some(sent) = self.sent_step().as_mut().filter(|sent| sent.step == step) {
+            sent.response_committed = true;
+            sent.assistant = replayed_assistant_message(
+                content,
+                reasoning,
+                tool_calls.to_vec(),
+                provider_state.cloned(),
+            );
+        }
+        Ok(())
     }
 
     async fn commit_tool_result(
@@ -655,14 +903,13 @@ impl milim_agents::AgentStepHook for RunJournal {
         result: &Value,
         model_content: &str,
     ) -> Result<()> {
-        let result = self.privacy_processed_value(result)?;
-        let model_content = self.privacy_processed_text(model_content)?;
-        let model_content_bytes = model_content.len();
+        let stored_content = self.privacy_processed_text(model_content)?;
+        let model_content_bytes = stored_content.len();
         let artifact = json!({
             "call_id": call_id,
             "name": name,
-            "result": result,
-            "model_content": model_content,
+            "result": self.privacy_processed_value(result)?,
+            "model_content": stored_content,
         });
         let digest = self.put_artifact("tool_result", &artifact)?;
         self.append_event(
@@ -674,7 +921,16 @@ impl milim_agents::AgentStepHook for RunJournal {
                 "name": name,
                 "model_content_bytes": model_content_bytes,
             }),
-        )
+        )?;
+        if let Some(sent) = self
+            .sent_step()
+            .as_mut()
+            .filter(|sent| sent.step == step && sent.response_committed)
+        {
+            sent.tool_results
+                .push(tool_result_message(call_id, model_content));
+        }
+        Ok(())
     }
 
     async fn commit_context_compaction(

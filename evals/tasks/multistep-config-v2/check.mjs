@@ -68,7 +68,8 @@ const docs = read("docs/CONFIG.md");
 expect(/"version"\s*:\s*2/.test(docs), "5. docs/CONFIG.md lacks a v2 example");
 expect(/deprecat/i.test(docs), "5. docs/CONFIG.md does not mark v1 deprecated");
 
-const tests = changedFiles().filter((path) => path.startsWith("test/"));
+// Deleted test files are listed as changed too; only read the ones that exist.
+const tests = changedFiles().filter((path) => path.startsWith("test/") && exists(path));
 expect(tests.some((path) => /migrateV1ToV2/.test(read(path))), "6. no test covers migrateV1ToV2");
 expect(tests.some((path) => /version/.test(read(path))), "6. no test covers v2 loading");
 runNodeTests("test");

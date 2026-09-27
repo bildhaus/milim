@@ -1,5 +1,6 @@
 # Runs the Windows WebView2 suites that are too slow for every pull request,
-# plus a macOS debug build and /control/v1 smoke of the real desktop binary.
+# plus a macOS debug build and /control/v1 smoke of the real desktop binary,
+# and, when a provider key is configured, a small agent-eval subset on it.
 name: Nightly
 
 on:
@@ -63,7 +64,7 @@ jobs:
   desktop-macos-launch:
     name: Desktop macOS debug build and control smoke
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -111,3 +112,58 @@ jobs:
             exit 1
           fi
           echo "macOS debug binary passed the control smoke"
+      # Agent evals (evals/README.md) on a small, cheap task subset, against
+      # a fresh launch of the same real Tauri debug binary. They run only when
+      # the MILIM_EVAL_PROVIDER_KEY secret and MILIM_EVAL_MODEL variable are
+      # set. The app gets the key through its OpenAI-compatible fallback
+      # backend (MILIM_REMOTE_BASE_URL / MILIM_REMOTE_API_KEY), which
+      # model-run shell commands never inherit; the runner never sees it.
+      - name: Agent evals (nightly subset)
+        id: evals
+        shell: bash
+        timeout-minutes: 45
+        env:
+          MILIM_EVAL_PROVIDER_KEY: ${{ secrets.MILIM_EVAL_PROVIDER_KEY }}
+          MILIM_EVAL_MODEL: ${{ vars.MILIM_EVAL_MODEL }}
+          EVAL_PROVIDER_BASE_URL: ${{ vars.MILIM_EVAL_PROVIDER_BASE_URL || 'https://openrouter.ai/api/v1' }}
+          MILIM_EVAL_TASKS: ${{ vars.MILIM_EVAL_NIGHTLY_TASKS || 'bugfix-paginate,bugfix-duration,readonly-discount-question,run-tests-inventory' }}
+          MILIM_EVAL_ARTIFACT_NAME: eval-results-nightly
+        run: |
+          if [ -z "$MILIM_EVAL_PROVIDER_KEY" ] || [ -z "$MILIM_EVAL_MODEL" ]; then
+            echo "Agent evals skipped: set the MILIM_EVAL_PROVIDER_KEY secret and the MILIM_EVAL_MODEL variable to enable them." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+          binary=apps/desktop/src-tauri/target/tauri-verify/debug/milim-desktop
+          test -x "$binary"
+          export MILIM_HOME="$(mktemp -d)"
+          e2e_dir="$(mktemp -d)"
+          chmod 700 "$e2e_dir"
+          export MILIM_E2E_CONTROL_FILE="$e2e_dir/control.json"
+          log="$RUNNER_TEMP/milim-desktop-evals.log"
+          env -u MILIM_EVAL_PROVIDER_KEY \
+            MILIM_REMOTE_BASE_URL="$EVAL_PROVIDER_BASE_URL" \
+            MILIM_REMOTE_API_KEY="$MILIM_EVAL_PROVIDER_KEY" \
+            RUST_BACKTRACE=1 "$binary" >"$log" 2>&1 &
+          pid=$!
+          status=0
+          env -u MILIM_EVAL_PROVIDER_KEY MILIM_EVAL_ARCHIVE=1 \
+            node evals/run.mjs --out evals/results/nightly.json --fail-on-error || status=$?
+          kill "$pid" 2>/dev/null || true
+          for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill -9 "$pid" 2>/dev/null || true
+          rm -rf "$MILIM_HOME" "$e2e_dir"
+          if [ "$status" != 0 ]; then
+            tail -n 200 "$log"
+            exit "$status"
+          fi
+      - name: Upload eval results
+        if: ${{ always() && steps.evals.outputs.ran == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: eval-results-nightly
+          path: evals/results/nightly.json
+          if-no-files-found: warn

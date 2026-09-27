@@ -11,9 +11,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use milim_agents::{
-    thread_status_terminal, AgentEvent, AgentThread, ThreadEvent, ThreadStore, WorkerAccess,
-    WorkerRun, WorkerRunStatus, WorkerRuntime, THREAD_STATUS_DONE, THREAD_STATUS_ERROR,
-    THREAD_STATUS_RUNNING, THREAD_STATUS_STOPPED,
+    thread_status_terminal, AgentEvent, AgentThread, ThreadEvent, ThreadStore, ToolInterceptor,
+    WorkerAccess, WorkerRun, WorkerRunStatus, WorkerRuntime, THREAD_STATUS_DONE,
+    THREAD_STATUS_ERROR, THREAD_STATUS_RUNNING, THREAD_STATUS_STOPPED,
 };
 use milim_core::api::openai::ChatMessage;
 use milim_core::{Error, Result};
@@ -31,6 +31,7 @@ enum ChildRunSource {
     Agent {
         service: SharedService,
         tools: Arc<ToolRegistry>,
+        interceptor: Option<Arc<dyn ToolInterceptor>>,
     },
     Stream(ChildStreamFactory),
 }
@@ -132,9 +133,28 @@ impl ThreadSupervisor {
         tools: ToolRegistry,
         spec: ChildRunSpec,
     ) -> Result<AgentThread> {
-        self.spawn_batch(service, tools, vec![spec])?
-            .pop()
-            .ok_or_else(|| Error::Other("worker batch created no worker".to_string()))
+        self.spawn_with_hooks(service, tools, None, spec)
+    }
+
+    /// Spawn one native child run whose tool calls and turn pass through the
+    /// user's hooks.
+    pub fn spawn_with_hooks(
+        &self,
+        service: SharedService,
+        tools: ToolRegistry,
+        interceptor: Option<Arc<dyn ToolInterceptor>>,
+        spec: ChildRunSpec,
+    ) -> Result<AgentThread> {
+        self.spawn_batch_from(
+            ChildRunSource::Agent {
+                service,
+                tools: Arc::new(tools),
+                interceptor,
+            },
+            vec![spec],
+        )?
+        .pop()
+        .ok_or_else(|| Error::Other("worker batch created no worker".to_string()))
     }
 
     pub fn spawn_batch(
@@ -147,6 +167,7 @@ impl ThreadSupervisor {
             ChildRunSource::Agent {
                 service,
                 tools: Arc::new(tools),
+                interceptor: None,
             },
             specs,
         )
@@ -240,9 +261,16 @@ impl ThreadSupervisor {
             let source = source.clone();
             let handle = tokio::spawn(async move {
                 let stream = match &source {
-                    ChildRunSource::Agent { service, tools } => {
-                        agent_child_stream(service.clone(), tools.clone(), spec.clone())
-                    }
+                    ChildRunSource::Agent {
+                        service,
+                        tools,
+                        interceptor,
+                    } => agent_child_stream(
+                        service.clone(),
+                        tools.clone(),
+                        interceptor.clone(),
+                        spec.clone(),
+                    ),
                     ChildRunSource::Stream(factory) => match factory(spec.clone()) {
                         Ok(stream) => stream,
                         Err(error) => Box::pin(futures::stream::once(async move {
@@ -491,18 +519,27 @@ fn flush_token_event(
 fn agent_child_stream(
     service: SharedService,
     tools: Arc<ToolRegistry>,
+    interceptor: Option<Arc<dyn ToolInterceptor>>,
     spec: ChildRunSpec,
 ) -> ChildAgentStream {
     let messages = worker_messages(&spec);
-    Box::pin(milim_agents::run_agent_stream(
-        service, tools, spec.model, messages, None,
+    Box::pin(milim_agents::run_agent_stream_with_config(
+        service,
+        tools,
+        spec.model,
+        messages,
+        None,
+        milim_agents::AgentRunConfig {
+            interceptor,
+            ..Default::default()
+        },
     ))
 }
 
 /// A native Worker's conversation, laid out like a native tool-agent run:
 /// the base prompt, then the run and Agent instructions and the Worker role,
 /// then the environment snapshot, then the delegated task.
-fn worker_messages(spec: &ChildRunSpec) -> Vec<ChatMessage> {
+pub(crate) fn worker_messages(spec: &ChildRunSpec) -> Vec<ChatMessage> {
     let non_empty = |value: &Option<String>| {
         value
             .as_deref()
@@ -540,7 +577,7 @@ async fn run_child_stream(
 
     while let Some(event) = stream.next().await {
         match event {
-            AgentEvent::Token { text: chunk } => {
+            AgentEvent::Token { text: chunk } | AgentEvent::Notice { text: chunk } => {
                 text.push_str(&chunk);
                 token_buffer.push_str(&chunk);
                 if last_token_flush.elapsed() >= TOKEN_EVENT_FLUSH_INTERVAL {

@@ -416,6 +416,7 @@ pub fn unredact_stream(inner: EventStream, map: BTreeMap<String, String>) -> Eve
                             content: (!tail.is_empty()).then_some(tail),
                             reasoning: (!rtail.is_empty()).then_some(rtail),
                             tool_calls,
+                            provider_state: None,
                         }));
                     }
                     yield Ok(StreamEvent::Done { finish_reason, usage });

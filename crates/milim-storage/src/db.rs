@@ -2533,6 +2533,66 @@ impl UserDataStore {
         Ok(messages.into_iter().map(|(_, json)| json).collect())
     }
 
+    /// The latest context checkpoint of a thread and the ids of the messages
+    /// it replaces, as `(content, replaced_ids)`.
+    ///
+    /// The desktop's `/compact` stores its checkpoint (an assistant message
+    /// with `compaction.kind == "checkpoint"`) in the compatibility message
+    /// rows only, between the summarized messages and the kept recent tail.
+    /// Provider replay honors it by dropping the canonical messages whose ids
+    /// (or renderer `canonicalId`s) precede it there.
+    pub fn control_compaction_checkpoint(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<(String, Vec<String>)>> {
+        let thread_id = required_control_text(thread_id, "thread id")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        let Some((index, content)) = conn
+            .prepare_cached(
+                "SELECT message_index, json_extract(message_json, '$.content')
+                 FROM user_session_messages
+                 WHERE session_id = ?1
+                   AND json_extract(message_json, '$.compaction.kind') = 'checkpoint'
+                   AND length(trim(COALESCE(json_extract(message_json, '$.content'), ''))) > 0
+                 ORDER BY message_index DESC LIMIT 1",
+            )
+            .map_err(sqlite)?
+            .query_row(params![thread_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()
+            .map_err(sqlite)?
+        else {
+            return Ok(None);
+        };
+        let replaced_ids = conn
+            .prepare_cached(
+                "SELECT json_extract(message_json, '$.id'),
+                        json_extract(message_json, '$.canonicalId')
+                 FROM user_session_messages
+                 WHERE session_id = ?1 AND message_index < ?2",
+            )
+            .map_err(sqlite)?
+            .query_map(params![thread_id, index], |row| {
+                Ok([
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ])
+            })
+            .map_err(sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite)?
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
+        Ok(Some((content, replaced_ids)))
+    }
+
     /// Delete one canonical user-session message by its stable JSON `id` (or
     /// a replica's retained `canonicalId`) and compact legacy positional indices.
     pub fn control_delete_message(&self, thread_id: &str, message_id: &str) -> Result<bool> {
@@ -2657,7 +2717,7 @@ impl UserDataStore {
         let sql = if nonterminal_only {
             "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
                     native_session_json, created_at_ms, updated_at_ms, completed_at_ms, error_json
-             FROM user_runs WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')
+             FROM user_runs WHERE status IN ('accepted', 'running')
              ORDER BY created_at_ms ASC"
         } else {
             "SELECT id, thread_id, status, adapter, request_json, agent_snapshot_json,
@@ -4797,15 +4857,17 @@ fn replace_control_backup_state_locked(
 
 fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)> {
     let now = now_ms();
+    let interrupted_runs = control_restart_interrupted_runs_locked(conn)?;
+    let interrupted_approvals = control_restart_interrupted_approvals_locked(conn)?;
     let runs = conn
-                .execute(
-                    "UPDATE user_runs
+        .execute(
+            "UPDATE user_runs
                      SET status = 'interrupted', updated_at_ms = ?1, completed_at_ms = ?1,
-                         error_json = COALESCE(error_json, '{\"code\":\"process_restarted\",\"message\":\"milim stopped before this run completed.\"}')
-                     WHERE status IN ('accepted', 'running', 'waiting_approval', 'stopping')",
-                    params![now],
-                )
-                .map_err(sqlite)?;
+                         error_json = COALESCE(error_json, ?2)
+                     WHERE status IN ('accepted', 'running')",
+            params![now, CONTROL_RESTART_RUN_ERROR],
+        )
+        .map_err(sqlite)?;
     let approvals = conn
         .execute(
             "UPDATE user_pending_approvals
@@ -4814,11 +4876,15 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
             params![now],
         )
         .map_err(sqlite)?;
+    // No run is active at this point, so every pending steer lost its target.
+    // This also recovers steers left behind by older builds, whose run
+    // completion could race a late steer.
     conn.execute(
         "UPDATE user_run_inbox
                  SET kind = 'followup', target_run_id = NULL
                  WHERE kind = 'steer' AND state = 'pending'
-                   AND target_run_id IN (SELECT id FROM user_runs WHERE status = 'interrupted')",
+                   AND (target_run_id IS NULL OR target_run_id NOT IN
+                        (SELECT id FROM user_runs WHERE status IN ('accepted', 'running')))",
         [],
     )
     .map_err(sqlite)?;
@@ -4835,7 +4901,188 @@ fn reconcile_control_startup_locked(conn: &Connection) -> Result<(usize, usize)>
         params![now],
     )
     .map_err(sqlite)?;
+    append_control_restart_timeline_locked(conn, &interrupted_runs, &interrupted_approvals, now)?;
     Ok((runs, approvals))
+}
+
+// ----- Run lifecycle: approvals and timeline items a finished run leaves ----
+
+const CONTROL_RESTART_RUN_ERROR: &str =
+    r#"{"code":"process_restarted","message":"milim stopped before this run completed."}"#;
+
+impl UserDataStore {
+    /// Close every approval a finished run left pending and return the closed
+    /// records. The run's runtime is gone, so none of them can be delivered.
+    pub fn control_cancel_run_approvals(
+        &self,
+        run_id: &str,
+        decision_json: &str,
+    ) -> Result<Vec<ControlApprovalRecord>> {
+        let run_id = required_control_text(run_id, "run id")?;
+        validate_control_json(decision_json, "approval decision")?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| Error::Other("user data DB lock poisoned".into()))?;
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(sqlite)?;
+        let result = (|| -> Result<Vec<ControlApprovalRecord>> {
+            let now = now_ms();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, run_id, thread_id, kind, request_json, status,
+                            decision_json, created_at_ms, resolved_at_ms
+                     FROM user_pending_approvals WHERE run_id = ?1 AND status = 'pending'
+                     ORDER BY created_at_ms ASC",
+                )
+                .map_err(sqlite)?;
+            let mut approvals = stmt
+                .query_map(params![run_id], control_approval_from_row)
+                .map_err(sqlite)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sqlite)?;
+            conn.execute(
+                "UPDATE user_pending_approvals
+                 SET status = 'cancelled', decision_json = ?2, resolved_at_ms = ?3
+                 WHERE run_id = ?1 AND status = 'pending'",
+                params![run_id, decision_json, now],
+            )
+            .map_err(sqlite)?;
+            for approval in &mut approvals {
+                approval.status = "cancelled".into();
+                approval.decision_json = Some(decision_json.to_string());
+                approval.resolved_at_ms = Some(now);
+            }
+            Ok(approvals)
+        })();
+        finish_control_transaction(conn, result)
+    }
+}
+
+/// Runs a restart is about to interrupt: id, thread id, and the error each
+/// will report.
+fn control_restart_interrupted_runs_locked(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, thread_id, COALESCE(error_json, ?1) FROM user_runs
+             WHERE status IN ('accepted', 'running') ORDER BY created_at_ms ASC",
+        )
+        .map_err(sqlite)?;
+    let rows = stmt
+        .query_map(params![CONTROL_RESTART_RUN_ERROR], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(sqlite)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite)
+}
+
+/// Approvals a restart is about to interrupt: id, run id, and thread id.
+fn control_restart_interrupted_approvals_locked(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, run_id, thread_id FROM user_pending_approvals
+             WHERE status = 'pending' ORDER BY created_at_ms ASC",
+        )
+        .map_err(sqlite)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(sqlite)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite)
+}
+
+/// Record a restart in each affected timeline. Clients replay the timeline,
+/// so without these items an interrupted run keeps showing as working and its
+/// approvals stay actionable.
+fn append_control_restart_timeline_locked(
+    conn: &Connection,
+    runs: &[(String, String, String)],
+    approvals: &[(String, String, String)],
+    now: i64,
+) -> Result<()> {
+    for (approval_id, run_id, thread_id) in approvals {
+        let data = serde_json::json!({
+            "approval_id": approval_id,
+            "decision": "deny",
+            "status": "interrupted",
+            "reason": "process_restarted",
+        });
+        append_control_timeline_once_locked(
+            conn,
+            thread_id,
+            &format!("approval-interrupted:{approval_id}"),
+            Some(run_id),
+            "approval_resolved",
+            &data.to_string(),
+            now,
+        )?;
+    }
+    for (run_id, thread_id, error_json) in runs {
+        let data = serde_json::json!({
+            "run_id": run_id,
+            "status": "interrupted",
+            "error": serde_json::from_str::<serde_json::Value>(error_json)
+                .unwrap_or(serde_json::Value::Null),
+        });
+        append_control_timeline_once_locked(
+            conn,
+            thread_id,
+            &format!("run-interrupted:{run_id}"),
+            Some(run_id),
+            "run_status",
+            &data.to_string(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Append a timeline item unless the item was already recorded or its thread
+/// has no canonical timeline yet. Startup seeds an empty timeline from the
+/// thread's message history only while it is still empty.
+fn append_control_timeline_once_locked(
+    conn: &Connection,
+    thread_id: &str,
+    item_id: &str,
+    run_id: Option<&str>,
+    item_type: &str,
+    data_json: &str,
+    created_at_ms: i64,
+) -> Result<()> {
+    let has_timeline: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM user_thread_control WHERE thread_id = ?1)
+                AND EXISTS(SELECT 1 FROM user_timeline_events WHERE thread_id = ?1)",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite)?;
+    let recorded = conn
+        .query_row(
+            "SELECT 1 FROM user_timeline_events WHERE item_id = ?1",
+            params![item_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(sqlite)?
+        .is_some();
+    if has_timeline && !recorded {
+        append_control_timeline_locked(
+            conn,
+            thread_id,
+            item_id,
+            run_id,
+            item_type,
+            data_json,
+            created_at_ms,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_backup_state(
@@ -8440,14 +8687,18 @@ mod tests {
         );
         assert_eq!(target.control_queued_turns(None).unwrap().len(), 1);
         assert_eq!(target.control_runs(false).unwrap()[0].status, "interrupted");
+        let items = target
+            .control_timeline_page("thread-1", None, None, true, 10)
+            .unwrap()
+            .unwrap()
+            .items;
         assert_eq!(
-            target
-                .control_timeline_page("thread-1", None, None, true, 10)
-                .unwrap()
-                .unwrap()
-                .items
-                .len(),
-            1
+            items
+                .iter()
+                .map(|item| item.item_type.as_str())
+                .collect::<Vec<_>>(),
+            ["assistant_delta", "run_status"],
+            "the restored run's interruption is recorded after its output"
         );
     }
 
@@ -8909,5 +9160,298 @@ mod tests {
         drop(busy);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compaction_checkpoint_names_the_messages_it_replaces() {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread("thread-1", r#"{"id":"thread-1"}"#, "epoch-1")
+            .unwrap();
+        assert!(store
+            .control_compaction_checkpoint("thread-1")
+            .unwrap()
+            .is_none());
+        store
+            .control_put_run(&ControlRunRecord {
+                id: "run-1".into(),
+                thread_id: "thread-1".into(),
+                status: "completed".into(),
+                adapter: "provider".into(),
+                request_json: r#"{"text":"fixture"}"#.into(),
+                agent_snapshot_json: None,
+                native_session_json: None,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+                completed_at_ms: Some(2),
+                error_json: None,
+            })
+            .unwrap();
+        for (index, message) in [
+            r#"{"id":"user-1","role":"user","content":"one"}"#,
+            r#"{"id":"assistant-1","role":"assistant","content":"two"}"#,
+            r#"{"id":"user-2","role":"user","content":"three"}"#,
+            r#"{"id":"assistant-2","role":"assistant","content":"four"}"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store
+                .control_commit_message_projection_and_event(
+                    "thread-1",
+                    "run-1",
+                    &format!("item-{index}"),
+                    message,
+                    &format!("event-{index}"),
+                    None,
+                    "message_projected",
+                    "{}",
+                )
+                .unwrap();
+        }
+        // `/compact` inserts its checkpoint between the summarized head and
+        // the kept tail through the renderer's positional delta.
+        let checkpoint = r####"{"id":"checkpoint-1","role":"assistant","content":"### Context checkpoint\n\nThe user wants one and two.","compaction":{"kind":"checkpoint","createdAt":5}}"####;
+        let delta = |index: usize, message_json: &str| SessionMessageDelta {
+            index,
+            message_json: message_json.into(),
+        };
+        store
+            .apply_sessions_delta(SessionsDelta {
+                meta_json: r#"{"state":{"activeId":"thread-1"},"version":0}"#.into(),
+                session_order: vec!["thread-1".into()],
+                upserts: vec![SessionDelta {
+                    id: "thread-1".into(),
+                    session_json: None,
+                    runtime_binding_changes: Vec::new(),
+                    base_message_count: 4,
+                    message_count: 5,
+                    preserve_messages: false,
+                    messages: vec![
+                        delta(2, checkpoint),
+                        delta(3, r#"{"id":"user-2","role":"user","content":"three"}"#),
+                        delta(
+                            4,
+                            r#"{"id":"assistant-2","role":"assistant","content":"four"}"#,
+                        ),
+                    ],
+                }],
+                deleted_session_ids: Vec::new(),
+            })
+            .unwrap();
+
+        let (content, replaced) = store
+            .control_compaction_checkpoint("thread-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            content,
+            "### Context checkpoint\n\nThe user wants one and two."
+        );
+        assert_eq!(replaced, ["user-1", "assistant-1"]);
+        // The checkpoint lives only in the compatibility rows; the canonical
+        // timeline still holds every message.
+        assert_eq!(
+            store.control_projected_messages("thread-1").unwrap().len(),
+            4
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_lifecycle_tests {
+    use super::*;
+
+    fn run(id: &str, status: &str) -> ControlRunRecord {
+        ControlRunRecord {
+            id: id.into(),
+            thread_id: "thread-1".into(),
+            status: status.into(),
+            adapter: "mock".into(),
+            request_json: r#"{"text":"hello"}"#.into(),
+            agent_snapshot_json: None,
+            native_session_json: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            completed_at_ms: (status != "running").then_some(2),
+            error_json: None,
+        }
+    }
+
+    fn approval(id: &str, run_id: &str, status: &str) -> ControlApprovalRecord {
+        ControlApprovalRecord {
+            id: id.into(),
+            run_id: run_id.into(),
+            thread_id: "thread-1".into(),
+            kind: "command".into(),
+            request_json: r#"{"name":"shell","arguments":"{}"}"#.into(),
+            status: status.into(),
+            decision_json: None,
+            created_at_ms: 2,
+            resolved_at_ms: None,
+        }
+    }
+
+    fn steer(id: &str, run_id: &str) -> ControlInboxRecord {
+        ControlInboxRecord {
+            id: id.into(),
+            thread_id: "thread-1".into(),
+            target_run_id: Some(run_id.into()),
+            command_id: Some(format!("command-{id}")),
+            kind: "steer".into(),
+            state: "pending".into(),
+            payload_json: r#"{"text":"steer"}"#.into(),
+            created_at_ms: 3,
+            claimed_at_ms: None,
+            resolved_at_ms: None,
+        }
+    }
+
+    fn store_with_thread() -> UserDataStore {
+        let store = UserDataStore::new(Database::open_in_memory().unwrap()).unwrap();
+        store
+            .control_create_thread("thread-1", r#"{"id":"thread-1"}"#, "epoch-1")
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn cancelling_run_approvals_closes_only_that_runs_pending_requests() {
+        let store = store_with_thread();
+        store.control_put_run(&run("run-1", "running")).unwrap();
+        store.control_put_run(&run("run-2", "running")).unwrap();
+        store
+            .control_put_approval(&approval("pending-1", "run-1", "pending"))
+            .unwrap();
+        store
+            .control_put_approval(&approval("approved-1", "run-1", "approved"))
+            .unwrap();
+        store
+            .control_put_approval(&approval("pending-2", "run-2", "pending"))
+            .unwrap();
+
+        let decision = r#"{"decision":"deny","reason":"run_ended"}"#;
+        let closed = store
+            .control_cancel_run_approvals("run-1", decision)
+            .unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, "pending-1");
+        assert_eq!(closed[0].status, "cancelled");
+        let stored = store.control_approval("pending-1").unwrap().unwrap();
+        assert_eq!(stored.status, "cancelled");
+        assert_eq!(stored.decision_json.as_deref(), Some(decision));
+        assert!(stored.resolved_at_ms.is_some());
+        assert_eq!(
+            store
+                .control_approval("approved-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            "approved"
+        );
+        let pending = store.control_pending_approvals().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "pending-2");
+        assert!(store
+            .control_cancel_run_approvals("run-1", decision)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restart_records_interrupted_work_in_the_timeline_and_frees_stale_steers() {
+        let store = store_with_thread();
+        store
+            .control_put_run(&run("done-run", "completed"))
+            .unwrap();
+        store.control_put_run(&run("live-run", "running")).unwrap();
+        store
+            .control_append_timeline(
+                "thread-1",
+                "user-1",
+                Some("live-run"),
+                "message",
+                r#"{"id":"user-1","role":"user","content":"hello"}"#,
+            )
+            .unwrap();
+        store
+            .control_put_approval(&approval("approval-1", "live-run", "pending"))
+            .unwrap();
+        // A steer that landed after its run completed, and one on the run a
+        // restart interrupts. Both must become queued turns.
+        store
+            .control_put_inbox(&steer("late-steer", "done-run"))
+            .unwrap();
+        store
+            .control_put_inbox(&steer("live-steer", "live-run"))
+            .unwrap();
+
+        assert_eq!(store.reconcile_control_startup().unwrap(), (1, 1));
+
+        let page = store
+            .control_timeline_page("thread-1", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        let resolved = page
+            .items
+            .iter()
+            .find(|item| item.item_type == "approval_resolved")
+            .expect("interrupted approval is resolved in the timeline");
+        assert_eq!(resolved.run_id.as_deref(), Some("live-run"));
+        let data: serde_json::Value = serde_json::from_str(&resolved.data_json).unwrap();
+        assert_eq!(data["approval_id"], "approval-1");
+        assert_eq!(data["status"], "interrupted");
+        let status = page
+            .items
+            .iter()
+            .find(|item| item.item_type == "run_status")
+            .expect("interrupted run reports its terminal status");
+        assert!(resolved.seq < status.seq);
+        let data: serde_json::Value = serde_json::from_str(&status.data_json).unwrap();
+        assert_eq!(data["run_id"], "live-run");
+        assert_eq!(data["status"], "interrupted");
+        assert_eq!(data["error"]["code"], "process_restarted");
+        assert_eq!(
+            store
+                .control_run("live-run")
+                .unwrap()
+                .unwrap()
+                .error_json
+                .as_deref(),
+            Some(CONTROL_RESTART_RUN_ERROR)
+        );
+
+        let queued = store.control_queued_turns(Some("thread-1")).unwrap();
+        assert_eq!(queued.len(), 2);
+        assert!(store
+            .control_pending_inbox(Some("thread-1"))
+            .unwrap()
+            .iter()
+            .all(|item| item.kind == "followup" && item.target_run_id.is_none()));
+
+        assert_eq!(store.reconcile_control_startup().unwrap(), (0, 0));
+        let again = store
+            .control_timeline_page("thread-1", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.items.len(), page.items.len());
+    }
+
+    #[test]
+    fn restart_leaves_a_thread_without_a_timeline_for_history_backfill() {
+        let store = store_with_thread();
+        store.control_put_run(&run("live-run", "running")).unwrap();
+
+        assert_eq!(store.reconcile_control_startup().unwrap(), (1, 0));
+
+        assert_eq!(
+            store.control_run("live-run").unwrap().unwrap().status,
+            "interrupted"
+        );
+        let page = store
+            .control_timeline_page("thread-1", None, None, true, 50)
+            .unwrap()
+            .unwrap();
+        assert!(page.items.is_empty());
     }
 }

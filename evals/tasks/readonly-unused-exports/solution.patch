@@ -1,0 +1,18 @@
+diff --git a/ANSWER.json b/ANSWER.json
+new file mode 100644
+index 0000000..fe65e30
+--- /dev/null
++++ b/ANSWER.json
+@@ -0,0 +1,12 @@
++{
++  "unused": [
++    "src/features/legacy-sync.js#legacySync",
++    "src/features/report.js#exportCsv",
++    "src/features/sync.js#dryRun",
++    "src/lib/args.js#helpText",
++    "src/lib/args.js#parseFlags",
++    "src/lib/numbers.js#median",
++    "src/lib/numbers.js#sum",
++    "src/lib/strings.js#shout"
++  ]
++}

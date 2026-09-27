@@ -1,0 +1,904 @@
+{
+  "items": [
+    {
+      "sku": "SKU-0001",
+      "warehouse": "south",
+      "stock": 14,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0002",
+      "warehouse": "south",
+      "stock": 24,
+      "reorder_point": 71
+    },
+    {
+      "sku": "SKU-0003",
+      "warehouse": "east",
+      "stock": 32,
+      "reorder_point": 28
+    },
+    {
+      "sku": "SKU-0004",
+      "warehouse": "east",
+      "stock": 2,
+      "reorder_point": 66
+    },
+    {
+      "sku": "SKU-0005",
+      "warehouse": "south",
+      "stock": 41,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0006",
+      "warehouse": "south",
+      "stock": 61,
+      "reorder_point": 35
+    },
+    {
+      "sku": "SKU-0007",
+      "warehouse": "east",
+      "stock": 89,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0008",
+      "warehouse": "east",
+      "stock": 66,
+      "reorder_point": 39
+    },
+    {
+      "sku": "SKU-0009",
+      "warehouse": "east",
+      "stock": 104,
+      "reorder_point": 52
+    },
+    {
+      "sku": "SKU-0010",
+      "warehouse": "south",
+      "stock": 12,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0011",
+      "warehouse": "east",
+      "stock": 12,
+      "reorder_point": 41
+    },
+    {
+      "sku": "SKU-0012",
+      "warehouse": "east",
+      "stock": 53,
+      "reorder_point": 60
+    },
+    {
+      "sku": "SKU-0013",
+      "warehouse": "south",
+      "stock": 101,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0014",
+      "warehouse": "north",
+      "stock": 91,
+      "reorder_point": 41
+    },
+    {
+      "sku": "SKU-0015",
+      "warehouse": "east",
+      "stock": 68,
+      "reorder_point": 22
+    },
+    {
+      "sku": "SKU-0016",
+      "warehouse": "north",
+      "stock": 75,
+      "reorder_point": 37
+    },
+    {
+      "sku": "SKU-0017",
+      "warehouse": "south",
+      "stock": 33,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0018",
+      "warehouse": "north",
+      "stock": 82,
+      "reorder_point": 21
+    },
+    {
+      "sku": "SKU-0019",
+      "warehouse": "south",
+      "stock": 26,
+      "reorder_point": 53
+    },
+    {
+      "sku": "SKU-0020",
+      "warehouse": "north",
+      "stock": 46,
+      "reorder_point": 73
+    },
+    {
+      "sku": "SKU-0021",
+      "warehouse": "north",
+      "stock": 29,
+      "reorder_point": 42
+    },
+    {
+      "sku": "SKU-0022",
+      "warehouse": "east",
+      "stock": 19,
+      "reorder_point": 77
+    },
+    {
+      "sku": "SKU-0023",
+      "warehouse": "south",
+      "stock": 40,
+      "reorder_point": 67
+    },
+    {
+      "sku": "SKU-0024",
+      "warehouse": "north",
+      "stock": 30,
+      "reorder_point": 36
+    },
+    {
+      "sku": "SKU-0025",
+      "warehouse": "north",
+      "stock": 25,
+      "reorder_point": 41
+    },
+    {
+      "sku": "SKU-0026",
+      "warehouse": "north",
+      "stock": 18,
+      "reorder_point": 51
+    },
+    {
+      "sku": "SKU-0027",
+      "warehouse": "south",
+      "stock": 5,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0028",
+      "warehouse": "east",
+      "stock": 75,
+      "reorder_point": 44
+    },
+    {
+      "sku": "SKU-0029",
+      "warehouse": "south",
+      "stock": 53,
+      "reorder_point": 34
+    },
+    {
+      "sku": "SKU-0030",
+      "warehouse": "south",
+      "stock": 108,
+      "reorder_point": 47
+    },
+    {
+      "sku": "SKU-0031",
+      "warehouse": "south",
+      "stock": 89,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0032",
+      "warehouse": "east",
+      "stock": 31,
+      "reorder_point": 32
+    },
+    {
+      "sku": "SKU-0033",
+      "warehouse": "east",
+      "stock": 16,
+      "reorder_point": 25
+    },
+    {
+      "sku": "SKU-0034",
+      "warehouse": "south",
+      "stock": 83,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0035",
+      "warehouse": "east",
+      "stock": 47,
+      "reorder_point": 37
+    },
+    {
+      "sku": "SKU-0036",
+      "warehouse": "north",
+      "stock": 72,
+      "reorder_point": 22
+    },
+    {
+      "sku": "SKU-0037",
+      "warehouse": "south",
+      "stock": 78,
+      "reorder_point": 64
+    },
+    {
+      "sku": "SKU-0038",
+      "warehouse": "east",
+      "stock": 49,
+      "reorder_point": 38
+    },
+    {
+      "sku": "SKU-0039",
+      "warehouse": "south",
+      "stock": 59,
+      "reorder_point": 38
+    },
+    {
+      "sku": "SKU-0040",
+      "warehouse": "north",
+      "stock": 61,
+      "reorder_point": 77
+    },
+    {
+      "sku": "SKU-0041",
+      "warehouse": "north",
+      "stock": 34,
+      "reorder_point": 34
+    },
+    {
+      "sku": "SKU-0042",
+      "warehouse": "north",
+      "stock": 90,
+      "reorder_point": 33
+    },
+    {
+      "sku": "SKU-0043",
+      "warehouse": "east",
+      "stock": 94,
+      "reorder_point": 33
+    },
+    {
+      "sku": "SKU-0044",
+      "warehouse": "south",
+      "stock": 67,
+      "reorder_point": 62
+    },
+    {
+      "sku": "SKU-0045",
+      "warehouse": "north",
+      "stock": 63,
+      "reorder_point": 39
+    },
+    {
+      "sku": "SKU-0046",
+      "warehouse": "south",
+      "stock": 17,
+      "reorder_point": 46
+    },
+    {
+      "sku": "SKU-0047",
+      "warehouse": "south",
+      "stock": 66,
+      "reorder_point": 75
+    },
+    {
+      "sku": "SKU-0048",
+      "warehouse": "north",
+      "stock": 7,
+      "reorder_point": 42
+    },
+    {
+      "sku": "SKU-0049",
+      "warehouse": "south",
+      "stock": 74,
+      "reorder_point": 27
+    },
+    {
+      "sku": "SKU-0050",
+      "warehouse": "north",
+      "stock": 75,
+      "reorder_point": 23
+    },
+    {
+      "sku": "SKU-0051",
+      "warehouse": "east",
+      "stock": 16,
+      "reorder_point": 31
+    },
+    {
+      "sku": "SKU-0052",
+      "warehouse": "north",
+      "stock": 16,
+      "reorder_point": 42
+    },
+    {
+      "sku": "SKU-0053",
+      "warehouse": "north",
+      "stock": 99,
+      "reorder_point": 74
+    },
+    {
+      "sku": "SKU-0054",
+      "warehouse": "east",
+      "stock": 23,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0055",
+      "warehouse": "east",
+      "stock": 7,
+      "reorder_point": 63
+    },
+    {
+      "sku": "SKU-0056",
+      "warehouse": "north",
+      "stock": 7,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0057",
+      "warehouse": "north",
+      "stock": 108,
+      "reorder_point": 74
+    },
+    {
+      "sku": "SKU-0058",
+      "warehouse": "east",
+      "stock": 33,
+      "reorder_point": 68
+    },
+    {
+      "sku": "SKU-0059",
+      "warehouse": "east",
+      "stock": 21,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0060",
+      "warehouse": "east",
+      "stock": 73,
+      "reorder_point": 58
+    },
+    {
+      "sku": "SKU-0061",
+      "warehouse": "east",
+      "stock": 87,
+      "reorder_point": 40
+    },
+    {
+      "sku": "SKU-0062",
+      "warehouse": "south",
+      "stock": 101,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0063",
+      "warehouse": "south",
+      "stock": 32,
+      "reorder_point": 22
+    },
+    {
+      "sku": "SKU-0064",
+      "warehouse": "north",
+      "stock": 43,
+      "reorder_point": 43
+    },
+    {
+      "sku": "SKU-0065",
+      "warehouse": "north",
+      "stock": 33,
+      "reorder_point": 31
+    },
+    {
+      "sku": "SKU-0066",
+      "warehouse": "south",
+      "stock": 60,
+      "reorder_point": 38
+    },
+    {
+      "sku": "SKU-0067",
+      "warehouse": "east",
+      "stock": 45,
+      "reorder_point": 29
+    },
+    {
+      "sku": "SKU-0068",
+      "warehouse": "south",
+      "stock": 103,
+      "reorder_point": 62
+    },
+    {
+      "sku": "SKU-0069",
+      "warehouse": "south",
+      "stock": 105,
+      "reorder_point": 52
+    },
+    {
+      "sku": "SKU-0070",
+      "warehouse": "south",
+      "stock": 7,
+      "reorder_point": 44
+    },
+    {
+      "sku": "SKU-0071",
+      "warehouse": "south",
+      "stock": 9,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0072",
+      "warehouse": "north",
+      "stock": 89,
+      "reorder_point": 35
+    },
+    {
+      "sku": "SKU-0073",
+      "warehouse": "east",
+      "stock": 77,
+      "reorder_point": 34
+    },
+    {
+      "sku": "SKU-0074",
+      "warehouse": "east",
+      "stock": 106,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0075",
+      "warehouse": "north",
+      "stock": 108,
+      "reorder_point": 53
+    },
+    {
+      "sku": "SKU-0076",
+      "warehouse": "east",
+      "stock": 79,
+      "reorder_point": 26
+    },
+    {
+      "sku": "SKU-0077",
+      "warehouse": "north",
+      "stock": 43,
+      "reorder_point": 47
+    },
+    {
+      "sku": "SKU-0078",
+      "warehouse": "north",
+      "stock": 77,
+      "reorder_point": 32
+    },
+    {
+      "sku": "SKU-0079",
+      "warehouse": "east",
+      "stock": 64,
+      "reorder_point": 43
+    },
+    {
+      "sku": "SKU-0080",
+      "warehouse": "north",
+      "stock": 43,
+      "reorder_point": 23
+    },
+    {
+      "sku": "SKU-0081",
+      "warehouse": "north",
+      "stock": 41,
+      "reorder_point": 32
+    },
+    {
+      "sku": "SKU-0082",
+      "warehouse": "east",
+      "stock": 15,
+      "reorder_point": 75
+    },
+    {
+      "sku": "SKU-0083",
+      "warehouse": "south",
+      "stock": 0,
+      "reorder_point": 52
+    },
+    {
+      "sku": "SKU-0084",
+      "warehouse": "east",
+      "stock": 44,
+      "reorder_point": 67
+    },
+    {
+      "sku": "SKU-0085",
+      "warehouse": "south",
+      "stock": 41,
+      "reorder_point": 78
+    },
+    {
+      "sku": "SKU-0086",
+      "warehouse": "east",
+      "stock": 61,
+      "reorder_point": 60
+    },
+    {
+      "sku": "SKU-0087",
+      "warehouse": "east",
+      "stock": 7,
+      "reorder_point": 30
+    },
+    {
+      "sku": "SKU-0088",
+      "warehouse": "south",
+      "stock": 105,
+      "reorder_point": 52
+    },
+    {
+      "sku": "SKU-0089",
+      "warehouse": "east",
+      "stock": 3,
+      "reorder_point": 25
+    },
+    {
+      "sku": "SKU-0090",
+      "warehouse": "east",
+      "stock": 63,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0091",
+      "warehouse": "north",
+      "stock": 35,
+      "reorder_point": 24
+    },
+    {
+      "sku": "SKU-0092",
+      "warehouse": "north",
+      "stock": 88,
+      "reorder_point": 79
+    },
+    {
+      "sku": "SKU-0093",
+      "warehouse": "south",
+      "stock": 80,
+      "reorder_point": 46
+    },
+    {
+      "sku": "SKU-0094",
+      "warehouse": "north",
+      "stock": 104,
+      "reorder_point": 68
+    },
+    {
+      "sku": "SKU-0095",
+      "warehouse": "east",
+      "stock": 50,
+      "reorder_point": 28
+    },
+    {
+      "sku": "SKU-0096",
+      "warehouse": "north",
+      "stock": 71,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0097",
+      "warehouse": "south",
+      "stock": 60,
+      "reorder_point": 51
+    },
+    {
+      "sku": "SKU-0098",
+      "warehouse": "south",
+      "stock": 21,
+      "reorder_point": 20
+    },
+    {
+      "sku": "SKU-0099",
+      "warehouse": "north",
+      "stock": 37,
+      "reorder_point": 54
+    },
+    {
+      "sku": "SKU-0100",
+      "warehouse": "south",
+      "stock": 100,
+      "reorder_point": 47
+    },
+    {
+      "sku": "SKU-0101",
+      "warehouse": "south",
+      "stock": 50,
+      "reorder_point": 30
+    },
+    {
+      "sku": "SKU-0102",
+      "warehouse": "east",
+      "stock": 37,
+      "reorder_point": 21
+    },
+    {
+      "sku": "SKU-0103",
+      "warehouse": "south",
+      "stock": 82,
+      "reorder_point": 41
+    },
+    {
+      "sku": "SKU-0104",
+      "warehouse": "south",
+      "stock": 50,
+      "reorder_point": 35
+    },
+    {
+      "sku": "SKU-0105",
+      "warehouse": "north",
+      "stock": 7,
+      "reorder_point": 40
+    },
+    {
+      "sku": "SKU-0106",
+      "warehouse": "north",
+      "stock": 43,
+      "reorder_point": 23
+    },
+    {
+      "sku": "SKU-0107",
+      "warehouse": "east",
+      "stock": 49,
+      "reorder_point": 46
+    },
+    {
+      "sku": "SKU-0108",
+      "warehouse": "south",
+      "stock": 87,
+      "reorder_point": 42
+    },
+    {
+      "sku": "SKU-0109",
+      "warehouse": "south",
+      "stock": 73,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0110",
+      "warehouse": "east",
+      "stock": 37,
+      "reorder_point": 31
+    },
+    {
+      "sku": "SKU-0111",
+      "warehouse": "south",
+      "stock": 15,
+      "reorder_point": 67
+    },
+    {
+      "sku": "SKU-0112",
+      "warehouse": "north",
+      "stock": 100,
+      "reorder_point": 73
+    },
+    {
+      "sku": "SKU-0113",
+      "warehouse": "east",
+      "stock": 27,
+      "reorder_point": 78
+    },
+    {
+      "sku": "SKU-0114",
+      "warehouse": "north",
+      "stock": 66,
+      "reorder_point": 27
+    },
+    {
+      "sku": "SKU-0115",
+      "warehouse": "south",
+      "stock": 49,
+      "reorder_point": 71
+    },
+    {
+      "sku": "SKU-0116",
+      "warehouse": "east",
+      "stock": 58,
+      "reorder_point": 69
+    },
+    {
+      "sku": "SKU-0117",
+      "warehouse": "east",
+      "stock": 84,
+      "reorder_point": 59
+    },
+    {
+      "sku": "SKU-0118",
+      "warehouse": "north",
+      "stock": 44,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0119",
+      "warehouse": "north",
+      "stock": 8,
+      "reorder_point": 55
+    },
+    {
+      "sku": "SKU-0120",
+      "warehouse": "north",
+      "stock": 83,
+      "reorder_point": 42
+    },
+    {
+      "sku": "SKU-0121",
+      "warehouse": "north",
+      "stock": 101,
+      "reorder_point": 63
+    },
+    {
+      "sku": "SKU-0122",
+      "warehouse": "south",
+      "stock": 51,
+      "reorder_point": 49
+    },
+    {
+      "sku": "SKU-0123",
+      "warehouse": "south",
+      "stock": 72,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0124",
+      "warehouse": "south",
+      "stock": 15,
+      "reorder_point": 63
+    },
+    {
+      "sku": "SKU-0125",
+      "warehouse": "south",
+      "stock": 5,
+      "reorder_point": 20
+    },
+    {
+      "sku": "SKU-0126",
+      "warehouse": "east",
+      "stock": 104,
+      "reorder_point": 22
+    },
+    {
+      "sku": "SKU-0127",
+      "warehouse": "north",
+      "stock": 3,
+      "reorder_point": 56
+    },
+    {
+      "sku": "SKU-0128",
+      "warehouse": "east",
+      "stock": 82,
+      "reorder_point": 52
+    },
+    {
+      "sku": "SKU-0129",
+      "warehouse": "north",
+      "stock": 8,
+      "reorder_point": 64
+    },
+    {
+      "sku": "SKU-0130",
+      "warehouse": "north",
+      "stock": 62,
+      "reorder_point": 74
+    },
+    {
+      "sku": "SKU-0131",
+      "warehouse": "east",
+      "stock": 98,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0132",
+      "warehouse": "south",
+      "stock": 79,
+      "reorder_point": 48
+    },
+    {
+      "sku": "SKU-0133",
+      "warehouse": "south",
+      "stock": 58,
+      "reorder_point": 45
+    },
+    {
+      "sku": "SKU-0134",
+      "warehouse": "north",
+      "stock": 23,
+      "reorder_point": 79
+    },
+    {
+      "sku": "SKU-0135",
+      "warehouse": "east",
+      "stock": 15,
+      "reorder_point": 28
+    },
+    {
+      "sku": "SKU-0136",
+      "warehouse": "south",
+      "stock": 52,
+      "reorder_point": 36
+    },
+    {
+      "sku": "SKU-0137",
+      "warehouse": "north",
+      "stock": 9,
+      "reorder_point": 73
+    },
+    {
+      "sku": "SKU-0138",
+      "warehouse": "north",
+      "stock": 79,
+      "reorder_point": 21
+    },
+    {
+      "sku": "SKU-0139",
+      "warehouse": "east",
+      "stock": 28,
+      "reorder_point": 77
+    },
+    {
+      "sku": "SKU-0140",
+      "warehouse": "north",
+      "stock": 54,
+      "reorder_point": 23
+    },
+    {
+      "sku": "SKU-0141",
+      "warehouse": "north",
+      "stock": 13,
+      "reorder_point": 70
+    },
+    {
+      "sku": "SKU-0142",
+      "warehouse": "north",
+      "stock": 50,
+      "reorder_point": 65
+    },
+    {
+      "sku": "SKU-0143",
+      "warehouse": "south",
+      "stock": 70,
+      "reorder_point": 27
+    },
+    {
+      "sku": "SKU-0144",
+      "warehouse": "north",
+      "stock": 29,
+      "reorder_point": 32
+    },
+    {
+      "sku": "SKU-0145",
+      "warehouse": "north",
+      "stock": 33,
+      "reorder_point": 41
+    },
+    {
+      "sku": "SKU-0146",
+      "warehouse": "north",
+      "stock": 89,
+      "reorder_point": 69
+    },
+    {
+      "sku": "SKU-0147",
+      "warehouse": "south",
+      "stock": 78,
+      "reorder_point": 72
+    },
+    {
+      "sku": "SKU-0148",
+      "warehouse": "north",
+      "stock": 1,
+      "reorder_point": 61
+    },
+    {
+      "sku": "SKU-0149",
+      "warehouse": "north",
+      "stock": 13,
+      "reorder_point": 74
+    },
+    {
+      "sku": "SKU-0150",
+      "warehouse": "north",
+      "stock": 103,
+      "reorder_point": 69
+    }
+  ]
+}
