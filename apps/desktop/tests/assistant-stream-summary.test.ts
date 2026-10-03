@@ -91,6 +91,8 @@ const server = await createServer({
 });
 
 try {
+  // Finish lazy Markdown compilation before rendering can race Vite teardown.
+  await server.ssrLoadModule("/src/components/Markdown.tsx");
   const { formatRunDuration } = (await server.ssrLoadModule(
     "/src/components/RunTimeline.tsx",
   )) as {

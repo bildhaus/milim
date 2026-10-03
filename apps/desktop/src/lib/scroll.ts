@@ -12,6 +12,20 @@ export function isNearScrollBottom(metrics: ScrollMetrics, threshold = CHAT_SCRO
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
 }
 
+export function shouldFollowAfterScroll(
+  metrics: ScrollMetrics,
+  following: boolean,
+  lastScrollTop: number | null,
+): boolean {
+  // Scroll events can arrive after content grows again, including duplicate
+  // events at an already-observed position. Only movement can detach follow.
+  return isNearScrollBottom(metrics) || (
+    following &&
+    lastScrollTop !== null &&
+    Math.abs(metrics.scrollTop - lastScrollTop) < 1
+  );
+}
+
 export function followScrollTop(metrics: Pick<ScrollMetrics, "scrollHeight" | "clientHeight">): number {
   return Math.max(0, metrics.scrollHeight - metrics.clientHeight);
 }

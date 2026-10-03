@@ -252,10 +252,10 @@ import {
 } from "../lib/goals";
 import {
   followScrollTop,
-  isNearScrollBottom,
   peekEnteringMessageIds,
   scrollTopForRestoredAnchor,
   scrollTopAfterLayoutChange,
+  shouldFollowAfterScroll,
   transcriptMessageRenderId,
   transcriptSpacerHeight,
 } from "../lib/scroll";
@@ -2466,6 +2466,7 @@ export function ChatView({
   const contextLauncherRef = useRef<HTMLButtonElement>(null);
   const emptyDockTopRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef<number | null>(null);
   const olderMessagePageRef = useRef<string | null>(null);
   const messageRowHeightsRef = useRef(
     new Map<string, Map<string, { height: number; index: number }>>(),
@@ -2665,7 +2666,10 @@ export function ChatView({
     const el = chatScrollRef.current;
     if (el && stickToBottomRef.current) {
       const nextTop = followScrollTop(el);
-      if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+      if (nextTop !== el.scrollTop) {
+        el.scrollTop = nextTop;
+        lastScrollTopRef.current = el.scrollTop;
+      }
     }
     scheduleTranscriptScrollCorrection();
   }
@@ -2683,7 +2687,10 @@ export function ChatView({
       if (stickToBottomRef.current) {
         pendingScrollDeltaRef.current = 0;
         const nextTop = followScrollTop(el);
-        if (nextTop !== el.scrollTop) el.scrollTop = nextTop;
+        if (nextTop !== el.scrollTop) {
+          el.scrollTop = nextTop;
+          lastScrollTopRef.current = el.scrollTop;
+        }
         return;
       }
       const delta = pendingScrollDeltaRef.current;
@@ -3387,7 +3394,12 @@ export function ChatView({
   function updateAutoScrollCoupling() {
     const el = chatScrollRef.current;
     if (!el) return;
-    const following = isNearScrollBottom(el);
+    const following = shouldFollowAfterScroll(
+      el,
+      stickToBottomRef.current,
+      lastScrollTopRef.current,
+    );
+    lastScrollTopRef.current = el.scrollTop;
     stickToBottomRef.current = following;
     setShowJumpToLatest(!following);
     const estimate = estimatedMessageRowHeight();
@@ -3441,6 +3453,7 @@ export function ChatView({
       pendingScrollDeltaRef.current = 0;
       if (enteringMessageIds.length) setEnteringMessageIds([]);
       stickToBottomRef.current = true;
+      lastScrollTopRef.current = null;
       setShowJumpToLatest(false);
       if (dock) {
         dock.style.transition = "";

@@ -946,10 +946,10 @@ impl AnthropicStreamState {
     /// (a `thinking` signature or `redacted_thinking` data); unsigned
     /// blocks cannot be replayed.
     fn close_block(&mut self, index: u32) {
-        if !self
+        if self
             .open_thinking
             .as_ref()
-            .is_some_and(|(open, _, _)| *open == index)
+            .is_none_or(|(open, _, _)| *open != index)
         {
             return;
         }

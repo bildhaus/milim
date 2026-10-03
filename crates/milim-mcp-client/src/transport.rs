@@ -257,6 +257,10 @@ async fn write_json(stdin: &Arc<Mutex<ChildStdin>>, value: &Value) -> Result<()>
 // ----- Streamable HTTP -----
 
 /// Supplies OAuth bearer tokens for an HTTP server.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait]
 pub(crate) trait BearerSource: Send + Sync {
     /// The current access token, refreshing first when `force_refresh` is set

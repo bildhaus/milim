@@ -166,17 +166,20 @@ for (const needle of [
 assertNotIncludes(ciWorkflow, "--deny warnings", "CI dependency audit");
 assertNotIncludes(ciWorkflow, "schedule:", "CI workflow");
 for (const needle of [
-  "  schedule:",
+  "  push:\n    branches: [main]",
+  "  workflow_dispatch:",
   "runs-on: windows-2022",
   "pnpm -C apps/desktop install --frozen-lockfile",
   "run: pnpm -C apps/desktop verify:tauri",
   "run: pnpm -C apps/desktop test:tauri-webview",
-  "run: pnpm -C apps/desktop perf:suite:enforce",
+  "run: pnpm -C apps/desktop perf:suite",
 ]) {
   assertIncludes(nightlyWorkflow, needle, "nightly workflow");
 }
 assertBefore(nightlyWorkflow, "verify:tauri", "test:tauri-webview", "nightly workflow");
 assertNotIncludes(nightlyWorkflow, "pull_request:", "nightly workflow");
+assertNotIncludes(nightlyWorkflow, "schedule:", "desktop integration workflow");
+assertNotIncludes(nightlyWorkflow, "perf:suite:enforce", "hosted-runner performance reporting");
 assertNotIncludes(ciWorkflow, 'tags: ["v*"]', "CI workflow");
 assertNotIncludes(ciWorkflow, "runtime-evidence:", "CI workflow");
 assertLineOccurrences(releaseWorkflow, '    tags: ["v*"]', 1, "Release workflow trigger");

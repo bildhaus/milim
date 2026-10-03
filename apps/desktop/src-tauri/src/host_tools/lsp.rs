@@ -571,7 +571,7 @@ impl LspManager {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn server_count(&self) -> usize {
         self.servers
             .lock()

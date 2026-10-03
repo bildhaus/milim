@@ -103,6 +103,10 @@ pub struct StopInterception {
     pub activity: Vec<HookActivity>,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait::async_trait]
 pub trait ToolInterceptor: std::fmt::Debug + Send + Sync {
     /// Runs once per turn, before its first model step.

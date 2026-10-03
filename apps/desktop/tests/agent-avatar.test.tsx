@@ -20,6 +20,8 @@ const server = await createServer({
 });
 
 try {
+  // Finish lazy Markdown compilation before rendering can race Vite teardown.
+  await server.ssrLoadModule("/src/components/Markdown.tsx");
   const api = (await server.ssrLoadModule("/src/api.ts")) as {
     agentAvatarSeed: (agent: { id?: string; name?: string; avatar?: string }) => string;
     parseAgentDraftResponse: (text: string) => { avatar: string };

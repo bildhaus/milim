@@ -48,6 +48,10 @@ pub struct WebSearchApi {
 
 /// Resolves the configured search API at call time, so key changes apply to
 /// the next search without rebuilding the registry.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait]
 pub trait WebSearchApiSource: Send + Sync {
     async fn api(&self) -> Option<WebSearchApi>;

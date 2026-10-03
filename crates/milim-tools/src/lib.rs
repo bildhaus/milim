@@ -36,6 +36,10 @@ pub use web_search::{
 };
 
 /// A callable tool exposed to agents and MCP clients.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Unique tool name (the call identifier).
