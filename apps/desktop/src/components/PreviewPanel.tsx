@@ -537,7 +537,13 @@ export function PreviewPanel({
       setRuntimeDetailsOpen(false);
       return;
     }
-    if (becameHealthy && runtimePanelFocused) focusRuntimeStatusTrigger();
+    if (becameHealthy && runtimePanelFocused) {
+      const panelHadFocus = runtimePanelRef.current?.contains(document.activeElement);
+      // Hiding or removing the panel can bypass blur. Do not keep healthy
+      // details open just because their previous focus state survived.
+      setRuntimePanelFocused(false);
+      if (panelHadFocus) focusRuntimeStatusTrigger();
+    }
   }, [runtimeHealthy, runtimePanelFocused]);
 
   useEffect(() => {

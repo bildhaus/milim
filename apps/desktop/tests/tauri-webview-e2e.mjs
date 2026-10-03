@@ -2368,6 +2368,12 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await reviewCommands.getByText("Review commands", { exact: true }).waitFor();
     await reviewCommands.click();
     await reviewCommands.getByText("Refresh commands", { exact: true }).waitFor();
+    // Native tab/focus changes can hide the runtime without delivering blur.
+    // Reproduce that lost event so readiness must clear the stale focus state.
+    await reviewCommands.focus();
+    await reviewCommands.evaluate((button) => {
+      button.ownerDocument.addEventListener("focusout", (event) => event.stopPropagation(), { capture: true, once: true });
+    });
     await page.getByRole("tab", { name: "Code", exact: true }).click();
 
     const workspaceSearch = page.getByRole("textbox", { name: "Search workspace files", exact: true });
