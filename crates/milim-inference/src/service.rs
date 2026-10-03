@@ -145,6 +145,10 @@ pub struct CompletionOutput {
 ///
 /// Backends only implement [`stream`](ModelService::stream); the default
 /// [`complete`](ModelService::complete) assembles a full message from it.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait]
 pub trait ModelService: Send + Sync {
     /// Stable backend label (e.g. `"test"`, `"openai"`, `"ollama"`).

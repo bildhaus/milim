@@ -141,6 +141,10 @@ pub struct ContextCompaction {
     pub summary_error: Option<String>,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait expansion triggers rust-clippy#17529"
+)]
 #[async_trait::async_trait]
 pub trait AgentStepHook: std::fmt::Debug + Send + Sync {
     async fn commit_tool_catalog(&self, _tools: &[ToolExecutionSpec]) -> Result<()> {
