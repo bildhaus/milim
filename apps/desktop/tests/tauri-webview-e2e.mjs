@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2340,7 +2340,9 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
   await page.locator(".app-notices").waitFor({ state: "hidden", timeout: 8_000 }).catch(() => {});
-  const workspace = mkdtempSync(join(tmpdir(), "milim-static-preview-e2e-"));
+  // Hosted Windows temp paths can contain 8.3 aliases (RUNNER~1), while the
+  // static server returns a canonical cwd used to match the runtime to its chat.
+  const workspace = realpathSync.native(mkdtempSync(join(tmpdir(), "milim-static-preview-e2e-")));
   const indexPath = join(workspace, "index.html");
   writeFileSync(
     indexPath,
