@@ -23,7 +23,7 @@ Everything uses Node 22+ built-ins. There are no npm dependencies.
 ## Run it against the desktop app
 
 The suite always targets the real Tauri desktop app: a release build, or the
-debug binary that `pnpm -C apps/desktop verify:tauri` builds (the nightly job
+debug binary that `pnpm -C apps/desktop verify:tauri` builds (the integration job
 uses that one). `/control/v1` is served by the Rust host inside the app, so a
 browser tab or the Vite dev server is never a valid target.
 
@@ -118,9 +118,9 @@ node evals/validate.mjs                 # grader validation; no app or model nee
 run, and reads its ledger. It checks the control API and credentials, not an
 agent.
 
-## Scheduled evals
+## Integration evals
 
-The `desktop-macos-launch` job in `.github/workflows/nightly.yml` builds the
+The Desktop integration workflow (`.github/workflows/nightly.yml`) runs on pushes to `main` and manual dispatch, with no daily schedule. Its `desktop-macos-launch` job builds the
 real Tauri debug binary and runs the control smoke. After that it launches a
 fresh instance of the same binary (new `MILIM_HOME`) and runs a small, cheap
 task subset with `run.mjs` over the control file, but only when both of these
@@ -347,7 +347,7 @@ A `wrong-*` solution for the most likely mistake keeps the grader honest.
 ## Limitations
 
 - The runner needs a running desktop app; it does not start one. Only the
-  nightly job launches the debug binary itself.
+  integration job launches the debug binary itself.
 - Approval mode Open gives the agent full access within the temporary
   workspace and runs host commands without asking. Run the suite only on a
   machine you trust with the model you are testing.

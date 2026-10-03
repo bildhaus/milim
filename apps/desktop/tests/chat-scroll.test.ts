@@ -5,6 +5,7 @@ import {
   peekEnteringMessageIds,
   scrollTopForRestoredAnchor,
   scrollTopAfterLayoutChange,
+  shouldFollowAfterScroll,
   transcriptMessageRenderId,
   transcriptSpacerHeight,
 } from "../src/lib/scroll.js";
@@ -49,6 +50,47 @@ assert(
 assert(
   followScrollTop({ scrollHeight: 820, clientHeight: 500 }) === 320,
   "follow target should update when the thread grows",
+);
+
+// Replay the streaming race: scrolling to one chunk's bottom queues a scroll
+// event, then the next Markdown chunk grows before that event is delivered.
+const streamingScroll = { scrollTop: 500, scrollHeight: 1_000, clientHeight: 500 };
+const correctedTop = followScrollTop(streamingScroll);
+streamingScroll.scrollHeight += 400;
+const followsDelayedCorrection = shouldFollowAfterScroll(streamingScroll, true, correctedTop);
+assert(followsDelayedCorrection, "a delayed automatic scroll event must not detach streaming follow");
+assert(
+  shouldFollowAfterScroll(streamingScroll, followsDelayedCorrection, streamingScroll.scrollTop),
+  "a duplicate scroll event at the observed position must also preserve follow",
+);
+streamingScroll.scrollTop = scrollTopAfterLayoutChange(streamingScroll, followsDelayedCorrection);
+assert(isNearScrollBottom(streamingScroll), "the next layout correction should catch up with streamed content");
+
+// Wheel, keyboard, touch, and scrollbar movement change scrollTop independently
+// of our pending automatic correction, and must still let the reader scroll up.
+const latestCorrection = streamingScroll.scrollTop;
+streamingScroll.scrollTop -= 100;
+assert(
+  !shouldFollowAfterScroll(streamingScroll, true, latestCorrection),
+  "reader movement before the automatic scroll event must detach follow",
+);
+assert(
+  !shouldFollowAfterScroll(streamingScroll, true, null),
+  "reader movement without an outstanding correction must detach follow",
+);
+assert(
+  !shouldFollowAfterScroll(streamingScroll, false, streamingScroll.scrollTop),
+  "a stale automatic target must not reattach a reader who already scrolled up",
+);
+streamingScroll.scrollHeight += 200;
+assert(
+  scrollTopAfterLayoutChange(streamingScroll, false) === latestCorrection - 100,
+  "new chunks must preserve the detached reader's position",
+);
+streamingScroll.scrollTop = followScrollTop(streamingScroll) - CHAT_SCROLL_BOTTOM_THRESHOLD;
+assert(
+  shouldFollowAfterScroll(streamingScroll, false, null),
+  "scrolling back near the bottom must reattach follow",
 );
 
 assert(

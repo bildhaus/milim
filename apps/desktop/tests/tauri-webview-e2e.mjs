@@ -2303,13 +2303,17 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   }
   const nativeHostAfter = await page.getByTestId("preview-native-browser").boundingBox();
   const nativeViewAfter = wryWebviews(pid).find((view) => view.handle === preview.handle);
+  const pixelRatio = await page.evaluate(() => window.devicePixelRatio);
   if (
     !nativeHostBefore ||
     !nativeHostAfter ||
     !nativeViewBefore ||
     !nativeViewAfter ||
-    nativeHostAfter.width - nativeHostBefore.width < 30 ||
-    nativeViewAfter.width <= nativeViewBefore.width
+    nativeHostAfter.width <= nativeHostBefore.width ||
+    Math.abs(
+      (nativeViewAfter.width - nativeViewBefore.width) -
+      (nativeHostAfter.width - nativeHostBefore.width) * pixelRatio,
+    ) > 2
   ) {
     throw new Error(`Native preview child webview should follow overlay host bounds: ${JSON.stringify({ nativeHostBefore, nativeHostAfter, nativeViewBefore, nativeViewAfter })}.`);
   }
@@ -2454,7 +2458,11 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
     await page.getByTestId("preview-runtime-status").getByText("Static preview", { exact: true }).waitFor();
     await page.getByTestId("preview-runtime-quick-stop").getByText("Stop", { exact: true }).waitFor();
+    await assertAttribute(page.getByTestId("preview-runtime-status"), "aria-expanded", "false");
+    await page.getByTestId("preview-runtime-status").click();
     if (!(await page.getByTestId("preview-managed-runtime").evaluate((element) => element.classList.contains("compact")))) throw new Error("Healthy static preview should use the compact runtime toolbar.");
+    await page.getByTestId("preview-runtime-status").click();
+    await page.getByTestId("preview-managed-runtime").waitFor({ state: "hidden" });
     await waitForNewVisibleWryWebview(pid, baselineHandles);
     const html = await (await fetch(status.url)).text();
     const css = await (await fetch(new URL("style.css", status.url))).text();
@@ -4819,7 +4827,15 @@ async function runAppShortcutCheck(page) {
 
   await page.keyboard.press("Control+L");
   await expectFocusedTestId(page, "composer-input");
+  const previousThreadId = await page.locator("[data-sidebar-session-id].active").first().getAttribute("data-sidebar-session-id");
   await page.keyboard.press("Control+N");
+  // Thread creation is asynchronous; focus can still belong to the old composer.
+  await page.waitForFunction(async (previousId) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    const activeId = raw && JSON.parse(raw).state?.activeId;
+    return activeId && activeId !== previousId &&
+      !document.querySelector(`[data-sidebar-session-id="${previousId}"].active`);
+  }, previousThreadId);
   await expectFocusedTestId(page, "composer-input");
   const value = await page.getByTestId("composer-input").inputValue();
   if (value !== "") throw new Error(`Expected Ctrl+N to clear composer, got "${value}".`);
@@ -4846,6 +4862,7 @@ async function runCommandPaletteCheck(page) {
 
   await page.keyboard.press("Control+K");
   await page.getByTestId("command-palette-input").waitFor();
+  await expectFocusedTestId(page, "command-palette-input");
   await page.keyboard.press("Shift+Tab");
   const lastFocused = await page.locator(".chat-search-list button").last().evaluate((element) => element === document.activeElement);
   if (!lastFocused) throw new Error("Shift+Tab must stay inside the command palette.");
@@ -5727,6 +5744,17 @@ async function runChatAffordancesCheck(page) {
     throw new Error("Assistant source chip did not expose its external destination.");
   }
   const scroll = page.locator(".chat-scroll");
+  // Startup hydrates only the final 100 messages. Load the two older pages
+  // through scrolling before testing the 200-row virtualization window.
+  await page.waitForFunction(() => {
+    if (document.querySelector('[data-message-window-id="e2e-chat-affordances:message:chat-affordance-0"]')) return true;
+    const element = document.querySelector(".chat-scroll");
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+    return false;
+  }, null, { polling: 100 });
+  await page.getByTestId("chat-jump-latest").click();
+  await page.getByTestId("transcript-top-spacer").waitFor({ state: "attached" });
   const windowAnchorGeometry = await scroll.evaluate(async (element) => {
     const frames = async () => {
       await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -6295,7 +6323,7 @@ async function runHarnessHardeningUiCheck(page) {
   await page.waitForTimeout(1_750);
   await composer.fill("Steer with the keyboard shortcut");
   await composer.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
-  const pendingSteer = page.getByTestId("pending-steer-message").filter({ hasText: "Steer with the keyboard shortcut" });
+  const pendingSteer = page.getByTestId("pending-steer-message").locator("..").filter({ hasText: "Steer with the keyboard shortcut" });
   await pendingSteer.waitFor();
   steeringTimelineItems = [{
     id: "e2e-steer-message-1",
@@ -6326,7 +6354,7 @@ async function runHarnessHardeningUiCheck(page) {
   await composer.fill("Steer with the explicit menu action");
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
-  await page.getByTestId("pending-steer-message").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
+  await page.getByTestId("pending-steer-message").locator("..").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
   if (commandBodies.length !== 3 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer" || commandBodies[2].kind !== "turn.steer") {
     throw new Error(`Busy composer should queue on Enter and steer by modifier Enter or the explicit menu: ${JSON.stringify(commandBodies)}.`);
   }
@@ -6575,10 +6603,10 @@ async function setCustomTools(page, wantedTools) {
   for (const row of rows) {
     const name = (await row.locator(".tool-name").innerText()).trim();
     const checkbox = row.getByRole("checkbox");
-    const checked = (await checkbox.getAttribute("aria-checked")) === "true";
+    const checked = await checkbox.isChecked();
     const shouldBeChecked = wanted.has(name);
     if (checked !== shouldBeChecked) {
-      await checkbox.click();
+      await row.locator("label.ui-check").click();
     }
   }
 
@@ -6597,7 +6625,7 @@ async function assertSelectedTools(page, wantedTools) {
   for (const row of rows) {
     const name = (await row.locator(".tool-name").innerText()).trim();
     const checkbox = row.getByRole("checkbox");
-    const checked = (await checkbox.getAttribute("aria-checked")) === "true";
+    const checked = await checkbox.isChecked();
     seen.set(name, checked);
   }
 

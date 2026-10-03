@@ -17,6 +17,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
 import { chromium } from "playwright-core";
+import { seedTranscriptFixture } from "./tauri-transcript-fixture.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binaryMode = process.argv.includes("--binary");
@@ -367,6 +368,7 @@ async function runCanonicalBinaryBenchmark() {
   const modelB = "perf-b";
   const firstPrompt = "Begin the incomplete canonical response.";
   const queuedPrompt = "Resume this exact queued prompt after reload.";
+  const longThreadPrompt = "Canonical long-thread optimistic send.";
   const partialMarker = "CANONICAL_A_PARTIAL.";
   const terminalMarker = "CANONICAL_B_DONE";
   const canonicalErrors = [];
@@ -397,7 +399,7 @@ async function runCanonicalBinaryBenchmark() {
       },
     },
     fixture: {
-      version: "canonical-thread-v2",
+      version: "canonical-thread-v3",
       models: [modelA, modelB],
       threadCount: 10,
       messagesPerThread: 100,
@@ -435,6 +437,16 @@ async function runCanonicalBinaryBenchmark() {
       models: [modelA, modelB],
       partialMarker,
       terminalMarker,
+      onCompletion(res, body) {
+        if (body?.messages?.at(-1)?.content !== longThreadPrompt) return false;
+        streamCompletion(res, {
+          model: body.model,
+          text: perfCompletionText(),
+          chunkSize: 48,
+          delayMs: 16,
+        });
+        return true;
+      },
     });
 
     const launchStartedAt = Date.now();
@@ -789,9 +801,6 @@ async function runCanonicalBinaryBenchmark() {
       .last()
       .waitFor({ timeout: 20_000 });
     await installRuntimeSamplers(session.page);
-    await waitForAnimationFrames(session.page, 2);
-    report.timingsMs.fixtureReloadToInteractive =
-      Date.now() - fixtureReloadStartedAt;
 
     const fixtureState = await readPersistedState(session.page);
     ensure(
@@ -835,6 +844,9 @@ async function runCanonicalBinaryBenchmark() {
       renderedRows >= expectedRenderedRows,
       `Large transcript rendered ${renderedRows} rows; expected at least ${expectedRenderedRows} mounted rows from ${report.fixture.messagesPerThread} persisted messages.`,
     );
+    await waitForAnimationFrames(session.page, 2);
+    report.timingsMs.fixtureReloadToInteractive =
+      Date.now() - fixtureReloadStartedAt;
     report.fixture.persistedThreadCount = fixtureState.sessions.length;
     report.fixture.persistedMessagesPerThread = fixtureState.sessions.map(
       (item) => item.messages.length,
@@ -854,7 +866,6 @@ async function runCanonicalBinaryBenchmark() {
     });
 
     console.log("[canonical] send from large transcript");
-    const longThreadPrompt = "Canonical long-thread optimistic send.";
     await session.page.getByTestId("composer-input").fill(longThreadPrompt);
     await session.page.evaluate((prompt) => {
       const scroll = document.querySelector(".chat-scroll");
@@ -862,6 +873,8 @@ async function runCanonicalBinaryBenchmark() {
         throw new Error("Chat scroll container unavailable.");
       scroll.scrollTop = scroll.scrollHeight;
       window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__ = [];
+      window.__MILIM_LONG_THREAD_SCROLL_SAMPLING__ = true;
+      window.__MILIM_LONG_THREAD_FOLLOW_DETACHED__ = false;
       window.__MILIM_OPTIMISTIC_SEND_MS__ = new Promise((resolve, reject) => {
         const send = document.querySelector('[data-testid="composer-send"]');
         if (!(send instanceof HTMLElement)) {
@@ -884,16 +897,18 @@ async function runCanonicalBinaryBenchmark() {
           });
         }, { once: true, capture: true });
       });
-      let remaining = 45;
       const sample = () => {
         window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__.push(
           scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
         );
-        remaining -= 1;
-        if (remaining > 0) requestAnimationFrame(sample);
+        window.__MILIM_LONG_THREAD_FOLLOW_DETACHED__ ||= Boolean(
+          document.querySelector('[data-testid="chat-jump-latest"]'),
+        );
+        if (window.__MILIM_LONG_THREAD_SCROLL_SAMPLING__) requestAnimationFrame(sample);
       };
       requestAnimationFrame(sample);
     }, longThreadPrompt);
+    await installRuntimeSamplers(session.page);
     await session.page.getByTestId("composer-send").click();
     await session.page
       .getByTestId("user-message")
@@ -903,16 +918,41 @@ async function runCanonicalBinaryBenchmark() {
       () => window.__MILIM_OPTIMISTIC_SEND_MS__,
     );
     await session.page
+      .getByTestId("assistant-message")
+      .last()
+      .getByText("PERF_DONE", { exact: false })
+      .waitFor({ timeout: 30_000 });
+    await session.page
       .getByRole("button", { name: "Stop generating" })
       .waitFor({ state: "hidden", timeout: 20_000 });
+    report.renderer.streaming = await collectRuntimeMetrics(session.page);
+    ensure(
+      report.renderer.streaming.frames.count >= 20,
+      "Streaming benchmark did not capture at least 20 animation frames.",
+    );
     await waitForAnimationFrames(session.page, 45);
     const bottomGaps = await session.page.evaluate(
-      () => window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__,
+      () => {
+        window.__MILIM_LONG_THREAD_SCROLL_SAMPLING__ = false;
+        return window.__MILIM_LONG_THREAD_SCROLL_SAMPLES__;
+      },
     );
+    report.fixture.longThreadBottomGaps = bottomGaps;
     report.fixture.longThreadMaxBottomGap = Math.max(...bottomGaps);
+    report.fixture.longThreadFinalBottomGap = bottomGaps.at(-1);
+    report.fixture.longThreadSustainedBottomGap = bottomGaps.some(
+      (gap, index) => gap > 32 && bottomGaps[index - 1] > 32,
+    );
+    report.fixture.longThreadFollowDetached = await session.page.evaluate(
+      () => window.__MILIM_LONG_THREAD_FOLLOW_DETACHED__,
+    );
+    // RAF samples can precede ResizeObserver's next-frame correction. Retain
+    // transient gaps as evidence, but verify actual coupling and settled position.
     ensure(
-      report.fixture.longThreadMaxBottomGap <= 32,
-      `Large transcript lost bottom follow by ${report.fixture.longThreadMaxBottomGap}px.`,
+      !report.fixture.longThreadFollowDetached &&
+        !report.fixture.longThreadSustainedBottomGap &&
+        report.fixture.longThreadFinalBottomGap <= 32,
+      `Large transcript lost bottom follow: detached=${report.fixture.longThreadFollowDetached}, final gap=${report.fixture.longThreadFinalBottomGap}px.`,
     );
     ensure(
       (await session.page
@@ -1173,9 +1213,13 @@ function finishCanonicalResponse(res, model, marker) {
   }, 750);
 }
 
-function streamCompletion(res) {
-  const chunks = chunkText(perfCompletionText(), Number(process.env.MILIM_PERF_CHUNK_SIZE || 48));
-  const delayMs = Number(process.env.MILIM_PERF_CHUNK_DELAY_MS || 6);
+function streamCompletion(res, {
+  model = modelId,
+  text = perfCompletionText(),
+  chunkSize = Number(process.env.MILIM_PERF_CHUNK_SIZE || 48),
+  delayMs = Number(process.env.MILIM_PERF_CHUNK_DELAY_MS || 6),
+} = {}) {
+  const chunks = chunkText(text, chunkSize);
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -1183,13 +1227,14 @@ function streamCompletion(res) {
   });
   let index = 0;
   const writeNext = () => {
+    if (res.destroyed) return;
     if (index < chunks.length) {
       const content = chunks[index++];
       res.write(`data: ${JSON.stringify({
         id: "perf-chatcmpl",
         object: "chat.completion.chunk",
         created: 0,
-        model: modelId,
+        model,
         choices: [{ index: 0, delta: { content }, finish_reason: null }],
       })}\n\n`);
       setTimeout(writeNext, delayMs);
@@ -1199,7 +1244,7 @@ function streamCompletion(res) {
       id: "perf-chatcmpl",
       object: "chat.completion.chunk",
       created: 0,
-      model: modelId,
+      model,
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
       usage: { prompt_tokens: 24, completion_tokens: chunks.length, total_tokens: chunks.length + 24 },
     })}\n\n`);
@@ -1688,106 +1733,19 @@ async function writeLargeTranscriptFixture(
   activeId,
   { threadCount, messagesPerThread },
 ) {
-  await page.evaluate(
-    async ({ activeId, threadCount, messagesPerThread }) => {
-      const invoke = window.__TAURI_INTERNALS__?.invoke;
-      if (!invoke) throw new Error("Tauri invoke API unavailable.");
-      const key = "milim.sessions";
-      const raw = await invoke("user_state_get", { key });
-      if (!raw) throw new Error("Canonical session state is unavailable.");
-      const parsed = JSON.parse(raw);
-      const state =
-        parsed.state && typeof parsed.state === "object" ? parsed.state : {};
-      const previousIds = new Set(
-        (state.sessions ?? []).map((session) => session.id),
-      );
-      const previousMessageCounts = new Map(
-        (state.sessions ?? []).map((session) => [
-          session.id,
-          session.messagesHydrated === false
-            ? (session.persistedMessageCount ?? session.messages?.length ?? 0)
-            : (session.messages?.length ?? 0),
-        ]),
-      );
-      const canonical = state.sessions?.find(
-        (session) => session.id === activeId,
-      );
-      if (!canonical)
-        throw new Error("Canonical active session is unavailable.");
-      if ((canonical.messages?.length ?? 0) > messagesPerThread) {
-        throw new Error(
-          `Canonical session already exceeds ${messagesPerThread} messages.`,
-        );
-      }
-
-      const now = Date.now();
-      const canonicalMessages = [...(canonical.messages ?? [])];
-      while (canonicalMessages.length < messagesPerThread) {
-        const index = canonicalMessages.length;
-        canonicalMessages.push({
-          id: `canonical-fill-${index}`,
-          role: index % 2 === 0 ? "user" : "assistant",
-          content: `Canonical transcript filler ${index + 1}.`,
-        });
-      }
-      const sessions = [
-        {
-          ...canonical,
-          messages: canonicalMessages,
-          updatedAt: now,
-        },
-      ];
-      for (let threadIndex = 1; threadIndex < threadCount; threadIndex += 1) {
-        sessions.push({
-          id: `canonical-fixture-${threadIndex}`,
-          title: `Canonical fixture ${threadIndex}`,
-          messages: Array.from(
-            { length: messagesPerThread },
-            (_, messageIndex) => ({
-              id: `canonical-${threadIndex}-${messageIndex}`,
-              role: messageIndex % 2 === 0 ? "user" : "assistant",
-              content: `Fixture ${threadIndex} message ${messageIndex + 1}.`,
-            }),
-          ),
-          settings: { ...(canonical.settings ?? {}) },
-          createdAt: now - threadIndex,
-          updatedAt: now - threadIndex,
-        });
-      }
-      state.sessions = sessions;
-      state.activeId = activeId;
-      state.queuedMessagesBySession = {};
-      state.sidebar = {
-        ...(state.sidebar ?? {}),
-        sessionOrder: sessions.map((session) => session.id),
-      };
-      parsed.state = state;
-      const nextIds = new Set(sessions.map((session) => session.id));
-      const meta = structuredClone(parsed);
-      delete meta.state.sessions;
-      await invoke("user_sessions_apply_ops", {
-        delta: {
-          metaJson: JSON.stringify(meta),
-          sessionOrder: sessions.map((session) => session.id),
-          upserts: sessions.map((session) => {
-            const { messages, messagesHydrated, messagesLoadedFrom, persistedMessageCount, ...sessionMeta } = session;
-            return {
-              id: session.id,
-              sessionJson: JSON.stringify(sessionMeta),
-              baseMessageCount: previousMessageCounts.get(session.id) ?? 0,
-              messageCount: messages.length,
-              messages: messages.map((message, index) => ({
-                index,
-                messageJson: JSON.stringify(message),
-              })),
-            };
-          }),
-          deletedSessionIds: [...previousIds].filter((id) => !nextIds.has(id)),
-        },
-      });
-    },
-    { activeId, threadCount, messagesPerThread },
-  );
+  for (let index = 1; index < threadCount; index += 1) {
+    const id = `canonical-fixture-${index}`;
+    const created = await sendControlTestCommand(page, {
+      command_id: `create-${id}`,
+      kind: "thread.create",
+      payload: { id, title: `Canonical fixture ${index}` },
+    });
+    ensure(created.status === "applied", `Could not create fixture thread ${id}.`);
+  }
+  const result = await page.evaluate(seedTranscriptFixture, {
+    activeId, threadCount, messagesPerThread,
+  });
+  console.log(`[canonical] fixture verified after ${result.attempts} write attempt(s)`);
 }
 
 async function waitForAnimationFrames(page, count) {

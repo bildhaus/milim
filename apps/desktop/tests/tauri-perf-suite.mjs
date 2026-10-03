@@ -66,11 +66,11 @@ const metrics = {
     limit: 50,
   },
   streaming_frame_p95_ms: {
-    read: (report) => report.renderer.largeTranscript.frames.p95Ms,
+    read: (report) => report.renderer.streaming.frames.p95Ms,
     limit: 20,
   },
   streaming_frame_max_ms: {
-    read: (report) => report.renderer.largeTranscript.frames.maxMs,
+    read: (report) => report.renderer.streaming.frames.maxMs,
     limit: 50,
   },
   mounted_message_rows: {

@@ -53,6 +53,8 @@ const server = await createServer({
 });
 
 try {
+  // Finish lazy Markdown compilation before rendering can race Vite teardown.
+  await server.ssrLoadModule("/src/components/Markdown.tsx");
   const { WorkersInspector, elapsedLabel, retainedWorkerSelectionKey } = await server.ssrLoadModule("/src/components/WorkersInspector.tsx") as {
     WorkersInspector: ComponentType<Record<string, unknown>>;
     elapsedLabel: (start: string, end?: string | null, now?: number) => string;

@@ -1,4 +1,9 @@
 {
+  "0.2.75": {
+    "version": "0.2.75",
+    "summary": "milim 0.2.75 keeps chats following streamed replies until you scroll up and improves automated desktop testing.",
+    "items": []
+  },
   "0.2.74": {
     "version": "0.2.74",
     "summary": "milim 0.2.74 makes provider agents remember their own work between turns, recover from overflowing context and interrupted streams, keep long conversations prompt-cached, and run host tools and approvals without stalling other chats.",

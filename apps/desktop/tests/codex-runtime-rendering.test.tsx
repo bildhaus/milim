@@ -22,6 +22,8 @@ const server = await createServer({
 });
 
 try {
+  // Finish lazy Markdown compilation before rendering can race Vite teardown.
+  await server.ssrLoadModule("/src/components/Markdown.tsx");
   const { AssistantMessage } = (await server.ssrLoadModule(
     "/src/components/AssistantMessage.tsx",
   )) as { AssistantMessage: ComponentType<{ content: string; streamParts: ChatStreamPart[]; streaming?: boolean; runDetailsRunId?: string }> };

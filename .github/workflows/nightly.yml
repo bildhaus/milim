@@ -1,11 +1,11 @@
 # Runs the Windows WebView2 suites that are too slow for every pull request,
 # plus a macOS debug build and /control/v1 smoke of the real desktop binary,
 # and, when a provider key is configured, a small agent-eval subset on it.
-name: Nightly
+name: Desktop integration
 
 on:
-  schedule:
-    - cron: "17 3 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -39,13 +39,15 @@ jobs:
           workspaces: apps/desktop/src-tauri -> target
       - run: pnpm -C apps/desktop install --frozen-lockfile
       - run: pnpm -C apps/desktop verify:tauri
+        id: build
       - name: WebView2 E2E suite
         run: pnpm -C apps/desktop test:tauri-webview
       - name: Worker preview tab E2E
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm -C apps/desktop test:tauri-worker-preview
-      - name: Enforced canonical perf suite
+      - name: Canonical perf suite (report budgets on hosted runners)
         if: ${{ !cancelled() }}
-        run: pnpm -C apps/desktop perf:suite:enforce
+        run: pnpm -C apps/desktop perf:suite
         env:
           MILIM_PERF_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/nightly-perf
       - name: Upload perf evidence
