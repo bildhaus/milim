@@ -5990,6 +5990,13 @@ async function runSourceHoverScrollCheck(page) {
 
 async function runHarnessHardeningUiCheck(page) {
   const requests = [];
+  // Desktop model discovery reads /v1/models independently of the control
+  // bootstrap. Keep the fixture model available on runners with no providers.
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ data: [{ id: "e2e-ledger-model", owned_by: "milim" }] }),
+  }));
   // The preceding chat-affordance interaction can leave a debounced session
   // write pending. Let it commit before replacing the native session fixture so
   // pagehide cannot restore the previous transcript over this one.
@@ -6060,6 +6067,13 @@ async function runHarnessHardeningUiCheck(page) {
     const invoke = window.__TAURI_INTERNALS__?.invoke;
     if (!invoke) throw new Error("Tauri invoke unavailable for run-ledger fixture.");
     const now = Date.now();
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: { accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false } },
+        version: 0,
+      }),
+    });
     await invoke("user_sessions_set", {
       value: JSON.stringify({
         state: {
@@ -6097,7 +6111,7 @@ async function runHarnessHardeningUiCheck(page) {
               },
             ],
             settings: {
-              model: "mock-echo",
+              model: "e2e-ledger-model",
               instructions: "",
               activeAgentId: null,
               folder: "",
@@ -6198,21 +6212,21 @@ async function runHarnessHardeningUiCheck(page) {
     epoch: "e2e-ledger-epoch",
     updated_at_ms: Date.now(),
     archived_at_ms: null,
-    model: "mock-echo",
+    model: "e2e-ledger-model",
     reasoning_effort_overrides: {},
     agent_id: null,
     workspace: null,
     busy: true,
     queued_turns: 0,
   }];
-  bootstrap.models = [{ id: "mock-echo", object: "model", created: 0, owned_by: "milim" }];
+  bootstrap.models = [{ id: "e2e-ledger-model", object: "model", created: 0, owned_by: "milim" }];
   bootstrap.active_runs = [{
     id: "e2e-active-provider-run",
     thread_id: "e2e-ledger-thread",
     status: "running",
     adapter: "provider",
     config: {
-      model: "mock-echo",
+      model: "e2e-ledger-model",
       instructions: "",
       workspace: null,
       privacy: "off",
@@ -6369,10 +6383,11 @@ async function runHarnessHardeningUiCheck(page) {
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
   await page.getByTestId("pending-steer-message").locator("..").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
-  if (commandBodies.length !== 3 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer" || commandBodies[2].kind !== "turn.steer") {
+  const turnCommands = commandBodies.filter((body) => body.kind.startsWith("turn."));
+  if (turnCommands.length !== 3 || turnCommands[0].kind !== "turn.send" || turnCommands[1].kind !== "turn.steer" || turnCommands[2].kind !== "turn.steer") {
     throw new Error(`Busy composer should queue on Enter and steer by modifier Enter or the explicit menu: ${JSON.stringify(commandBodies)}.`);
   }
-  if (commandBodies.slice(1).some((body) => body.payload?.run_id !== "e2e-active-provider-run")) {
+  if (turnCommands.slice(1).some((body) => body.payload?.run_id !== "e2e-active-provider-run")) {
     throw new Error("Steering should target the exact active run id.");
   }
 
