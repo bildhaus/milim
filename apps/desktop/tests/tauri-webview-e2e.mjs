@@ -2261,11 +2261,13 @@ async function runNativePreviewOcclusionCheck(page, pid) {
 
   const apiBase = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("api_base_url"));
   const previewUrl = new URL("/health", apiBase).toString();
-  const threadId = await page
-    .locator("[data-sidebar-session-id].active")
-    .first()
-    .getAttribute("data-sidebar-session-id");
-  if (!threadId) throw new Error("Expected an active thread before preview test.");
+  // Empty active chats are intentionally absent from the sidebar.
+  const activeThread = await page.waitForFunction(async () => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    return raw && JSON.parse(raw).state?.activeId;
+  });
+  const threadId = await activeThread.jsonValue();
+  await activeThread.dispose();
   await page.evaluate(
     async ({ threadId, url }) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
       event: "milim://preview-open-url",
