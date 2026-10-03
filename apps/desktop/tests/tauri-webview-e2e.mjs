@@ -2462,7 +2462,7 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
     await page.getByTestId("preview-runtime-status").getByText("Static preview", { exact: true }).waitFor();
     await page.getByTestId("preview-runtime-quick-stop").getByText("Stop", { exact: true }).waitFor();
-    await assertAttribute(page.getByTestId("preview-runtime-status"), "aria-expanded", "false");
+    await page.locator('[data-testid="preview-runtime-status"][aria-expanded="false"]').waitFor();
     await page.getByTestId("preview-runtime-status").click();
     if (!(await page.getByTestId("preview-managed-runtime").evaluate((element) => element.classList.contains("compact")))) throw new Error("Healthy static preview should use the compact runtime toolbar.");
     await page.getByTestId("preview-runtime-status").click();
@@ -3760,9 +3760,9 @@ async function runSlashAndAttachmentCheck(page) {
     await page.getByTestId("composer-input").fill("read the attached note");
     await page.getByTestId("composer-send").click();
     const sentMessage = page.getByTestId("user-message").last();
-    await waitForLocatorCountGreaterThan(sentMessage.locator('[data-testid^="message-attachment-"]'), 1);
     await sentMessage.getByText("milim-e2e-attachment").waitFor();
-    await sentMessage.getByText("pasted-screenshot.png").waitFor();
+    await sentMessage.getByRole("button", { name: "Open pasted image 1 of 1" }).waitFor();
+    await sentMessage.getByTitle("pasted-screenshot.png", { exact: true }).waitFor();
     await sentMessage.getByText("read the attached note").waitFor();
   } finally {
     rmSync(attachmentPath, { force: true });
