@@ -2251,9 +2251,6 @@ function relativeLuminance(cssColor) {
 }
 
 async function runNativePreviewOcclusionCheck(page, pid) {
-  const originalViewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
-  // Exercise the horizontal inspector resize contract even on small CI displays.
-  await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator(".app-notices").waitFor({ state: "hidden", timeout: 8_000 }).catch(() => {});
   const baseline = wryWebviews(pid);
   const baselineHandles = new Set(baseline.map((view) => view.handle));
@@ -2337,7 +2334,6 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await waitForWryVisibility(pid, preview.handle, true);
   await page.getByLabel("Close inspector", { exact: true }).click();
   await page.getByTestId("open-artifact-browser").waitFor();
-  await page.setViewportSize(originalViewport);
 }
 
 async function runStaticWorkspacePreviewCheck(page, pid) {
@@ -5847,6 +5843,10 @@ async function runChatAffordancesCheck(page) {
     return element instanceof HTMLElement &&
       element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
   });
+  // The resize fixture can put the source above a shorter viewport. Exclude
+  // Playwright's deliberate scroll-to-target from the hover stability check.
+  await source.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const scrollBeforeHover = await scroll.evaluate((element) => element.scrollTop);
   await source.hover();
   await page.waitForFunction(() => {
@@ -6856,6 +6856,9 @@ async function launchTauri(milimHome) {
   const context = session.browser.contexts()[0] ?? await session.browser.newContext();
   session.page = await firstPage(context);
   session.page.setDefaultTimeout(10_000);
+  // Desktop scenarios need a stable layout independent of the runner's display.
+  // Responsive scenarios below set their own narrow viewport explicitly.
+  await session.page.setViewportSize({ width: 1440, height: 900 });
   return session;
 }
 
