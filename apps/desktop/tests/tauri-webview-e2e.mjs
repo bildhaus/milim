@@ -2251,6 +2251,9 @@ function relativeLuminance(cssColor) {
 }
 
 async function runNativePreviewOcclusionCheck(page, pid) {
+  const originalViewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  // Exercise the horizontal inspector resize contract even on small CI displays.
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator(".app-notices").waitFor({ state: "hidden", timeout: 8_000 }).catch(() => {});
   const baseline = wryWebviews(pid);
   const baselineHandles = new Set(baseline.map((view) => view.handle));
@@ -2334,6 +2337,7 @@ async function runNativePreviewOcclusionCheck(page, pid) {
   await waitForWryVisibility(pid, preview.handle, true);
   await page.getByLabel("Close inspector", { exact: true }).click();
   await page.getByTestId("open-artifact-browser").waitFor();
+  await page.setViewportSize(originalViewport);
 }
 
 async function runStaticWorkspacePreviewCheck(page, pid) {
