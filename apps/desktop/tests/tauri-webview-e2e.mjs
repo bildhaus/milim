@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2261,11 +2261,13 @@ async function runNativePreviewOcclusionCheck(page, pid) {
 
   const apiBase = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("api_base_url"));
   const previewUrl = new URL("/health", apiBase).toString();
-  const threadId = await page
-    .locator("[data-sidebar-session-id].active")
-    .first()
-    .getAttribute("data-sidebar-session-id");
-  if (!threadId) throw new Error("Expected an active thread before preview test.");
+  // Empty active chats are intentionally absent from the sidebar.
+  const activeThread = await page.waitForFunction(async () => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessions" });
+    return raw && JSON.parse(raw).state?.activeId;
+  });
+  const threadId = await activeThread.jsonValue();
+  await activeThread.dispose();
   await page.evaluate(
     async ({ threadId, url }) => window.__TAURI_INTERNALS__.invoke("plugin:event|emit", {
       event: "milim://preview-open-url",
@@ -2338,7 +2340,9 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
   await page.getByTestId("chat-shell").waitFor();
   await dismissOnboardingIfPresent(page);
   await page.locator(".app-notices").waitFor({ state: "hidden", timeout: 8_000 }).catch(() => {});
-  const workspace = mkdtempSync(join(tmpdir(), "milim-static-preview-e2e-"));
+  // Hosted Windows temp paths can contain 8.3 aliases (RUNNER~1), while the
+  // static server returns a canonical cwd used to match the runtime to its chat.
+  const workspace = realpathSync.native(mkdtempSync(join(tmpdir(), "milim-static-preview-e2e-")));
   const indexPath = join(workspace, "index.html");
   writeFileSync(
     indexPath,
@@ -2364,6 +2368,12 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await reviewCommands.getByText("Review commands", { exact: true }).waitFor();
     await reviewCommands.click();
     await reviewCommands.getByText("Refresh commands", { exact: true }).waitFor();
+    // Native tab/focus changes can hide the runtime without delivering blur.
+    // Reproduce that lost event so readiness must clear the stale focus state.
+    await reviewCommands.focus();
+    await reviewCommands.evaluate((button) => {
+      button.ownerDocument.addEventListener("focusout", (event) => event.stopPropagation(), { capture: true, once: true });
+    });
     await page.getByRole("tab", { name: "Code", exact: true }).click();
 
     const workspaceSearch = page.getByRole("textbox", { name: "Search workspace files", exact: true });
@@ -2458,7 +2468,7 @@ async function runStaticWorkspacePreviewCheck(page, pid) {
     await page.locator(".preview-native-browser-status").waitFor({ state: "hidden", timeout: 10_000 });
     await page.getByTestId("preview-runtime-status").getByText("Static preview", { exact: true }).waitFor();
     await page.getByTestId("preview-runtime-quick-stop").getByText("Stop", { exact: true }).waitFor();
-    await assertAttribute(page.getByTestId("preview-runtime-status"), "aria-expanded", "false");
+    await page.locator('[data-testid="preview-runtime-status"][aria-expanded="false"]').waitFor();
     await page.getByTestId("preview-runtime-status").click();
     if (!(await page.getByTestId("preview-managed-runtime").evaluate((element) => element.classList.contains("compact")))) throw new Error("Healthy static preview should use the compact runtime toolbar.");
     await page.getByTestId("preview-runtime-status").click();
@@ -3756,9 +3766,9 @@ async function runSlashAndAttachmentCheck(page) {
     await page.getByTestId("composer-input").fill("read the attached note");
     await page.getByTestId("composer-send").click();
     const sentMessage = page.getByTestId("user-message").last();
-    await waitForLocatorCountGreaterThan(sentMessage.locator('[data-testid^="message-attachment-"]'), 1);
     await sentMessage.getByText("milim-e2e-attachment").waitFor();
-    await sentMessage.getByText("pasted-screenshot.png").waitFor();
+    await sentMessage.getByRole("button", { name: "Open pasted image 1 of 1" }).waitFor();
+    await sentMessage.getByTitle("pasted-screenshot.png", { exact: true }).waitFor();
     await sentMessage.getByText("read the attached note").waitFor();
   } finally {
     rmSync(attachmentPath, { force: true });
@@ -5755,6 +5765,10 @@ async function runChatAffordancesCheck(page) {
   }, null, { polling: 100 });
   await page.getByTestId("chat-jump-latest").click();
   await page.getByTestId("transcript-top-spacer").waitFor({ state: "attached" });
+  await page.waitForFunction(() => {
+    const element = document.querySelector(".chat-scroll");
+    return element && element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
+  });
   const windowAnchorGeometry = await scroll.evaluate(async (element) => {
     const frames = async () => {
       await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -5769,6 +5783,7 @@ async function runChatAffordancesCheck(page) {
       });
     };
     const measureShift = async (direction) => {
+      const previousFirstRow = rows()[0]?.dataset.messageWindowId;
       const spacer = document.querySelector(
         direction === "up" ? '[data-testid="transcript-top-spacer"]' : '[data-testid="transcript-bottom-spacer"]',
       );
@@ -5781,6 +5796,13 @@ async function runChatAffordancesCheck(page) {
       const id = anchor.dataset.messageWindowId;
       const before = anchor.getBoundingClientRect().top - element.getBoundingClientRect().top;
       element.dispatchEvent(new Event("scroll"));
+      // React can commit the virtual window later than two animation frames on
+      // a busy runner. Measure only after the requested window actually shifts.
+      const deadline = performance.now() + 10_000;
+      while (rows()[0]?.dataset.messageWindowId === previousFirstRow) {
+        if (performance.now() >= deadline) throw new Error(`${direction} transcript window did not shift`);
+        await frames();
+      }
       await frames();
       const restored = rows().find((row) => row.dataset.messageWindowId === id);
       if (!(restored instanceof HTMLElement)) throw new Error(`${direction} anchor was unmounted`);
@@ -5841,6 +5863,10 @@ async function runChatAffordancesCheck(page) {
     return element instanceof HTMLElement &&
       element.scrollHeight - element.scrollTop - element.clientHeight <= 32;
   });
+  // The resize fixture can put the source above a shorter viewport. Exclude
+  // Playwright's deliberate scroll-to-target from the hover stability check.
+  await source.scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const scrollBeforeHover = await scroll.evaluate((element) => element.scrollTop);
   await source.hover();
   await page.waitForFunction(() => {
@@ -5976,6 +6002,13 @@ async function runSourceHoverScrollCheck(page) {
 
 async function runHarnessHardeningUiCheck(page) {
   const requests = [];
+  // Desktop model discovery reads /v1/models independently of the control
+  // bootstrap. Keep the fixture model available on runners with no providers.
+  await page.route("**/v1/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ data: [{ id: "e2e-ledger-model", owned_by: "milim" }] }),
+  }));
   // The preceding chat-affordance interaction can leave a debounced session
   // write pending. Let it commit before replacing the native session fixture so
   // pagehide cannot restore the previous transcript over this one.
@@ -6046,6 +6079,13 @@ async function runHarnessHardeningUiCheck(page) {
     const invoke = window.__TAURI_INTERNALS__?.invoke;
     if (!invoke) throw new Error("Tauri invoke unavailable for run-ledger fixture.");
     const now = Date.now();
+    await invoke("user_state_set", {
+      key: "milim.settings",
+      value: JSON.stringify({
+        state: { accountRuntimeEnabled: { codex: false, claude: false, opencode: false, pi: false } },
+        version: 0,
+      }),
+    });
     await invoke("user_sessions_set", {
       value: JSON.stringify({
         state: {
@@ -6083,7 +6123,7 @@ async function runHarnessHardeningUiCheck(page) {
               },
             ],
             settings: {
-              model: "mock-echo",
+              model: "e2e-ledger-model",
               instructions: "",
               activeAgentId: null,
               folder: "",
@@ -6184,21 +6224,21 @@ async function runHarnessHardeningUiCheck(page) {
     epoch: "e2e-ledger-epoch",
     updated_at_ms: Date.now(),
     archived_at_ms: null,
-    model: "mock-echo",
+    model: "e2e-ledger-model",
     reasoning_effort_overrides: {},
     agent_id: null,
     workspace: null,
     busy: true,
     queued_turns: 0,
   }];
-  bootstrap.models = [{ id: "mock-echo", object: "model", created: 0, owned_by: "milim" }];
+  bootstrap.models = [{ id: "e2e-ledger-model", object: "model", created: 0, owned_by: "milim" }];
   bootstrap.active_runs = [{
     id: "e2e-active-provider-run",
     thread_id: "e2e-ledger-thread",
     status: "running",
     adapter: "provider",
     config: {
-      model: "mock-echo",
+      model: "e2e-ledger-model",
       instructions: "",
       workspace: null,
       privacy: "off",
@@ -6355,10 +6395,11 @@ async function runHarnessHardeningUiCheck(page) {
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
   await page.getByTestId("pending-steer-message").locator("..").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
-  if (commandBodies.length !== 3 || commandBodies[0].kind !== "turn.send" || commandBodies[1].kind !== "turn.steer" || commandBodies[2].kind !== "turn.steer") {
+  const turnCommands = commandBodies.filter((body) => body.kind.startsWith("turn."));
+  if (turnCommands.length !== 3 || turnCommands[0].kind !== "turn.send" || turnCommands[1].kind !== "turn.steer" || turnCommands[2].kind !== "turn.steer") {
     throw new Error(`Busy composer should queue on Enter and steer by modifier Enter or the explicit menu: ${JSON.stringify(commandBodies)}.`);
   }
-  if (commandBodies.slice(1).some((body) => body.payload?.run_id !== "e2e-active-provider-run")) {
+  if (turnCommands.slice(1).some((body) => body.payload?.run_id !== "e2e-active-provider-run")) {
     throw new Error("Steering should target the exact active run id.");
   }
 
@@ -6850,6 +6891,9 @@ async function launchTauri(milimHome) {
   const context = session.browser.contexts()[0] ?? await session.browser.newContext();
   session.page = await firstPage(context);
   session.page.setDefaultTimeout(10_000);
+  // Desktop scenarios need a stable layout independent of the runner's display.
+  // Responsive scenarios below set their own narrow viewport explicitly.
+  await session.page.setViewportSize({ width: 1440, height: 900 });
   return session;
 }
 

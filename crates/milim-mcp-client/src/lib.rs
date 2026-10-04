@@ -3660,9 +3660,39 @@ mod tests {
             return;
         }
         let dir = temp_dir("parallel");
-        let slow = r#"const readline=require('readline');const rl=readline.createInterface({input:process.stdin});rl.on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;setTimeout(()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:m.method==='initialize'?{protocolVersion:'2025-06-18',capabilities:{tools:{}},serverInfo:{name:'slow',version:'1'}}:{tools:[]}})+'\n'),1500)});"#;
+        // No initialize reply is released until all three clients have reached
+        // the barrier. A serial connect cannot succeed, regardless of CPU load
+        // or how long Node takes to start on the runner.
+        let barrier = r#"
+const fs = require('fs');
+const path = require('path');
+const rl = require('readline').createInterface({ input: process.stdin });
+const [dir, index] = process.argv.slice(1);
+rl.on('line', async line => {
+    const m = JSON.parse(line);
+    if (m.id === undefined) return;
+    if (m.method === 'initialize') {
+        fs.writeFileSync(path.join(dir, `ready-${index}`), '');
+        while (![0, 1, 2].every(i => fs.existsSync(path.join(dir, `ready-${i}`)))) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
+    const result = m.method === 'initialize'
+        ? { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'barrier', version: '1' } }
+        : { tools: [] };
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n');
+});
+"#;
+        // The Windows stdio launcher passes arguments through cmd /C.
+        let barrier = barrier.lines().map(str::trim).collect::<Vec<_>>().join(" ");
         let configs: Vec<McpServerConfig> = (0..3)
-            .map(|index| node_config(&format!("slow-{index}"), slow))
+            .map(|index| {
+                let mut config = node_config(&format!("barrier-{index}"), &barrier);
+                config
+                    .args
+                    .extend([dir.to_string_lossy().into_owned(), index.to_string()]);
+                config
+            })
             .collect();
         std::fs::write(
             dir.join("mcp.json"),
@@ -3670,22 +3700,22 @@ mod tests {
         )
         .unwrap();
         let hub = McpHub::open(&dir);
-        let started = Instant::now();
-        hub.connect_all().await;
-        // Each server needs ~3s (initialize + tools/list); serially that
-        // would be ~9s. The bound leaves room for slow process startup on
-        // CI runners while still failing a serial connect.
-        assert!(
-            started.elapsed() < Duration::from_millis(6500),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(hub
-            .list()
-            .iter()
-            .all(|server| server.status == McpConnectionState::Connected));
+        let connected = tokio::time::timeout(CONNECT_TIMEOUT, hub.connect_all()).await;
+        let servers = hub.list();
         drop(hub);
         let _ = std::fs::remove_dir_all(dir);
+        connected.expect("parallel connections did not complete their initialize barrier");
+        assert_eq!(servers.len(), 3);
+        assert!(
+            servers
+                .iter()
+                .all(|server| server.status == McpConnectionState::Connected),
+            "connection outcomes: {:?}",
+            servers
+                .iter()
+                .map(|server| (&server.id, &server.status, &server.error))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
