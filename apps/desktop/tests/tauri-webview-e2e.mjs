@@ -5765,6 +5765,10 @@ async function runChatAffordancesCheck(page) {
   }, null, { polling: 100 });
   await page.getByTestId("chat-jump-latest").click();
   await page.getByTestId("transcript-top-spacer").waitFor({ state: "attached" });
+  await page.waitForFunction(() => {
+    const element = document.querySelector(".chat-scroll");
+    return element && element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
+  });
   const windowAnchorGeometry = await scroll.evaluate(async (element) => {
     const frames = async () => {
       await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -5779,6 +5783,7 @@ async function runChatAffordancesCheck(page) {
       });
     };
     const measureShift = async (direction) => {
+      const previousFirstRow = rows()[0]?.dataset.messageWindowId;
       const spacer = document.querySelector(
         direction === "up" ? '[data-testid="transcript-top-spacer"]' : '[data-testid="transcript-bottom-spacer"]',
       );
@@ -5791,6 +5796,13 @@ async function runChatAffordancesCheck(page) {
       const id = anchor.dataset.messageWindowId;
       const before = anchor.getBoundingClientRect().top - element.getBoundingClientRect().top;
       element.dispatchEvent(new Event("scroll"));
+      // React can commit the virtual window later than two animation frames on
+      // a busy runner. Measure only after the requested window actually shifts.
+      const deadline = performance.now() + 10_000;
+      while (rows()[0]?.dataset.messageWindowId === previousFirstRow) {
+        if (performance.now() >= deadline) throw new Error(`${direction} transcript window did not shift`);
+        await frames();
+      }
       await frames();
       const restored = rows().find((row) => row.dataset.messageWindowId === id);
       if (!(restored instanceof HTMLElement)) throw new Error(`${direction} anchor was unmounted`);
