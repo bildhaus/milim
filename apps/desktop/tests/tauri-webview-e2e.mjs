@@ -6002,6 +6002,11 @@ async function runSourceHoverScrollCheck(page) {
 
 async function runHarnessHardeningUiCheck(page) {
   const requests = [];
+  const waitForPersistedDraft = (text) => page.waitForFunction(async (expected) => {
+    const raw = await window.__TAURI_INTERNALS__.invoke("user_state_get", { key: "milim.sessionDrafts" });
+    const draft = raw ? JSON.parse(raw)["e2e-ledger-thread"] : null;
+    return (typeof draft === "string" ? draft : draft?.text ?? "") === expected;
+  }, text);
   // Desktop model discovery reads /v1/models independently of the control
   // bootstrap. Keep the fixture model available on runners with no providers.
   await page.route("**/v1/models", (route) => route.fulfill({
@@ -6392,6 +6397,9 @@ async function runHarnessHardeningUiCheck(page) {
     throw new Error("Claimed steering should retain its submitted transcript text.");
   }
   await composer.fill("Steer with the explicit menu action");
+  // Prove the draft was saved, then wait for its consumed state before reload.
+  // Pending-steer visibility can arrive from bootstrap before the command ACK.
+  await waitForPersistedDraft("Steer with the explicit menu action");
   await page.getByLabel("More actions for active run").click();
   await page.getByRole("menuitem", { name: "Steer next step" }).click();
   await page.getByTestId("pending-steer-message").locator("..").filter({ hasText: "Steer with the explicit menu action" }).waitFor();
@@ -6403,6 +6411,8 @@ async function runHarnessHardeningUiCheck(page) {
     throw new Error("Steering should target the exact active run id.");
   }
 
+  await page.waitForFunction(() => document.querySelector('[data-testid="composer-input"]')?.value === "");
+  await waitForPersistedDraft("");
   await page.reload();
   await page.getByTestId("chat-shell").waitFor();
   await page.getByLabel("Queue message").waitFor();
@@ -6413,16 +6423,19 @@ async function runHarnessHardeningUiCheck(page) {
   await restoredQueuedRow.getByLabel("Remove queued message").waitFor();
   await composer.fill("");
   await restoredQueuedRow.getByLabel("More queued message actions").click();
+  const editCommandStart = commandBodies.length;
+  const editWasSubmitted = () => commandBodies.slice(editCommandStart).some((body) =>
+    body.kind === "turn.queue_delete" && body.payload?.queue_id === "e2e-followup");
   await page.getByRole("menuitem", { name: "Edit queued message" }).click();
+  for (let attempt = 0; attempt < 200 && !editWasSubmitted(); attempt += 1) {
+    await delay(50);
+  }
+  if (!editWasSubmitted()) {
+    throw new Error(`Editing a canonical queued message should delete it durably first: composer=${JSON.stringify(await composer.inputValue())}, commands=${JSON.stringify(commandBodies)}.`);
+  }
   await page.waitForFunction(() =>
     document.querySelector('[data-testid="composer-input"]')?.value === "Queue this follow-up",
   );
-  for (let attempt = 0; attempt < 40 && commandBodies.at(-1)?.kind !== "turn.queue_delete"; attempt += 1) {
-    await delay(50);
-  }
-  if (commandBodies.at(-1)?.kind !== "turn.queue_delete") {
-    throw new Error(`Editing a canonical queued message should delete it durably first: ${JSON.stringify(commandBodies)}.`);
-  }
   await runComposerAutocompleteDismissalCheck(page, composer);
   await composer.fill("Interrupt with one command");
   await page.getByLabel("Queue message").click();
