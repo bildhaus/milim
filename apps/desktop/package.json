@@ -106,12 +106,15 @@
     "overrides": {
       "@hono/node-server": "1.19.17",
       "browserslist": "4.28.9",
-      "fast-uri": "3.1.6",
-      "hono": "4.13.2",
-      "ip-address": "10.5.0",
+      "dompurify": "3.4.17",
+      "fast-uri": "3.1.8",
+      "hono": "4.13.13",
+      "ip-address": "10.7.4",
       "nanoid": "3.3.18",
       "postcss": "8.5.26",
-      "qs": "6.16.0"
+      "proxy-addr": "2.0.8",
+      "qs": "6.16.0",
+      "source-map-js": "1.2.2"
     }
   }
 }
