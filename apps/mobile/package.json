@@ -67,7 +67,7 @@
   "pnpm": {
     "overrides": {
       "linkify-it": "5.0.2",
-      "markdown-it": "14.3.2",
+      "markdown-it": "14.3.3",
       "qs": "6.16.0"
     }
   }
