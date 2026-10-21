@@ -651,6 +651,32 @@ fn workspace_git_branches(root: &FsPath, current: Option<&str>) -> Vec<Workspace
     branches
 }
 
+/// Whether `name` is a safe local branch name to hand to git as an argument.
+///
+/// Mirrors `git check-ref-format --branch` for `refs/heads/<name>` and, above
+/// all, rejects a leading `-` so a client-supplied name can never be parsed as
+/// a git option (for example `-f`, which would discard uncommitted changes).
+fn valid_git_branch_name(name: &str) -> bool {
+    const FORBIDDEN: &[char] = &['~', '^', ':', '?', '*', '[', '\\'];
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with('.')
+        && name != "@"
+        && name != "HEAD"
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.contains("@{")
+        && !name
+            .chars()
+            .any(|c| c == ' ' || c.is_control() || FORBIDDEN.contains(&c))
+        && name
+            .split('/')
+            .all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
 fn git_output(cwd: &FsPath, args: &[&str]) -> std::result::Result<Output, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(cwd).args(args);
@@ -933,7 +959,17 @@ fn workspace_git_action_blocking(
                     "Branch name required.",
                 );
             }
-            vec!["checkout".into(), requested_branch.clone()]
+            if !valid_git_branch_name(&requested_branch) {
+                return workspace_git_action_message(
+                    &action,
+                    "git checkout <branch> --",
+                    false,
+                    "Invalid branch name.",
+                );
+            }
+            // The trailing `--` makes git treat the name strictly as a
+            // revision, never as a pathspec (which would discard changes).
+            vec!["checkout".into(), requested_branch.clone(), "--".into()]
         }
         "create_branch" => {
             if requested_branch.is_empty() {
@@ -944,7 +980,20 @@ fn workspace_git_action_blocking(
                     "Branch name required.",
                 );
             }
-            vec!["checkout".into(), "-b".into(), requested_branch.clone()]
+            if !valid_git_branch_name(&requested_branch) {
+                return workspace_git_action_message(
+                    &action,
+                    "git checkout -b <branch> --",
+                    false,
+                    "Invalid branch name.",
+                );
+            }
+            vec![
+                "checkout".into(),
+                "-b".into(),
+                requested_branch.clone(),
+                "--".into(),
+            ]
         }
         "pull" => {
             if status.has_changes {
@@ -2927,6 +2976,134 @@ mod git_control_plane_tests {
             git_text(&repo, &["branch", "--list", "milim/thread-thread_1"])
                 .unwrap_or_default()
                 .contains("milim/thread-thread_1")
+        );
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn branch_names_reject_options_and_invalid_refs() {
+        for valid in [
+            "main",
+            "feature/one",
+            "codex/new-branch",
+            "v1.2",
+            "a-b_c",
+            "x@y",
+        ] {
+            assert!(valid_git_branch_name(valid), "{valid} should be valid");
+        }
+        for invalid in [
+            "",
+            "-f",
+            "--force",
+            "--orphan=evil",
+            "--upload-pack=touch /tmp/pwned",
+            "--output=/tmp/x",
+            "-",
+            "@",
+            "HEAD",
+            "/main",
+            "main/",
+            "main.",
+            "a..b",
+            "a//b",
+            "a@{1}",
+            "a b",
+            "a\tb",
+            "a\nb",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[b",
+            "a\\b",
+            ".hidden",
+            "feature/.hidden",
+            "main.lock",
+            "feature/x.lock/y",
+        ] {
+            assert!(
+                !valid_git_branch_name(invalid),
+                "{invalid:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_actions_never_pass_client_names_as_options_or_paths() {
+        let base = std::env::temp_dir().join(format!("milim-branch-args-{}", gen_id("test")));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(git_output(&repo, &["init"]).unwrap().status.success());
+        std::fs::write(repo.join("note.txt"), "committed").unwrap();
+        assert!(git_output(&repo, &["add", "note.txt"])
+            .unwrap()
+            .status
+            .success());
+        assert!(git_output(
+            &repo,
+            &[
+                "-c",
+                "user.name=Milim Test",
+                "-c",
+                "user.email=milim@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ]
+        )
+        .unwrap()
+        .status
+        .success());
+        assert!(git_output(&repo, &["branch", "feature/one"])
+            .unwrap()
+            .status
+            .success());
+        std::fs::write(repo.join("note.txt"), "uncommitted work").unwrap();
+
+        let run = |action: &str, branch: &str| {
+            let request: WorkspaceGitActionRequest =
+                serde_json::from_value(json!({ "action": action, "branch": branch })).unwrap();
+            workspace_git_action_blocking(
+                Some(repo.clone()),
+                request,
+                base.join("hot-swap"),
+                base.join("threads"),
+            )
+        };
+        let current = || git_text(&repo, &["branch", "--show-current"]).unwrap_or_default();
+        let initial = current();
+
+        // `git checkout -f` would silently discard the uncommitted edit.
+        for injected in ["-f", "--force", "--orphan=evil", "--detach"] {
+            let response = run("checkout_branch", injected);
+            assert!(!response.ok, "{injected} must be rejected");
+            assert_eq!(response.message, "Invalid branch name.");
+            let response = run("create_branch", injected);
+            assert!(!response.ok, "{injected} must be rejected");
+        }
+        // A file name must not be treated as a pathspec to restore.
+        let response = run("checkout_branch", "note.txt");
+        assert!(!response.ok);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "uncommitted work"
+        );
+        assert_eq!(current(), initial);
+        assert!(git_text(&repo, &["branch", "--list", "evil"]).is_none());
+
+        // Legitimate names still work and carry the uncommitted edit along.
+        let response = run("checkout_branch", "feature/one");
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(response.command, "git checkout feature/one --");
+        assert_eq!(current(), "feature/one");
+        let response = run("create_branch", "codex/new-branch");
+        assert!(response.ok, "{}", response.message);
+        assert_eq!(current(), "codex/new-branch");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("note.txt")).unwrap(),
+            "uncommitted work"
         );
         std::fs::remove_dir_all(base).ok();
     }
