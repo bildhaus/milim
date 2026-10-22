@@ -131,6 +131,10 @@ export function MermaidDiagram({ source }: { source: string }) {
           maxEdges: 500,
           htmlLabels: false,
           flowchart: { htmlLabels: false },
+          // Mermaid 12 defaults to the ELK layout and the `neo` look; keep the
+          // dagre layout and classic look so existing diagrams render as before.
+          layout: "dagre",
+          look: "classic",
           theme: "base",
           darkMode: theme.isDark,
           fontFamily: theme.typography.fontFamily,
