@@ -13,11 +13,6 @@ on:
         required: false
         default: false
         type: boolean
-      upgrade_diagnostics_only:
-        description: With portable validation enabled, inspect the runner without launching the app
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -31,7 +26,7 @@ concurrency:
 
 jobs:
   desktop-windows-upgrade:
-    name: ${{ inputs.upgrade_diagnostics_only && 'Windows WebView2 runner diagnostics' || 'Windows portable upgrade validation' }}
+    name: Windows portable upgrade validation
     if: github.event_name == 'workflow_dispatch' && inputs.verify_portable_upgrade
     runs-on: windows-latest
     timeout-minutes: 120
@@ -71,39 +66,32 @@ jobs:
           path: ${{ runner.temp }}/milim-webview-diagnostics
           if-no-files-found: error
       - uses: actions/checkout@v5
-        if: ${{ !inputs.upgrade_diagnostics_only }}
       - uses: dtolnay/rust-toolchain@stable
-        if: ${{ !inputs.upgrade_diagnostics_only }}
       - uses: pnpm/action-setup@v5
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           version: 9.15.9
       - uses: actions/setup-node@v5
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           save-if: false
           workspaces: apps/desktop/src-tauri -> target
       - run: pnpm -C apps/desktop install --frozen-lockfile
-        if: ${{ !inputs.upgrade_diagnostics_only }}
+      - name: Verify WebView2 policy restoration
+        working-directory: apps/desktop
+        run: node tests/tauri-webview2-ci-policy.test.mjs --native
       - name: Build Windows portable binary
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         run: pnpm -C apps/desktop tauri build --no-bundle
       - name: Smoke release binary
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         run: node scripts/smoke-release-binary.mjs
       - name: Stage Windows portable artifact
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         run: node scripts/stage-portable-release-artifact.mjs
       - name: Verify Windows upgrade from published 0.2.75
-        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         timeout-minutes: 15
         env:
@@ -123,7 +111,7 @@ jobs:
           node tests/tauri-upgrade-smoke.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows upgrade proof
-        if: ${{ always() && !inputs.upgrade_diagnostics_only }}
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: branch-windows-upgrade-proof

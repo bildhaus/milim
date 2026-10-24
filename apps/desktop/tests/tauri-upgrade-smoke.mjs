@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { chromium } from "playwright-core";
 import { waitForCdp } from "./tauri-cdp-readiness.mjs";
+import { configureCiWebViewPolicy } from "./tauri-webview2-ci-policy.mjs";
 
 // Real Windows portable updater smoke. Every mutable path and profile is private.
 // The candidate is staged locally: release discovery/download are separate checks.
@@ -35,10 +36,16 @@ const newBackupPath = join(artifactDir, `upgraded-${toVersion}.milim-backup.json
 const report = { fromVersion, toVersion, previousSha256: oldHash, candidateSha256: candidate ? hash(candidate) : null, isolatedHome, proof: "public-portable-native-apply-update", downloadGate: "not exercised: local candidate staging", checks: {} };
 let session;
 let failure;
+let webviewPolicy;
 
 try {
   ensure(!(await cdpReady()), `CDP port ${cdpPort} is already serving a browser.`);
+  webviewPolicy = configureCiWebViewPolicy(join(isolatedHome, "webview2"), cdpPort);
+  report.webviewPolicy = webviewPolicy
+    ? { mode: "github-hosted-app-specific-hklm", app: "milim-desktop.exe", previousEntries: webviewPolicy.previousEntries, restored: false }
+    : { mode: "environment" };
   session = await launch();
+  report.webviewRuntime = session.browser.version();
   ensure(await invoke("plugin:app|version") === fromVersion, "The previous binary does not match the requested public version.");
   await seedPreviousState();
   await assertData(fromVersion);
@@ -85,8 +92,6 @@ try {
     await session.page.screenshot({ path: join(artifactDir, "upgraded-restored.png"), fullPage: false });
   }
   report.preparedOnly = prepareOnly;
-  writeFileSync(join(artifactDir, "upgrade-proof.json"), JSON.stringify(report, null, 2));
-  console.log(`upgradeProof=${join(artifactDir, "upgrade-proof.json")}`);
 } catch (error) {
   failure = error;
   try {
@@ -95,12 +100,29 @@ try {
     report.loopbackHealthProbe = { url: "http://127.0.0.1:7377/health", errorName: probeError.name, errorCode: probeError.cause?.code };
   }
   await session?.page?.screenshot({ path: join(artifactDir, "failure.png"), fullPage: false }).catch(() => {});
-  writeFileSync(join(artifactDir, "upgrade-failure.json"), JSON.stringify({ ...report, error: String(error), stdout: session?.stdout, stderr: session?.stderr }, null, 2));
 } finally {
-  await closeIsolatedApp();
+  try {
+    await closeIsolatedApp();
+    report.isolatedAppClosed = true;
+  } catch (error) {
+    report.isolatedAppClosed = false;
+    failure ??= error;
+  }
+  try {
+    webviewPolicy?.restore();
+    if (webviewPolicy) report.webviewPolicy.restored = true;
+  } catch (error) {
+    report.policyRestorationError = String(error);
+    failure ??= error;
+  }
   // Retain only the isolated fixture and report for diagnosis; never touch user data.
 }
-if (failure) throw failure;
+if (failure) {
+  writeFileSync(join(artifactDir, "upgrade-failure.json"), JSON.stringify({ ...report, error: String(failure), stdout: session?.stdout, stderr: session?.stderr }, null, 2));
+  throw failure;
+}
+writeFileSync(join(artifactDir, "upgrade-proof.json"), JSON.stringify(report, null, 2));
+console.log(`upgradeProof=${join(artifactDir, "upgrade-proof.json")}`);
 
 async function seedPreviousState() {
   await session.page.evaluate(async () => {
@@ -208,11 +230,15 @@ async function cdpReady() {
 }
 async function closeIsolatedApp() {
   await session?.page?.locator(".win-close").click({ timeout: 1000 }).catch(() => {});
-  await session?.browser?.close().catch(() => {});
+  let closeTimer;
+  try {
+    await Promise.race([session?.browser?.close().catch(() => {}), new Promise((resolve) => { closeTimer = setTimeout(resolve, 2000); })]);
+  } finally { clearTimeout(closeTimer); }
   const escaped = installBinary.replaceAll("'", "''");
   // Exact executable path under our verified private install directory only.
   ensure(within(isolatedHome, installBinary), "Refusing process cleanup outside isolated home.");
-  spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Get-CimInstance Win32_Process -Filter \"Name = 'milim-desktop.exe'\" | Where-Object { $_.ExecutablePath -eq '${escaped}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { windowsHide: true, stdio: "ignore" });
+  const cleanup = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference = 'Stop'; $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'milim-desktop.exe'" | Where-Object { $_.ExecutablePath -eq '${escaped}' }); if ($owned.Count -gt 0) { $owned | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Wait-Process -Id @($owned.ProcessId) -Timeout 5 -ErrorAction SilentlyContinue }; if (@(Get-CimInstance Win32_Process -Filter "Name = 'milim-desktop.exe'" | Where-Object { $_.ExecutablePath -eq '${escaped}' }).Count -ne 0) { exit 1 }`], { windowsHide: true, stdio: "ignore", timeout: 10_000 });
+  ensure(!cleanup.error && cleanup.status === 0, "Isolated app cleanup failed.");
 }
 function isolatedEnvironment(home) {
   const systemRoot = process.env.SystemRoot || "C:\\Windows";
