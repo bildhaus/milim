@@ -120,7 +120,6 @@ jobs:
 
   desktop-windows-webview:
     name: Desktop Windows WebView2 E2E and perf
-    if: github.event_name != 'workflow_dispatch' || !inputs.verify_portable_upgrade
     runs-on: windows-2022
     timeout-minutes: 150
     steps:
@@ -142,6 +141,9 @@ jobs:
         id: build
       - name: WebView2 E2E suite
         run: pnpm -C apps/desktop test:tauri-webview
+      - name: MCP Apps WebView2 E2E
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm -C apps/desktop test:tauri-mcp-apps
       - name: Worker preview tab E2E
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm -C apps/desktop test:tauri-worker-preview
@@ -165,7 +167,6 @@ jobs:
   # binary and runs the /control/v1 smoke in evals/smoke.mjs against it.
   desktop-macos-launch:
     name: Desktop macOS debug build and control smoke
-    if: github.event_name != 'workflow_dispatch' || !inputs.verify_portable_upgrade
     runs-on: macos-latest
     timeout-minutes: 140
     steps:
