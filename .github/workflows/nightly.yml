@@ -7,6 +7,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify_portable_upgrade:
+        description: Validate the branch portable against published 0.2.75 without release writes
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -19,6 +25,99 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  desktop-windows-upgrade:
+    name: Windows portable upgrade validation
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_portable_upgrade
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Record WebView2 runner metadata
+        shell: pwsh
+        run: |
+          $groups = & "$env:WINDIR\System32\whoami.exe" /groups /fo csv /nh
+          if ($LASTEXITCODE -ne 0) { throw "Could not read process integrity metadata." }
+          $integritySids = @([regex]::Matches(($groups -join "`n"), 'S-1-16-\d+') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+          if ($integritySids.Count -ne 1) { throw "Expected one process integrity SID." }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          $roots = @(
+            @{ scope = "machine-x86"; path = "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application" },
+            @{ scope = "machine-x64"; path = "$env:ProgramFiles\Microsoft\EdgeWebView\Application" },
+            @{ scope = "user"; path = "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application" }
+          )
+          $runtimes = @(foreach ($root in $roots) {
+            Get-ChildItem -Path (Join-Path $root.path "*\msedgewebview2.exe") -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $version = $_.VersionInfo.FileVersion
+              if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Unexpected WebView2 file version." }
+              @{ scope = $root.scope; fileVersion = $version }
+            }
+          })
+          if ($runtimes.Count -eq 0) { throw "No installed WebView2 executable version found." }
+          $metadata = @{ integritySid = $integritySids[0]; administratorTokenEnabled = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); webviewRuntimes = $runtimes }
+          $output = Join-Path $env:RUNNER_TEMP "milim-webview-diagnostics"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $output "runner.json")
+          $metadata | ConvertTo-Json -Depth 4
+      - name: Upload WebView2 runner metadata
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-webview-runner-metadata
+          path: ${{ runner.temp }}/milim-webview-diagnostics
+          if-no-files-found: error
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.23.4'
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+          workspaces: apps/desktop/src-tauri -> target
+      - run: pnpm -C apps/desktop install --frozen-lockfile
+      - name: Verify WebView2 policy restoration
+        working-directory: apps/desktop
+        run: node tests/tauri-webview2-ci-policy.test.mjs --native
+      - name: Build Windows portable binary
+        run: pnpm -C apps/desktop tauri build --no-bundle
+      - name: Smoke release binary
+        working-directory: apps/desktop
+        run: node scripts/smoke-release-binary.mjs
+      - name: Stage Windows portable artifact
+        working-directory: apps/desktop
+        run: node scripts/stage-portable-release-artifact.mjs
+      - name: Verify Windows upgrade from published 0.2.75
+        working-directory: apps/desktop
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $previousDir = Join-Path $env:RUNNER_TEMP "milim-upgrade-previous"
+          gh release download v0.2.75 --repo "${{ github.repository }}" --dir $previousDir --pattern milim-windows-x64-portable.exe --pattern milim-windows-x64-portable.exe.sha256
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $candidate = Get-ChildItem -Path "src-tauri/target/release/bundle/portable" -Filter "*.exe" | Select-Object -First 1
+          if (-not $candidate) { throw "Windows upgrade candidate is missing." }
+          $env:MILIM_UPGRADE_PREVIOUS_BINARY = Join-Path $previousDir "milim-windows-x64-portable.exe"
+          $env:MILIM_UPGRADE_CANDIDATE_BINARY = $candidate.FullName
+          $env:MILIM_UPGRADE_FROM_VERSION = "0.2.75"
+          $env:MILIM_UPGRADE_TO_VERSION = (Get-Content "../../VERSION" -Raw).Trim()
+          $env:MILIM_UPGRADE_ARTIFACT_DIR = Join-Path (Get-Location) "tester-artifacts/portable-upgrade"
+          node tests/tauri-upgrade-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows upgrade proof
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: branch-windows-upgrade-proof
+          path: apps/desktop/tester-artifacts/portable-upgrade
+          if-no-files-found: error
+
   desktop-windows-webview:
     name: Desktop Windows WebView2 E2E and perf
     runs-on: windows-2022
@@ -42,6 +141,9 @@ jobs:
         id: build
       - name: WebView2 E2E suite
         run: pnpm -C apps/desktop test:tauri-webview
+      - name: MCP Apps WebView2 E2E
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm -C apps/desktop test:tauri-mcp-apps
       - name: Worker preview tab E2E
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm -C apps/desktop test:tauri-worker-preview

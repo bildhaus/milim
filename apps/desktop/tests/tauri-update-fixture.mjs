@@ -12,12 +12,15 @@ export async function isolateBenchmarkUpdates(context, version) {
     });
   });
   function disableAutomaticUpdates() {
-    if (!["http:", "https:", "tauri:"].includes(location.protocol)) return;
+    if (!["http:", "https:", "tauri:"].includes(location.protocol)) return true;
     localStorage.setItem("milim.local.updates", JSON.stringify({
       state: { automaticCheck: false, automaticDownload: false }, version: 1,
     }));
+    return true;
   }
   await context.addInitScript(disableAutomaticUpdates);
-  for (const page of context.pages()) await page.evaluate(disableAutomaticUpdates);
+  for (const page of context.pages()) {
+    await page.waitForFunction(disableAutomaticUpdates, null, { timeout: 5_000 });
+  }
   return evidence;
 }
