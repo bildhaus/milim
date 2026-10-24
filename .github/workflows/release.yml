@@ -248,6 +248,33 @@ jobs:
         if: matrix.os == 'windows-latest'
         working-directory: apps/desktop
         run: node scripts/stage-portable-release-artifact.mjs
+      - name: Verify Windows upgrade from published 0.2.75
+        if: matrix.os == 'windows-latest'
+        working-directory: apps/desktop
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $previousDir = Join-Path $env:RUNNER_TEMP "milim-upgrade-previous"
+          gh release download v0.2.75 --repo "${{ github.repository }}" --dir $previousDir --pattern milim-windows-x64-portable.exe --pattern milim-windows-x64-portable.exe.sha256
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $candidate = Get-ChildItem -Path "src-tauri/target/release/bundle/portable" -Filter "*.exe" | Select-Object -First 1
+          if (-not $candidate) { throw "Windows upgrade candidate is missing." }
+          $env:MILIM_UPGRADE_PREVIOUS_BINARY = Join-Path $previousDir "milim-windows-x64-portable.exe"
+          $env:MILIM_UPGRADE_CANDIDATE_BINARY = $candidate.FullName
+          $env:MILIM_UPGRADE_FROM_VERSION = "0.2.75"
+          $env:MILIM_UPGRADE_TO_VERSION = (Get-Content "../../VERSION" -Raw).Trim()
+          $env:MILIM_UPGRADE_ARTIFACT_DIR = Join-Path (Get-Location) "tester-artifacts/release-upgrade"
+          node tests/tauri-upgrade-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload Windows upgrade proof
+        if: matrix.os == 'windows-latest' && always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-upgrade-proof
+          path: apps/desktop/tester-artifacts/release-upgrade
+          if-no-files-found: error
       - name: Upload Windows direct download alias to draft release
         if: matrix.os == 'windows-latest'
         working-directory: apps/desktop

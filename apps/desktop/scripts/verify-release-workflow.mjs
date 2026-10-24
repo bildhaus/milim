@@ -56,6 +56,9 @@ for (const needle of [
   "pnpm -C apps/desktop tauri build --no-bundle",
   "node scripts/smoke-release-binary.mjs",
   "node scripts/stage-portable-release-artifact.mjs",
+  "node tests/tauri-upgrade-smoke.mjs",
+  "name: windows-upgrade-proof",
+  "path: apps/desktop/tester-artifacts/release-upgrade",
   "node scripts/generate-release-manifest.mjs",
   "node scripts/verify-release-manifest.mjs",
   "actions/upload-artifact@v6",
@@ -109,6 +112,9 @@ assertBefore(releaseWorkflow, "Generate release notes", "Create or update draft 
 assertBefore(releaseWorkflow, checkoutReleaseTagRef, "Require macOS signing secrets", "release workflow signing preflight");
 assertBefore(releaseWorkflow, "Require macOS signing secrets", "Build macOS app and DMG", "release workflow signing preflight");
 assertBefore(releaseWorkflow, "pnpm -C apps/desktop tauri build --no-bundle", "node scripts/smoke-release-binary.mjs", "release workflow launch smoke");
+assertBefore(releaseWorkflow, "node scripts/stage-portable-release-artifact.mjs", "node tests/tauri-upgrade-smoke.mjs", "release workflow upgrade candidate");
+assertBefore(releaseWorkflow, "node tests/tauri-upgrade-smoke.mjs", "Upload Windows direct download alias", "release workflow upgrade gate");
+assertNotIncludes(releaseWorkflow, "continue-on-error:", "release workflow fail-closed gates");
 assertBefore(releaseWorkflow, "node scripts/stage-portable-release-artifact.mjs", "node scripts/generate-release-manifest.mjs", "release workflow manifest");
 assertBefore(releaseWorkflow, "node scripts/generate-release-manifest.mjs", "node scripts/verify-release-manifest.mjs", "release workflow manifest");
 assertBefore(releaseWorkflow, "node scripts/verify-release-manifest.mjs", "Upload release manifest artifact", "release workflow manifest");
@@ -183,7 +189,7 @@ assertNotIncludes(nightlyWorkflow, "perf:suite:enforce", "hosted-runner performa
 assertNotIncludes(ciWorkflow, 'tags: ["v*"]', "CI workflow");
 assertNotIncludes(ciWorkflow, "runtime-evidence:", "CI workflow");
 assertLineOccurrences(releaseWorkflow, '    tags: ["v*"]', 1, "Release workflow trigger");
-assertOccurrences(releaseWorkflow, "tester-artifacts", 2, "Release runtime evidence paths");
+assertOccurrences(runtimeEvidenceJob, "tester-artifacts", 2, "Release runtime evidence paths");
 
 assertEqual(
   desktopPackage.scripts["verify:runtime-conformance"],
