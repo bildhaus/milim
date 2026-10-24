@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import http from "node:http";
 import net from "node:net";
 import { chromium } from "playwright-core";
+import { waitForCdp } from "./tauri-cdp-readiness.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binary = process.env.MILIM_TAURI_E2E_BINARY || join(root, "src-tauri", "target", "tauri-verify", "debug", "milim-desktop.exe");
@@ -6877,11 +6878,13 @@ function collectErrors(page) {
 }
 
 async function launchTauri(milimHome) {
+  const controlFile = join(milimHome, "startup-control.json");
   const child = spawn(binary, [], {
     cwd: root,
     env: {
       ...process.env,
       MILIM_HOME: milimHome,
+      MILIM_E2E_CONTROL_FILE: controlFile,
       WEBVIEW2_USER_DATA_FOLDER: join(milimHome, "webview2"),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: appendWebViewArg(
         process.env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS,
@@ -6891,7 +6894,8 @@ async function launchTauri(milimHome) {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const session = { child, stdout: "", stderr: "", browser: null, page: null };
+  const session = { child, controlFile, stdout: "", stderr: "", browser: null, page: null };
+  child.once("error", (error) => { session.spawnErrorCode = error.code ?? "UNKNOWN"; });
   child.stdout?.on("data", (chunk) => {
     session.stdout += chunk.toString();
   });
@@ -6899,7 +6903,8 @@ async function launchTauri(milimHome) {
     session.stderr += chunk.toString();
   });
 
-  await waitForCdp(session, cdpUrl, 20_000);
+  const readiness = await waitForCdp(session, cdpUrl, 20_000);
+  console.log(`tauriCdpReady=${JSON.stringify(readiness)}`);
   session.browser = await chromium.connectOverCDP(cdpUrl);
   const context = session.browser.contexts()[0] ?? await session.browser.newContext();
   session.page = await firstPage(context);
@@ -6963,22 +6968,6 @@ async function waitForPortClosed(port, timeoutMs) {
     await delay(250);
   }
   throw new Error(`Timed out waiting for port ${port} to close.`);
-}
-
-async function waitForCdp(session, url, timeoutMs) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (session.child.exitCode != null) {
-      throw new Error(`Tauri exited before CDP was ready.\nstdout:\n${session.stdout}\nstderr:\n${session.stderr}`);
-    }
-    try {
-      const resp = await fetch(`${url}/json/version`);
-      if (resp.ok) return;
-    } catch {
-      await delay(250);
-    }
-  }
-  throw new Error(`Timed out waiting for ${url}/json/version.\nstdout:\n${session.stdout}\nstderr:\n${session.stderr}`);
 }
 
 async function firstPage(context) {
