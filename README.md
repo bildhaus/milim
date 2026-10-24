@@ -42,7 +42,7 @@ The desktop app embeds the server and runs as a single instance, so normal use d
 
 ### Run the desktop app from source
 
-Use Node 22.13 or newer with the repository-pinned pnpm 9.15.9, then run from the repository root:
+Use Node 22.23.4+ (22.x) or 24.22.1+ (24.x) with the repository-pinned pnpm 9.15.9, then run from the repository root:
 
 ```powershell
 corepack enable

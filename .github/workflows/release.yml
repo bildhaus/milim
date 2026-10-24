@@ -31,6 +31,10 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
       - name: Validate release tag
         working-directory: apps/desktop
         run: node scripts/validate-release-tag.mjs
@@ -71,7 +75,7 @@ jobs:
           version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
@@ -115,7 +119,7 @@ jobs:
           version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
@@ -311,6 +315,10 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: refs/tags/${{ env.MILIM_RELEASE_TAG }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.23.4'
+          package-manager-cache: false
       - name: Download release manifest artifacts
         uses: actions/download-artifact@v8
         with:
