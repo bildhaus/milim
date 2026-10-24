@@ -30,7 +30,7 @@ jobs:
           version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/site/pnpm-lock.yaml
       - run: pnpm -C apps/site install --frozen-lockfile
@@ -53,7 +53,7 @@ jobs:
           version: 9.15.9
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/site/pnpm-lock.yaml
       - run: pnpm -C apps/site install --frozen-lockfile
