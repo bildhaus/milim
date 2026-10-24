@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import net from "node:net";
 import { chromium } from "playwright-core";
 import { seedTranscriptFixture } from "./tauri-transcript-fixture.mjs";
+import { isolateBenchmarkUpdates } from "./tauri-update-fixture.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binaryMode = process.argv.includes("--binary");
@@ -451,6 +452,7 @@ async function runCanonicalBinaryBenchmark() {
 
     const launchStartedAt = Date.now();
     session = await launchTauriBinary(milimHome, canonicalErrors);
+    report.runtime.updaterIsolation = session.updaterIsolation;
     report.runtime.accountRuntimeDiscovery =
       await mockAccountRuntimeDiscovery(session.page);
     await session.page
@@ -1416,7 +1418,7 @@ async function mockAccountRuntimeDiscovery(page) {
   await page.route("**/*", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (!(path in responses)) {
-      await route.continue();
+      await route.fallback();
       return;
     }
     interceptedCounts[path] = (interceptedCounts[path] ?? 0) + 1;
@@ -2129,6 +2131,10 @@ async function launchTauriBinary(milimHome, errors) {
   try {
     await waitForCdp(session, cdpUrl, 90_000);
     session.browser = await chromium.connectOverCDP(cdpUrl);
+    session.updaterIsolation = await isolateBenchmarkUpdates(
+      session.browser.contexts()[0],
+      readFileSync(join(root, "..", "..", "VERSION"), "utf8").trim(),
+    );
     session.page = await tauriPage(
       session.browser,
       session,
