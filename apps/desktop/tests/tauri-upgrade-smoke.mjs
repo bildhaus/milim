@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFi
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { chromium } from "playwright-core";
+import { waitForCdp } from "./tauri-cdp-readiness.mjs";
 
 // Real Windows portable updater smoke. Every mutable path and profile is private.
 // The candidate is staged locally: release discovery/download are separate checks.
@@ -88,6 +89,11 @@ try {
   console.log(`upgradeProof=${join(artifactDir, "upgrade-proof.json")}`);
 } catch (error) {
   failure = error;
+  try {
+    report.loopbackHealthProbe = { url: "http://127.0.0.1:7377/health", status: (await fetch("http://127.0.0.1:7377/health", { signal: AbortSignal.timeout(1000) })).status };
+  } catch (probeError) {
+    report.loopbackHealthProbe = { url: "http://127.0.0.1:7377/health", errorName: probeError.name, errorCode: probeError.cause?.code };
+  }
   await session?.page?.screenshot({ path: join(artifactDir, "failure.png"), fullPage: false }).catch(() => {});
   writeFileSync(join(artifactDir, "upgrade-failure.json"), JSON.stringify({ ...report, error: String(error), stdout: session?.stdout, stderr: session?.stderr }, null, 2));
 } finally {
@@ -177,8 +183,9 @@ async function launch() {
   const result = { child, stdout: "", stderr: "", browser: null, page: null };
   child.stdout.on("data", (chunk) => { result.stdout += chunk; });
   child.stderr.on("data", (chunk) => { result.stderr += chunk; });
+  child.on("error", (error) => { result.spawnErrorCode = error.code ?? error.name; });
   session = result;
-  await waitFor(() => { if (child.exitCode != null) throw new Error(`Previous binary exited: ${result.stderr}`); return cdpReady(); }, "isolated WebView2 CDP", 60_000);
+  report.previousStartup = await waitForCdp(result, cdpUrl, 60_000);
   return attach(result);
 }
 async function reconnectAfterUpgrade() {
