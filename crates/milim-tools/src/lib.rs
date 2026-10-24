@@ -1101,13 +1101,18 @@ mod tests {
         std::fs::create_dir_all(&run).unwrap();
         let old = run.join("old.txt");
         std::fs::write(&old, "old").unwrap();
+        let retention = Duration::from_secs(24 * 60 * 60);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - retention * 2)
+            .unwrap();
         let fresh_run = root.join("run-2");
         std::fs::create_dir_all(&fresh_run).unwrap();
         std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        std::fs::write(fresh_run.join("fresh.txt"), "fresh").unwrap();
-        // Everything written before the sleep is older than the 10ms cutoff.
-        let removed = prune_tool_output(&root, Duration::from_millis(10));
+        // Explicit file ages keep scheduler delays outside the expiry boundary.
+        let removed = prune_tool_output(&root, retention);
         assert_eq!(removed, 1);
         assert!(!old.exists());
         assert!(!run.exists(), "an emptied run directory is removed");
