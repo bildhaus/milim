@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      upgrade_diagnostics_only:
+        description: With portable validation enabled, inspect the runner without launching the app
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -26,35 +31,79 @@ concurrency:
 
 jobs:
   desktop-windows-upgrade:
-    name: Windows portable upgrade validation
+    name: ${{ inputs.upgrade_diagnostics_only && 'Windows WebView2 runner diagnostics' || 'Windows portable upgrade validation' }}
     if: github.event_name == 'workflow_dispatch' && inputs.verify_portable_upgrade
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
+      - name: Record WebView2 runner metadata
+        shell: pwsh
+        run: |
+          $groups = & "$env:WINDIR\System32\whoami.exe" /groups /fo csv /nh
+          if ($LASTEXITCODE -ne 0) { throw "Could not read process integrity metadata." }
+          $integritySids = @([regex]::Matches(($groups -join "`n"), 'S-1-16-\d+') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+          if ($integritySids.Count -ne 1) { throw "Expected one process integrity SID." }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          $roots = @(
+            @{ scope = "machine-x86"; path = "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application" },
+            @{ scope = "machine-x64"; path = "$env:ProgramFiles\Microsoft\EdgeWebView\Application" },
+            @{ scope = "user"; path = "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application" }
+          )
+          $runtimes = @(foreach ($root in $roots) {
+            Get-ChildItem -Path (Join-Path $root.path "*\msedgewebview2.exe") -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $version = $_.VersionInfo.FileVersion
+              if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Unexpected WebView2 file version." }
+              @{ scope = $root.scope; fileVersion = $version }
+            }
+          })
+          if ($runtimes.Count -eq 0) { throw "No installed WebView2 executable version found." }
+          $metadata = @{ integritySid = $integritySids[0]; administratorTokenEnabled = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); webviewRuntimes = $runtimes }
+          $output = Join-Path $env:RUNNER_TEMP "milim-webview-diagnostics"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $output "runner.json")
+          $metadata | ConvertTo-Json -Depth 4
+      - name: Upload WebView2 runner metadata
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-webview-runner-metadata
+          path: ${{ runner.temp }}/milim-webview-diagnostics
+          if-no-files-found: error
       - uses: actions/checkout@v5
+        if: ${{ !inputs.upgrade_diagnostics_only }}
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !inputs.upgrade_diagnostics_only }}
       - uses: pnpm/action-setup@v5
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           version: 9.15.9
       - uses: actions/setup-node@v5
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           node-version: '22.23.4'
           cache: pnpm
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - uses: Swatinem/rust-cache@v2
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         with:
           save-if: false
           workspaces: apps/desktop/src-tauri -> target
       - run: pnpm -C apps/desktop install --frozen-lockfile
+        if: ${{ !inputs.upgrade_diagnostics_only }}
       - name: Build Windows portable binary
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         run: pnpm -C apps/desktop tauri build --no-bundle
       - name: Smoke release binary
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         run: node scripts/smoke-release-binary.mjs
       - name: Stage Windows portable artifact
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         run: node scripts/stage-portable-release-artifact.mjs
       - name: Verify Windows upgrade from published 0.2.75
+        if: ${{ !inputs.upgrade_diagnostics_only }}
         working-directory: apps/desktop
         timeout-minutes: 15
         env:
@@ -74,7 +123,7 @@ jobs:
           node tests/tauri-upgrade-smoke.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows upgrade proof
-        if: always()
+        if: ${{ always() && !inputs.upgrade_diagnostics_only }}
         uses: actions/upload-artifact@v6
         with:
           name: branch-windows-upgrade-proof
