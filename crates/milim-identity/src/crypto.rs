@@ -8,6 +8,7 @@
 //!   - Address = EIP-55 checksum of `keccak256(uncompressed_pubkey[1..])[12..]`.
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey, VerifyingKey};
+use k256::elliptic_curve::Generate;
 use milim_core::{Error, Result};
 use sha3::{Digest, Keccak256};
 
@@ -32,9 +33,7 @@ pub fn domain_hash(prefix: &str, payload: &[u8]) -> [u8; 32] {
 pub fn sign_with_prefix(payload: &[u8], secret: &[u8], prefix: &str) -> Result<[u8; 65]> {
     let key = SigningKey::from_slice(secret).map_err(|e| Error::Other(format!("bad key: {e}")))?;
     let digest = domain_hash(prefix, payload);
-    let (sig, recid) = key
-        .sign_prehash_recoverable(&digest)
-        .map_err(|e| Error::Other(format!("sign failed: {e}")))?;
+    let (sig, recid) = key.sign_prehash_recoverable(&digest);
     let mut out = [0u8; 65];
     out[..64].copy_from_slice(&sig.to_bytes());
     out[64] = recid.to_byte() + 27;
@@ -63,7 +62,7 @@ pub fn derive_address(secret: &[u8]) -> Result<String> {
 }
 
 fn address_from_verifying_key(vk: &VerifyingKey) -> String {
-    let point = vk.to_encoded_point(false); // 0x04 || X(32) || Y(32)
+    let point = vk.to_sec1_point(false); // 0x04 || X(32) || Y(32)
     let body = &point.as_bytes()[1..]; // drop 0x04
     let hash = keccak256(body);
     let raw: String = hash[12..].iter().map(|b| format!("{b:02x}")).collect();
@@ -89,12 +88,31 @@ pub fn eip55_checksum(raw_lower: &str) -> String {
 
 /// Generate a random secp256k1 secret key (32 bytes).
 pub fn generate_secret() -> [u8; 32] {
-    SigningKey::random(&mut rand::rngs::OsRng).to_bytes().into()
+    SigningKey::generate().to_bytes().into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_key_preserves_address_and_recoverable_signature() {
+        // Public test key and signature recorded with k256 0.13.4 before migration.
+        let mut secret = [0u8; 32];
+        secret[31] = 1;
+        let payload = b"milim identity compatibility";
+        let address = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+        let expected = hex::decode("77fd3f542e8d0e9dcdc64b3d5d6cd1cab6261da3beaf0802330c1095b1167c484f57c1bbc2b035d978ce29a9d6f450789d6aa84d43fad93a20eda489bb87f5141b").unwrap();
+        assert_eq!(derive_address(&secret).unwrap(), address);
+        assert_eq!(
+            sign_with_prefix(payload, &secret, ACCESS_PREFIX).unwrap(),
+            expected.as_slice()
+        );
+        assert_eq!(
+            recover_address(payload, &expected, ACCESS_PREFIX).unwrap(),
+            address
+        );
+    }
 
     #[test]
     fn sign_then_recover_matches_address() {

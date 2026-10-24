@@ -75,7 +75,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 aes-gcm = "0.10"
 rand = "0.8"
 # identity / crypto
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa", "getrandom"] }
 sha3 = "0.10"
 base64 = "0.22"
 hex = "0.4"
