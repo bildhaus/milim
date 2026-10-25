@@ -8,14 +8,19 @@ import { collectMcpEvidence, installMcpMessageEvidence, saveFailureEvidence } fr
 
 function recorder(frame = false) {
   const handlers = {};
+  const listeners = {};
+  let timestamp = 0;
   const chart = {};
   const parent = {};
   const window = {};
   window.top = frame ? parent : window;
-  const context = { window, parent, Number, document: {
+  const context = { window, parent, Number, performance: { now: () => ++timestamp }, document: {
     body: { dataset: { view: frame ? "chart" : "" } },
     querySelector: () => ({ contentWindow: chart }),
-  }, addEventListener: (name, handler) => { handlers[name] = handler; } };
+  }, addEventListener: (name, handler) => {
+    (listeners[name] ??= []).push(handler);
+    handlers[name] = (event) => listeners[name].forEach((listener) => listener(event));
+  } };
   vm.runInNewContext(`(${installMcpMessageEvidence.toString()})()`, context);
   return { handlers, window, source: frame ? parent : chart };
 }
@@ -59,6 +64,20 @@ test("unavailable native state and detached chart preserve core protocol evidenc
   assert.deepEqual(evidence.persisted, { timedOut: true });
   assert.deepEqual(evidence.chart, { unavailable: true });
   assert.ok(!JSON.stringify(evidence).includes("SECRET-CANARY"));
+});
+
+test("pointer evidence preserves bounded trusted event ordering without DOM values", () => {
+  const { handlers, window } = recorder(true);
+  window.__milimMcpTrackPointer = true;
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    handlers[type]({ type, isTrusted: true, pointerType: "mouse", button: 0, buttons: type.endsWith("down") ? 1 : 0,
+      clientX: 20, clientY: 30, target: { tagName: "BUTTON", value: "SECRET-CANARY", textContent: "SECRET-CANARY", closest: () => true } });
+  }
+  assert.deepEqual(Array.from(window.__milimMcpPointerEvents, (event) => event.type), ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]);
+  assert.ok(window.__milimMcpPointerEvents.every((event, index) => event.order === index + 1 && event.atMs === index + 1 && event.isTrusted && event.target === "refresh"));
+  for (let index = 0; index < 100; index++) handlers.pointerdown({ target: { tagName: "SECRET-CANARY", title: "SECRET-CANARY" } });
+  assert.equal(window.__milimMcpPointerEvents.length, 50);
+  assert.ok(!JSON.stringify(window.__milimMcpPointerEvents).includes("SECRET-CANARY"));
 });
 
 test("artifact I/O and screenshot errors never replace the original test failure", async () => {

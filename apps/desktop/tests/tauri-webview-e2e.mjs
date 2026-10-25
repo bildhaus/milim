@@ -7,7 +7,7 @@ import http from "node:http";
 import net from "node:net";
 import { chromium } from "playwright-core";
 import { waitForCdp } from "./tauri-cdp-readiness.mjs";
-import { collectMcpEvidence, installMcpMessageEvidence, saveFailureEvidence } from "./tauri-mcp-evidence.mjs";
+import { captureMcpPointerGeometry, collectMcpEvidence, installMcpMessageEvidence, saveFailureEvidence } from "./tauri-mcp-evidence.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binary = process.env.MILIM_TAURI_E2E_BINARY || join(root, "src-tauri", "target", "tauri-verify", "debug", "milim-desktop.exe");
@@ -138,6 +138,7 @@ let failure;
 let turnChangesRepo;
 let generationFixture;
 let mcpBrowserErrors = [];
+const mcpPointerGeometry = {};
 
 try {
   if (generationControlsOnly) {
@@ -315,6 +316,7 @@ try {
   const evidence = { errorName: ["Error", "TypeError", "TimeoutError"].includes(err.name) ? err.name : "other", startup: err.startupDiagnostics ?? null };
   if (mcpAppsOnly && evidenceDir && session?.page && !session.page.isClosed()) {
     evidence.mcp = await collectMcpEvidence(session.page, mcpBrowserErrors.length);
+    evidence.mcpPointerGeometry = mcpPointerGeometry;
   }
   if (evidenceDir) {
     await saveFailureEvidence(evidenceDir, mode, evidence, session?.page);
@@ -2173,9 +2175,17 @@ async function runMcpAppsCheck(page) {
   }, `${host.base}/health`);
   if (network !== "blocked") throw new Error("MCP App bypassed its default-deny network CSP.");
 
-  await frame.getByRole("button", { name: "Refresh" }).click();
+  mcpPointerGeometry.before = await captureMcpPointerGeometry(page, true).catch(() => ({ unavailable: true }));
+  try {
+    await frame.getByRole("button", { name: "Refresh" }).click();
+  } catch (error) {
+    mcpPointerGeometry.after = await captureMcpPointerGeometry(page).catch(() => ({ unavailable: true }));
+    throw error;
+  }
+  const pointerAfter = captureMcpPointerGeometry(page).catch(() => ({ unavailable: true }));
   const approval = app.locator(".mcp-app-approval");
-  await approval.waitFor();
+  try { await approval.waitFor(); }
+  finally { mcpPointerGeometry.after = await pointerAfter; }
   const approvalText = await approval.innerText();
   if (!approvalText.includes("refresh_chart") || !approvalText.includes("{}")) {
     throw new Error(`MCP App Review did not show the exact call: ${approvalText}`);
@@ -6906,7 +6916,7 @@ async function launchTauri(milimHome) {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const session = { child, controlFile, webviewDataFolder: join(milimHome, "webview2"), stdout: "", stderr: "", browser: null, page: null };
+  const session = { child, controlFile, observeStartupAfterDeadline: Boolean(process.env.MILIM_TAURI_E2E_ARTIFACT_DIR), webviewDataFolder: join(milimHome, "webview2"), stdout: "", stderr: "", browser: null, page: null };
   child.once("error", (error) => { session.spawnErrorCode = error.code ?? "UNKNOWN"; });
   child.stdout?.on("data", (chunk) => {
     session.stdout += chunk.toString();

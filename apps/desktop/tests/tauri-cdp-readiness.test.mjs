@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { waitForCdp } from "./tauri-cdp-readiness.mjs";
+import { observeStartupAfterDeadline, waitForCdp } from "./tauri-cdp-readiness.mjs";
 
 let mode = "ready";
 let requests = 0;
@@ -34,7 +34,24 @@ try {
     assert.ok(!error.message.includes("TOKEN_MUST_NOT_APPEAR_IN_DIAGNOSTICS"));
     return true;
   });
+  setTimeout(() => { mode = "ready"; }, 150);
+  await assert.rejects(waitForCdp({ ...session(), controlFile, observeStartupAfterDeadline: true }, url, 100), (error) => {
+    assert.match(error.message, /Timed out waiting/);
+    assert.ok(error.startupDiagnostics.afterDeadline.firstCdpReadyMs > 100);
+    assert.ok(error.startupDiagnostics.afterDeadline.firstApiHealthyMs >= 100);
+    assert.ok(error.startupDiagnostics.afterDeadline.finishedAtMs < 1500);
+    assert.ok(!error.message.includes("TOKEN_MUST_NOT_APPEAR_IN_DIAGNOSTICS"));
+    return true;
+  });
+  mode = "invalid";
+  const invalidObservation = await observeStartupAfterDeadline({ ...session(), controlFile }, url, Date.now(), 100);
+  assert.equal(invalidObservation.firstCdpReadyMs, null);
+  assert.ok(invalidObservation.firstApiHealthyMs !== null);
   mode = "hang";
+  const hungObservation = await observeStartupAfterDeadline({ ...session(), controlFile }, url, Date.now(), 100);
+  assert.equal(hungObservation.firstCdpReadyMs, null);
+  assert.equal(hungObservation.firstApiHealthyMs, null);
+  assert.ok(hungObservation.finishedAtMs < 1000);
   const started = Date.now();
   await assert.rejects(waitForCdp(session(), url, 100), /Timed out waiting/);
   assert.ok(Date.now() - started < 1500, "A stalled HTTP probe escaped the readiness deadline");
@@ -46,6 +63,9 @@ try {
   await assert.rejects(waitForCdp({ ...session(), child: { exitCode: null, signalCode: "SIGTERM" } }, url, 1000), /Tauri exited before CDP/);
   await assert.rejects(waitForCdp({ ...session(), spawnErrorCode: "ENOENT" }, url, 1000), /Tauri could not be spawned/);
   assert.equal(requests, beforeExit, "Exited or unspawned processes must not be probed");
+  const stopped = await observeStartupAfterDeadline({ ...session(), child: { exitCode: 1 } }, url, Date.now(), 100);
+  assert.equal(stopped.childStopped, true);
+  assert.equal(requests, beforeExit);
   console.log("CDP readiness: valid endpoint, delayed readiness, invalid200, stalled HTTP, exit, signal and spawn failure checks passed.");
 } finally {
   rmSync(temp, { recursive: true, force: true });

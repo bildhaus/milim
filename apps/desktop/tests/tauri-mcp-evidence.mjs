@@ -7,6 +7,23 @@ export function installMcpMessageEvidence() {
   window.__milimMcpEvidence = messages;
   window.__milimMcpErrors = [];
   window.__milimMcpRefreshClicks = 0;
+  window.__milimMcpPointerEvents = [];
+  window.__milimMcpTrackPointer = false;
+  for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
+    addEventListener(type, (event) => {
+      const events = window.__milimMcpPointerEvents;
+      if (!window.__milimMcpTrackPointer || events.length >= 50) return;
+      events.push({
+        order: events.length + 1, atMs: performance.now(), type, isTrusted: event.isTrusted === true,
+        pointerType: ["mouse", "pen", "touch"].includes(event.pointerType) ? event.pointerType : null,
+        button: Number.isInteger(event.button) && event.button >= -1 && event.button <= 5 ? event.button : null,
+        buttons: Number.isInteger(event.buttons) && event.buttons >= 0 && event.buttons <= 31 ? event.buttons : null,
+        x: Number.isFinite(event.clientX) ? event.clientX : null, y: Number.isFinite(event.clientY) ? event.clientY : null,
+        target: event.target?.closest?.("#refresh") ? "refresh" : event.target?.title === "MCP App ui://milim.test/chart" ? "chart-frame" : "other",
+        tag: ["BUTTON", "IFRAME", "BODY", "HTML", "DIV", "SPAN"].includes(event.target?.tagName) ? event.target.tagName : "other",
+      });
+    }, true);
+  }
   addEventListener("unhandledrejection", (event) => {
     if (window.__milimMcpErrors.length >= 10) return;
     window.__milimMcpErrors.push({
@@ -45,6 +62,30 @@ async function boundedEvidence(read) {
   finally { clearTimeout(timer); }
 }
 
+export async function captureMcpPointerGeometry(page, arm = false) {
+  const selector = 'iframe[title="MCP App ui://milim.test/chart"]';
+  const button = page.frameLocator(selector).getByRole("button", { name: "Refresh" });
+  const frameRect = await boundedEvidence(() => page.locator(selector).boundingBox());
+  const buttonRect = await boundedEvidence(() => button.boundingBox());
+  const parent = await boundedEvidence(() => page.evaluate(({ rect, arm }) => {
+    if (arm) { window.__milimMcpPointerEvents = []; window.__milimMcpTrackPointer = true; }
+    const iframe = document.querySelector('iframe[title="MCP App ui://milim.test/chart"]');
+    const hit = rect && Number.isFinite(rect.x) ? document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) : null;
+    return { events: window.__milimMcpPointerEvents ?? [], focused: document.hasFocus(), chartFrameActive: document.activeElement === iframe,
+      hitIsChartFrame: hit === iframe, hitTag: ["IFRAME", "BODY", "HTML", "DIV", "BUTTON"].includes(hit?.tagName) ? hit.tagName : "other",
+      viewport: { width: innerWidth, height: innerHeight, scale: visualViewport?.scale ?? null } };
+  }, { rect: buttonRect, arm }));
+  const chart = await boundedEvidence(() => button.evaluate((element, arm) => {
+    if (arm) { window.__milimMcpPointerEvents = []; window.__milimMcpTrackPointer = true; }
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return { events: window.__milimMcpPointerEvents ?? [], focused: document.hasFocus(), refreshFocused: document.activeElement === element,
+      hitIsRefresh: hit === element, localRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY } };
+  }, arm));
+  return { frameRect, buttonRect, parent, chart };
+}
+
 export async function saveFailureEvidence(directory, mode, evidence, page) {
   try {
     mkdirSync(directory, { recursive: true });
@@ -67,6 +108,7 @@ export async function collectMcpEvidence(page, browserErrorCount) {
     const titles = ["chart", "diagram", "form", "dashboard", "viewer"].map((kind) => `MCP App ui://milim.test/${kind}`);
     return {
       messages: window.__milimMcpEvidence ?? [],
+      pointerEvents: window.__milimMcpPointerEvents ?? [],
       rejectionClasses: window.__milimMcpErrors ?? [],
       renderedToolApproval: document.querySelector('[aria-label^="Session controls,"]')?.getAttribute("aria-label")?.match(/Tool approval (Review|Guarded|Open)/i)?.[1]?.toLowerCase() ?? null,
       intendedIframeTitle: titles[0],
@@ -82,6 +124,7 @@ export async function collectMcpEvidence(page, browserErrorCount) {
   }));
   const chart = await boundedEvidence(() => page.frameLocator('iframe[title="MCP App ui://milim.test/chart"]').locator("body").evaluate((body) => ({
     messages: window.__milimMcpEvidence ?? [],
+    pointerEvents: window.__milimMcpPointerEvents ?? [],
     rejectionClasses: window.__milimMcpErrors ?? [],
     refreshClicks: window.__milimMcpRefreshClicks ?? 0,
     refreshHandlerPresent: typeof document.querySelector("#refresh")?.onclick === "function",
