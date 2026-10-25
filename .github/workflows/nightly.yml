@@ -122,6 +122,8 @@ jobs:
     name: Desktop Windows WebView2 E2E and perf
     runs-on: windows-2022
     timeout-minutes: 150
+    env:
+      MILIM_TAURI_E2E_ARTIFACT_DIR: ${{ github.workspace }}/apps/desktop/tester-artifacts/native-e2e
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -139,7 +141,34 @@ jobs:
       - run: pnpm -C apps/desktop install --frozen-lockfile
       - run: pnpm -C apps/desktop verify:tauri
         id: build
+      - name: Record native runtime provenance
+        shell: pwsh
+        run: |
+          $groups = & "$env:WINDIR\System32\whoami.exe" /groups /fo csv /nh
+          if ($LASTEXITCODE -ne 0) { throw "Could not read process integrity metadata." }
+          $integritySids = @([regex]::Matches(($groups -join "`n"), 'S-1-16-\d+') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+          if ($integritySids.Count -ne 1) { throw "Expected one process integrity SID." }
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          $roots = @("${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application", "$env:ProgramFiles\Microsoft\EdgeWebView\Application", "$env:LOCALAPPDATA\Microsoft\EdgeWebView\Application")
+          $versions = @(foreach ($root in $roots) {
+            Get-ChildItem -Path (Join-Path $root "*\msedgewebview2.exe") -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $version = $_.VersionInfo.FileVersion
+              if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Unexpected WebView2 version." }
+              $version
+            }
+          })
+          if ($versions.Count -eq 0) { throw "No WebView2 version found." }
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw "Invalid checkout revision." }
+          $files = @((Get-Item "apps/desktop/src-tauri/target/tauri-verify/debug/milim-desktop.exe")) + @(Get-ChildItem "apps/desktop/dist/assets/app-bridge-*.js")
+          if ($files.Count -ne 2) { throw "Expected one debug executable and one app-bridge chunk." }
+          $hashes = @($files | ForEach-Object { @{ name=$_.Name; size=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+          $metadata = @{ commit=$sha; ref=$env:GITHUB_REF; event=$env:GITHUB_EVENT_NAME; integritySid=$integritySids[0]; administratorTokenEnabled=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); webviewVersions=$versions; builtFiles=$hashes }
+          New-Item -ItemType Directory -Force -Path $env:MILIM_TAURI_E2E_ARTIFACT_DIR | Out-Null
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $env:MILIM_TAURI_E2E_ARTIFACT_DIR "runtime-provenance.json")
+          $metadata | ConvertTo-Json -Depth 4
       - name: WebView2 E2E suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm -C apps/desktop test:tauri-webview
       - name: MCP Apps WebView2 E2E
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -147,6 +176,15 @@ jobs:
       - name: Worker preview tab E2E
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: pnpm -C apps/desktop test:tauri-worker-preview
+      - name: Upload native failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-native-diagnostics
+          path: |
+            apps/desktop/tester-artifacts/native-e2e/*.json
+            apps/desktop/tester-artifacts/native-e2e/*.png
+          if-no-files-found: warn
       - name: Canonical perf suite (report budgets on hosted runners)
         if: ${{ !cancelled() }}
         run: pnpm -C apps/desktop perf:suite

@@ -7,6 +7,7 @@ import http from "node:http";
 import net from "node:net";
 import { chromium } from "playwright-core";
 import { waitForCdp } from "./tauri-cdp-readiness.mjs";
+import { collectMcpEvidence, installMcpMessageEvidence, saveFailureEvidence } from "./tauri-mcp-evidence.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const binary = process.env.MILIM_TAURI_E2E_BINARY || join(root, "src-tauri", "target", "tauri-verify", "debug", "milim-desktop.exe");
@@ -136,6 +137,7 @@ let session;
 let failure;
 let turnChangesRepo;
 let generationFixture;
+let mcpBrowserErrors = [];
 
 try {
   if (generationControlsOnly) {
@@ -308,7 +310,15 @@ try {
   }
 } catch (err) {
   failure = err;
-  if (session?.page && !session.page.isClosed()) {
+  const evidenceDir = process.env.MILIM_TAURI_E2E_ARTIFACT_DIR;
+  const mode = mcpAppsOnly ? "mcp-apps" : workerPreviewTabOnly ? "worker-preview" : "general";
+  const evidence = { errorName: ["Error", "TypeError", "TimeoutError"].includes(err.name) ? err.name : "other", startup: err.startupDiagnostics ?? null };
+  if (mcpAppsOnly && evidenceDir && session?.page && !session.page.isClosed()) {
+    evidence.mcp = await collectMcpEvidence(session.page, mcpBrowserErrors.length);
+  }
+  if (evidenceDir) {
+    await saveFailureEvidence(evidenceDir, mode, evidence, session?.page);
+  } else if (session?.page && !session.page.isClosed()) {
     await session.page.screenshot({ path: screenshots.failure, fullPage: false }).catch((screenshotErr) => {
       console.error(`failureScreenshotError=${screenshotErr.message}`);
     });
@@ -1953,6 +1963,8 @@ async function runSidebarSectionMotionCheck(page, splitOnly = false) {
 
 async function runMcpAppsCheck(page) {
   const browserErrors = collectErrors(page);
+  mcpBrowserErrors = browserErrors;
+  await page.addInitScript(installMcpMessageEvidence);
   const fixture = join(root, "..", "..", "crates", "milim-mcp-client", "tests", "fixtures", "apps_server.js");
   const host = await page.evaluate(async ({ fixturePath }) => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
@@ -6894,7 +6906,7 @@ async function launchTauri(milimHome) {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const session = { child, controlFile, stdout: "", stderr: "", browser: null, page: null };
+  const session = { child, controlFile, webviewDataFolder: join(milimHome, "webview2"), stdout: "", stderr: "", browser: null, page: null };
   child.once("error", (error) => { session.spawnErrorCode = error.code ?? "UNKNOWN"; });
   child.stdout?.on("data", (chunk) => {
     session.stdout += chunk.toString();

@@ -11,7 +11,9 @@ export async function waitForCdp(session, url, timeoutMs) {
       child: { pid: session.child.pid, exitCode: session.child.exitCode, signalCode: session.child.signalCode, spawnErrorCode: session.spawnErrorCode },
       ...(await startupDiagnostics(session, url)),
     };
-    throw new Error(`${message}\nstartupDiagnostics=${JSON.stringify(diagnostics)}\nstdout:\n${session.stdout}\nstderr:\n${session.stderr}`);
+    const error = new Error(`${message}\nstartupDiagnostics=${JSON.stringify(diagnostics)}\nstdout:\n${session.stdout}\nstderr:\n${session.stderr}`);
+    error.startupDiagnostics = diagnostics;
+    throw error;
   }
   while (Date.now() - started < timeoutMs) {
     if (session.spawnErrorCode) await fail("Tauri could not be spawned before CDP was ready.");
@@ -55,7 +57,9 @@ async function startupDiagnostics(session, url) {
   }
   if (process.platform === "win32" && session.child.pid) {
     const port = Number(new URL(url).port);
-    const script = `$processes = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('milim-desktop.exe','msedgewebview2.exe') } | Select-Object Name,ProcessId,ParentProcessId); $listeners = @(Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess); @{ processes=$processes; listeners=$listeners } | ConvertTo-Json -Depth 4 -Compress`;
+    // A false literal command-line match is inconclusive (case/8.3 paths or child roles can differ).
+    const profile = String(session.webviewDataFolder ?? "").replaceAll("'", "''");
+    const script = `$fixtureProfile = '${profile}'; $processes = @(Get-CimInstance Win32_Process -Filter "Name='milim-desktop.exe' OR Name='msedgewebview2.exe'" | ForEach-Object { $version = if ($_.ExecutablePath) { (Get-Item -LiteralPath $_.ExecutablePath -ErrorAction SilentlyContinue).VersionInfo.FileVersion } else { $null }; @{ name=$_.Name; pid=$_.ProcessId; parentPid=$_.ParentProcessId; fixtureProfileTextMatch=([bool]$fixtureProfile -and $_.CommandLine -and $_.CommandLine.Contains($fixtureProfile)); fileVersion=if ($version -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$') { $version } else { $null } } }); $listeners = @(Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,State,OwningProcess); @{ processes=$processes; listeners=$listeners } | ConvertTo-Json -Depth 4 -Compress`;
     const query = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 5000 });
     result.processQueryExitCode = query.status;
     try { result.windows = JSON.parse(query.stdout); } catch { result.processQueryError = query.error?.code ?? "No JSON diagnostics"; }
