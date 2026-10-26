@@ -98,6 +98,9 @@ function toolEventIcon(name?: string): ChatStreamEventIcon {
     case "grep":
     case "write_file":
     case "edit_file":
+    case "apply_patch":
+    case "notebook_edit":
+    case "code_navigation":
     case "patch_file":
     case "file_change":
       return "file";
@@ -143,6 +146,12 @@ function toolLabel(name: string | undefined, done: boolean): string {
       return done ? "Created file" : "Creating file";
     case "edit_file":
       return done ? "Edited file" : "Editing file";
+    case "apply_patch":
+      return done ? "Applied patch" : "Applying patch";
+    case "notebook_edit":
+      return done ? "Edited notebook" : "Editing notebook";
+    case "code_navigation":
+      return done ? "Navigated code" : "Navigating code";
     case "patch_file":
       return done ? "Patched file" : "Patching file";
     case "shell":
@@ -199,6 +208,12 @@ function toolFailedLabel(name: string | undefined): string {
       return "Create file failed";
     case "edit_file":
       return "Edit file failed";
+    case "apply_patch":
+      return "Apply patch failed";
+    case "notebook_edit":
+      return "Edit notebook failed";
+    case "code_navigation":
+      return "Code navigation failed";
     case "patch_file":
       return "Patch file failed";
     case "shell":
@@ -261,7 +276,8 @@ function toolDetail(name: string | undefined, args: Record<string, unknown> | nu
   }
   const processId = toolArg(args, "process_id");
   if ((name === "process_output" || name === "process_kill") && processId) return processId;
-  const diffStats = name === "write_file" || name === "edit_file" || name === "patch_file" ? toolDiffStats(record) : undefined;
+  const diffStats =
+    name === "write_file" || name === "edit_file" || name === "apply_patch" || name === "patch_file" ? toolDiffStats(record) : undefined;
   if (command) return command;
   if (path) return compactText(diffStats ? `${path} ${diffStats}` : path);
   if (url) return compactText(url);

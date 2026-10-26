@@ -1,4 +1,9 @@
 {
+  "0.2.77": {
+    "version": "0.2.77",
+    "summary": "milim 0.2.77 lets provider agents carry their real tool history, files they've read, shell state, and dev servers across turns, ask you questions or propose a plan mid-run, run Workers in the background under step and token budgets, apply multi-file patches, and stop background processes when milim quits.",
+    "items": []
+  },
   "0.2.76": {
     "version": "0.2.76",
     "summary": "Applies security fixes to identity signing and build tooling.",

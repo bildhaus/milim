@@ -4,7 +4,12 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 
 export type ControlProtocolRangeV1 = { min: number, max: number, };
 
-export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, attachment_uploads?: boolean, run_ledger?: boolean, run_inspection?: boolean, effective_run_preview?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean, };
+export type ControlCapabilitiesV1 = { timeline_sync: boolean, queued_turns: boolean, approvals: boolean, agents: boolean, workers: boolean, attachments: boolean, websocket_tickets: boolean, lan_discovery: boolean, push_notifications: boolean, inline_branches: boolean, appearance_assets: boolean, attachment_uploads?: boolean, run_ledger?: boolean, run_inspection?: boolean, effective_run_preview?: boolean, steering?: boolean, context_injection?: boolean, model_favorites?: boolean, thread_links?: boolean, thread_origins?: boolean,
+/**
+ * The host records `ask_user` and `exit_plan_mode` decisions in the
+ * timeline and accepts `turn.send` answers to them.
+ */
+user_decisions?: boolean, };
 
 export type ThreadLinkV1 = { owner_thread_id: string, target_thread_id: string, target_title: string, target_workspace: string | null, target_project: string | null, target_model: string | null, target_runtime: string, target_archived_at_ms: number | null, target_busy: boolean, target_queued_turns: number, created_at_ms: number, };
 
@@ -47,6 +52,27 @@ export type PendingApprovalV1 = { id: string, run_id: string, thread_id: string,
 export type QueuedTurnV1 = { id: string, thread_id: string, command_id: string, accepted_at_ms: number, display_text: string, attachments: Array<ControlAttachmentV1>, mailbox_origin?: MailboxOriginV1, };
 
 export type PendingInputV1 = { id: string, thread_id: string, target_run_id: string | null, kind: string, state: string, display_text?: string, attachments?: Array<ControlAttachmentV1>, created_at_ms: number, };
+
+export type UserDecisionKindV1 = "ask_user" | "exit_plan_mode";
+
+export type UserQuestionOptionV1 = { label: string, description: string, };
+
+export type UserQuestionV1 = { question: string, header: string, options: Array<UserQuestionOptionV1>, multi_select: boolean, };
+
+export type UserDecisionV1 = { id: string, kind: UserDecisionKindV1, questions: Array<UserQuestionV1>, plan?: string,
+/**
+ * The decision as Markdown. It ends the run's assistant message so
+ * clients without decision cards (and later model turns) still see it.
+ */
+fallback_text: string, };
+
+export type UserDecisionResponseV1 = "answer" | "approve_plan" | "revise_plan";
+
+export type UserDecisionAnswerV1 = { decision_id: string, response: UserDecisionResponseV1, };
+
+export type UserDecisionStatusV1 = "answered" | "superseded";
+
+export type UserDecisionResolvedV1 = { decision_id: string, status: UserDecisionStatusV1, response?: UserDecisionResponseV1, command_id?: string, };
 
 export type AppearanceColorsV1 = { primary_text: string, secondary_text: string, tertiary_text: string, placeholder_text: string, bg_primary: string, bg_secondary: string, bg_tertiary: string, sidebar_bg: string, accent: string, accent_light: string, border_primary: string, border_secondary: string, focus_border: string, success: string, warning: string, error: string, info: string, card_bg: string, card_border: string, input_bg: string, input_border: string, };
 

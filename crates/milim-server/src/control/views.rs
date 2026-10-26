@@ -250,6 +250,8 @@ impl RunManager {
             mailbox_origin: None,
             mailbox_context: Vec::new(),
             preview_runtime: None,
+            answers_decision: None,
+            unattended: false,
         };
         let resolver = ModelInputResolver {
             privacy: &state.privacy,

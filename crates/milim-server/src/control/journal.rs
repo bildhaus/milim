@@ -32,6 +32,10 @@ pub(super) struct RunJournal {
     pub(super) run_id: String,
     /// The latest committed model step as the model saw it; see [`SentStep`].
     pub(super) sent_step: Mutex<Option<SentStep>>,
+    /// Where the user request that started the run sits in the messages of
+    /// the next model request (see [`TurnMessages`]). Set before the first
+    /// step and moved by in-run summaries.
+    pub(super) request_index: Mutex<Option<usize>>,
 }
 
 /// The latest model step exactly as the Agent loop sent it and the model
@@ -80,6 +84,7 @@ impl RunJournal {
             thread_id: thread_id.to_string(),
             run_id: run_id.to_string(),
             sent_step: Mutex::default(),
+            request_index: Mutex::default(),
         }
     }
 
@@ -157,6 +162,38 @@ impl RunJournal {
         self.sent_step
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn request_index(&self) -> std::sync::MutexGuard<'_, Option<usize>> {
+        self.request_index
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Record this run's own model-visible messages for later turns to
+    /// replay (see [`TurnMessages`]). `partial_step` is the text of a model
+    /// step that was cut off before its response was committed. A run whose
+    /// ledger cannot be rebuilt records nothing, and later turns replay its
+    /// work log instead.
+    pub(super) fn commit_turn_messages(&self, partial_step: &str) -> Result<()> {
+        let partial_step = (!partial_step.trim().is_empty())
+            .then(|| self.privacy_processed_text(partial_step).ok())
+            .flatten();
+        let Some(turn) = ledger_turn_messages(&self.store, &self.run_id, partial_step)? else {
+            return Ok(());
+        };
+        let count = turn.messages.len();
+        let value = serde_json::to_value(&turn)
+            .map_err(|error| Error::Other(format!("serialize turn messages: {error}")))?;
+        let digest = self.put_artifact("turn_messages", &value)?;
+        self.store.control_append_run_event(
+            &self.run_id,
+            &Uuid::new_v4().to_string(),
+            None,
+            TURN_MESSAGES_EVENT,
+            &json!({ "artifact_digest": digest, "messages": count }).to_string(),
+        )?;
+        Ok(())
     }
 
     /// The next step's messages from the exact copy of the previous one, if
@@ -340,6 +377,203 @@ fn image_follow_ups(memory_cache: &[ChatMessage], had_tool_calls: bool) -> Vec<C
         })
         .cloned()
         .collect()
+}
+
+const TURN_MESSAGES_EVENT: &str = "turn_messages_committed";
+
+/// What a later turn sends for a tool call the run never answered.
+pub(super) const UNANSWERED_TOOL_CALL: &str =
+    "[no result: the turn ended before this tool call returned; it may not have run]";
+
+/// One finished run's own messages as its model last saw them, rebuilt from
+/// the ledger: everything after the user request that started the run in its
+/// last committed model request (intermediate assistant text, tool calls,
+/// model-visible tool results after truncation, image follow-ups, steering,
+/// and any in-run elision stubs or summary), then that step's response and
+/// tool results. Every tool call is answered; one the run never answered gets
+/// [`UNANSWERED_TOOL_CALL`].
+///
+/// Like the rest of the ledger it is privacy-processed and credential
+/// scrubbed; `privacy` is the mode it was processed under and `model` the
+/// model that produced it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct TurnMessages {
+    pub(super) model: String,
+    pub(super) privacy: String,
+    pub(super) messages: Vec<ChatMessage>,
+}
+
+/// The run's recorded [`TurnMessages`], if it committed them.
+pub(super) fn turn_messages(store: &UserDataStore, run_id: &str) -> Result<Option<TurnMessages>> {
+    let Some(event) = store
+        .control_run_events_by_types(run_id, &[TURN_MESSAGES_EVENT])?
+        .pop()
+    else {
+        return Ok(None);
+    };
+    let value = run_artifact_value(store, run_id, &event.data_json)?;
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(|error| Error::Other(format!("decode turn messages: {error}")))
+}
+
+fn run_artifact_value(store: &UserDataStore, run_id: &str, data_json: &str) -> Result<Value> {
+    let data = parse_value(data_json)?;
+    let digest = data
+        .get("artifact_digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Other("run event is missing artifact_digest".into()))?;
+    let artifact = store
+        .control_run_artifact(run_id, digest)?
+        .ok_or_else(|| Error::Other(format!("run artifact {digest} is missing")))?;
+    parse_value(&artifact.data_json)
+}
+
+/// Rebuild a run's [`TurnMessages`] from its ledger. `None` for a run with no
+/// committed model request, or one recorded before requests carried the
+/// position of the run's request.
+fn ledger_turn_messages(
+    store: &UserDataStore,
+    run_id: &str,
+    partial_step: Option<String>,
+) -> Result<Option<TurnMessages>> {
+    let events = store.control_run_events_by_types(
+        run_id,
+        &[
+            "model_request_resolved",
+            "model_response_committed",
+            "tool_result_committed",
+        ],
+    )?;
+    let Some(request_event) = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == "model_request_resolved")
+    else {
+        return Ok(None);
+    };
+    let data = parse_value(&request_event.data_json)?;
+    let Some(request_index) = data
+        .get("request_index")
+        .and_then(Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return Ok(None);
+    };
+    let privacy = data
+        .get("privacy")
+        .and_then(Value::as_str)
+        .unwrap_or("off")
+        .to_string();
+    let request = run_artifact_value(store, run_id, &request_event.data_json)?;
+    let mut messages: Vec<ChatMessage> = serde_json::from_value(
+        request
+            .get("messages")
+            .cloned()
+            .ok_or_else(|| Error::Other("stored provider request has no messages".into()))?,
+    )
+    .map_err(|error| Error::Other(format!("decode stored provider messages: {error}")))?;
+    if messages
+        .get(request_index)
+        .map(|message| message.role.as_str())
+        != Some("user")
+    {
+        return Ok(None);
+    }
+    let mut turn = messages.split_off(request_index + 1);
+    let same_step = |event: &&milim_storage::ControlRunEventRecord| {
+        event.seq > request_event.seq && event.step_id == request_event.step_id
+    };
+    let response = events
+        .iter()
+        .filter(same_step)
+        .find(|event| event.event_type == "model_response_committed");
+    if let Some(event) = response {
+        let response = run_artifact_value(store, run_id, &event.data_json)?;
+        let tool_calls: Vec<ToolCall> = serde_json::from_value(
+            response
+                .get("tool_calls")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| Error::Other(format!("decode stored provider tool calls: {error}")))?;
+        let text = |key: &str| response.get(key).and_then(Value::as_str).unwrap_or("");
+        turn.extend(replayed_assistant_message(
+            text("content"),
+            text("reasoning"),
+            tool_calls,
+            response
+                .get("provider_state")
+                .filter(|state| !state.is_null())
+                .cloned(),
+        ));
+        for event in events
+            .iter()
+            .filter(same_step)
+            .filter(|event| event.event_type == "tool_result_committed")
+        {
+            let result = run_artifact_value(store, run_id, &event.data_json)?;
+            let model_content = result
+                .get("model_content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Other("stored tool result has no model_content".into()))?;
+            turn.push(tool_result_message(
+                result.get("call_id").and_then(Value::as_str),
+                model_content,
+            ));
+        }
+    } else if let Some(text) = partial_step {
+        turn.extend(replayed_assistant_message(&text, "", Vec::new(), None));
+    }
+    answer_open_tool_calls(&mut turn);
+    Ok(Some(TurnMessages {
+        model: request
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        privacy,
+        messages: turn,
+    }))
+}
+
+/// Answer the calls of the last tool-call turn that have no result, so a
+/// replayed run never leaves a call open (providers reject those). Earlier
+/// turns came from a committed request, so they are already answered.
+fn answer_open_tool_calls(messages: &mut Vec<ChatMessage>) {
+    let Some(last_call) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant" && message.tool_calls.is_some())
+    else {
+        return;
+    };
+    let answered = messages[last_call + 1..]
+        .iter()
+        .filter(|message| message.role == "tool")
+        .map(|message| message.tool_call_id.clone())
+        .collect::<Vec<_>>();
+    let mut answered_without_id = answered.iter().filter(|id| id.is_none()).count();
+    let open = messages[last_call]
+        .tool_calls
+        .iter()
+        .flatten()
+        .filter(|call| match &call.id {
+            Some(id) => !answered.iter().flatten().any(|answered| answered == id),
+            None if answered_without_id > 0 => {
+                answered_without_id -= 1;
+                false
+            }
+            None => true,
+        })
+        .map(|call| tool_result_message(call.id.as_deref(), UNANSWERED_TOOL_CALL))
+        .collect::<Vec<_>>();
+    // Results follow their call turn before any other message (an image
+    // follow-up), as within a run.
+    let at = messages[last_call + 1..]
+        .iter()
+        .position(|message| message.role != "tool")
+        .map_or(messages.len(), |offset| last_call + 1 + offset);
+    messages.splice(at..at, open);
 }
 
 pub(super) struct ModelInputResolver<'a> {
@@ -759,6 +993,11 @@ impl milim_agents::AgentStepHook for RunJournal {
         if let Some(rebuilt) = self.rebuild_messages_for_step(step, messages)? {
             *messages = rebuilt;
         }
+        if step == 1 {
+            // The run's request as the loop anchors it: before any steering
+            // claimed below.
+            *self.request_index() = messages.iter().rposition(|message| message.role == "user");
+        }
         let claimed = self
             .store
             .control_claim_step_inputs(&self.thread_id, &self.run_id)?;
@@ -833,11 +1072,11 @@ impl milim_agents::AgentStepHook for RunJournal {
     async fn commit_model_request(&self, step: usize, request: &CompletionRequest) -> Result<()> {
         let data = self.privacy_processed_request(request)?;
         let digest = self.put_artifact("provider_request", &data)?;
-        self.append_event(
-            step,
-            "model_request_resolved",
-            json!({ "artifact_digest": digest, "privacy": self.privacy_mode.as_str() }),
-        )?;
+        let mut event = json!({ "artifact_digest": digest, "privacy": self.privacy_mode.as_str() });
+        if let Some(index) = *self.request_index() {
+            event["request_index"] = json!(index);
+        }
+        self.append_event(step, "model_request_resolved", event)?;
         *self.sent_step() = Some(SentStep {
             step,
             messages: request.messages.clone(),
@@ -938,6 +1177,9 @@ impl milim_agents::AgentStepHook for RunJournal {
         step: usize,
         compaction: &milim_agents::ContextCompaction,
     ) -> Result<()> {
+        if let Some(index) = compaction.request_index {
+            *self.request_index() = Some(index);
+        }
         self.append_event(
             step,
             "context_compacted",

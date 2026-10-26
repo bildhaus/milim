@@ -46,6 +46,9 @@ pub(super) struct NativeRunSpec<'a> {
     /// This turn's own context (linked-thread mail, preview runtime). It
     /// joins the per-turn system message, outside the cached prefix.
     pub(super) turn_context: Vec<ChatMessage>,
+    /// A person can answer this control run's `ask_user` and
+    /// `exit_plan_mode` decisions (not a scheduled or linked-thread turn).
+    pub(super) user_decisions: bool,
 }
 
 /// A native run ready for the agent loop.
@@ -66,7 +69,8 @@ pub(super) struct NativeRun {
 /// for the run's tools, one block of instructions from broadest to most
 /// specific, the caller's own instructions, the skill index, and the stable
 /// environment. Everything that changes per turn (today's date, git state,
-/// skills mentioned in or relevant to the request, and per-turn context)
+/// background processes still running from earlier turns, skills mentioned
+/// in or relevant to the request, and per-turn context)
 /// goes in one system message right before the latest user message; adapters
 /// with a separate system prompt (Anthropic, Gemini) send it there as
 /// `<system-reminder>` user text in that user turn, outside the cached
@@ -96,6 +100,7 @@ pub(super) fn build_native_run(
         mut memory,
         mut messages,
         turn_context,
+        user_decisions,
     } = spec;
     // A control run's history can open with system notes of its own (a
     // compaction checkpoint, earlier turns' context), which stay in place.
@@ -127,16 +132,30 @@ pub(super) fn build_native_run(
         &caller_instructions,
         skills.explicit.as_deref(),
     );
-    let policy = policy.with_management_tools_for(requests.iter().map(String::as_str));
-    let mut tools = agent_registry_for_mode_with_context(
-        st,
-        tool_mode,
-        enabled_tools,
-        Some(memory),
-        &policy,
-        run_context,
+    // The loop reaches deferred tools, so large tool groups wait behind
+    // `tool_search` instead of filling every request.
+    let policy = ToolRunPolicy {
+        defer_tools: true,
+        ..policy
+    };
+    let mut tools = registry_for_model(
+        agent_registry_for_mode_with_context(
+            st,
+            tool_mode,
+            enabled_tools,
+            Some(memory),
+            &policy,
+            run_context,
+        ),
+        model,
     );
     register_skill_tools(&mut tools, st, skill_mode, enabled_skills, workspace);
+    // Added after the Worker registries are derived, so Workers never get
+    // them. A run with no tools stays plain chat, except in plan mode, which
+    // always ends by handing its plan over with `exit_plan_mode`.
+    if kind == NativeRunKind::Control && user_decisions && (!tools.is_empty() || policy.plan_mode) {
+        register_user_decision_tools(&mut tools, tool_mode, enabled_tools, policy.plan_mode);
+    }
     let can_load_skills = tools.contains("load_skill");
     let environment = (!tools.is_empty())
         .then(|| crate::workspace_context::RunEnvironment::capture(workspace, model));
@@ -162,6 +181,9 @@ pub(super) fn build_native_run(
 
     let mut turn = Vec::new();
     turn.extend(environment.as_ref().map(turn_environment));
+    // State the tools kept from earlier turns, such as background processes
+    // still running, changes from turn to turn, so it stays out of the prefix.
+    turn.extend(tools.turn_context());
     if can_load_skills {
         turn.extend(skills.relevant);
     }

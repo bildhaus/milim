@@ -209,21 +209,9 @@ jobs:
     timeout-minutes: 140
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: pnpm/action-setup@v5
-        with:
-          version: 9.15.9
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22.23.4'
-          cache: pnpm
-          cache-dependency-path: apps/desktop/pnpm-lock.yaml
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop/src-tauri -> target
-      - run: pnpm -C apps/desktop install --frozen-lockfile
+      # Shared with the eval regression gate (eval-gate.yml).
       - name: Debug desktop build
-        run: pnpm -C apps/desktop verify:tauri
+        uses: ./.github/actions/desktop-debug-build
       - name: Launch the debug binary and run the control smoke
         shell: bash
         run: |
@@ -257,9 +245,10 @@ jobs:
       # Agent evals (evals/README.md) on a small, cheap task subset, against
       # a fresh launch of the same real Tauri debug binary. They run only when
       # the MILIM_EVAL_PROVIDER_KEY secret and MILIM_EVAL_MODEL variable are
-      # set. The app gets the key through its OpenAI-compatible fallback
-      # backend (MILIM_REMOTE_BASE_URL / MILIM_REMOTE_API_KEY), which
-      # model-run shell commands never inherit; the runner never sees it.
+      # set. evals/ci/headless-evals.sh gives the key only to the app, through
+      # its OpenAI-compatible fallback backend (MILIM_REMOTE_BASE_URL /
+      # MILIM_REMOTE_API_KEY), which model-run shell commands never inherit;
+      # the runner never sees it.
       - name: Agent evals (nightly subset)
         id: evals
         shell: bash
@@ -276,32 +265,7 @@ jobs:
             exit 0
           fi
           echo "ran=true" >> "$GITHUB_OUTPUT"
-          binary=apps/desktop/src-tauri/target/tauri-verify/debug/milim-desktop
-          test -x "$binary"
-          export MILIM_HOME="$(mktemp -d)"
-          e2e_dir="$(mktemp -d)"
-          chmod 700 "$e2e_dir"
-          export MILIM_E2E_CONTROL_FILE="$e2e_dir/control.json"
-          log="$RUNNER_TEMP/milim-desktop-evals.log"
-          env -u MILIM_EVAL_PROVIDER_KEY \
-            MILIM_REMOTE_BASE_URL="$EVAL_PROVIDER_BASE_URL" \
-            MILIM_REMOTE_API_KEY="$MILIM_EVAL_PROVIDER_KEY" \
-            RUST_BACKTRACE=1 "$binary" >"$log" 2>&1 &
-          pid=$!
-          status=0
-          env -u MILIM_EVAL_PROVIDER_KEY MILIM_EVAL_ARCHIVE=1 \
-            node evals/run.mjs --out evals/results/nightly.json --fail-on-error || status=$?
-          kill "$pid" 2>/dev/null || true
-          for _ in $(seq 1 20); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.5
-          done
-          kill -9 "$pid" 2>/dev/null || true
-          rm -rf "$MILIM_HOME" "$e2e_dir"
-          if [ "$status" != 0 ]; then
-            tail -n 200 "$log"
-            exit "$status"
-          fi
+          bash evals/ci/headless-evals.sh --out evals/results/nightly.json --fail-on-error
       - name: Upload eval results
         if: ${{ always() && steps.evals.outputs.ran == 'true' }}
         uses: actions/upload-artifact@v6

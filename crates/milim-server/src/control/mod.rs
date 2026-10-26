@@ -37,6 +37,7 @@ mod replay;
 mod run_config;
 mod threads;
 mod turns;
+mod user_decisions;
 mod views;
 
 pub(crate) use replay::{completion_request_from_value, completion_request_value};
@@ -64,6 +65,12 @@ struct TurnSendPayloadV1 {
     attachments: Vec<ControlAttachmentV1>,
     #[serde(default)]
     preview_runtime: Option<ManagedPreviewRuntimeV1>,
+    /// The pending `ask_user` or `exit_plan_mode` decision this turn answers.
+    #[serde(default)]
+    answers_decision: Option<UserDecisionAnswerV1>,
+    /// No person is present to answer decisions (a scheduled turn).
+    #[serde(default)]
+    unattended: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +99,10 @@ struct AcceptedTurnV1 {
     mailbox_context: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     preview_runtime: Option<ManagedPreviewRuntimeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    answers_decision: Option<UserDecisionAnswerV1>,
+    #[serde(default)]
+    unattended: bool,
 }
 
 struct ActiveRun {
@@ -500,3 +511,5 @@ fn control_default_true() -> bool {
 mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod user_decision_tests;

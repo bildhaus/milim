@@ -327,6 +327,8 @@ impl DesktopServerRuntimeState {
         if let Some(control) = &self.control {
             control.shutdown(Duration::from_secs(2)).await;
         }
+        // Background processes that chat threads kept across turns.
+        host_tools::release_all_threads();
         let _ = self.shutdown.send(true);
         let mut tasks =
             std::mem::take(&mut *self.tasks.lock().expect("desktop server tasks poisoned"));
@@ -4620,6 +4622,42 @@ fn request_user_state_flush_then_exit<R: tauri::Runtime>(app: &tauri::AppHandle<
     });
 }
 
+/// Quit like the Quit menu item when the process is asked to terminate
+/// (`kill`, Ctrl+C in a terminal), so background shell processes, preview
+/// apps, and the embedded servers stop with the app instead of outliving it.
+/// A second signal exits immediately.
+async fn quit_on_termination_signal<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    if !termination_signal().await {
+        return;
+    }
+    request_user_state_flush_then_exit(&app);
+    if termination_signal().await {
+        std::process::exit(1);
+    }
+}
+
+/// Wait for SIGTERM or SIGINT (Ctrl+C on Windows). Returns false when the
+/// handlers cannot be installed, leaving the default behavior in place.
+#[cfg(unix)]
+async fn termination_signal() -> bool {
+    use tokio::signal::unix::{signal, SignalKind};
+    let (Ok(mut terminate), Ok(mut interrupt)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        return false;
+    };
+    tokio::select! {
+        _ = terminate.recv() => true,
+        _ = interrupt.recv() => true,
+    }
+}
+
+#[cfg(not(unix))]
+async fn termination_signal() -> bool {
+    tokio::signal::ctrl_c().await.is_ok()
+}
+
 fn complete_workspace_editor_leave_action<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     action: WorkspaceEditorLeaveAction,
@@ -4988,6 +5026,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 mcp.connect_all().await;
             });
+            tauri::async_runtime::spawn(quit_on_termination_signal(app.handle().clone()));
             tauri::async_runtime::spawn(async move {
                 loop {
                     let store = artifact_migration_store.clone();

@@ -1,0 +1,13 @@
+--- a/src/report.js
++++ b/src/report.js
+@@ -6,6 +6,9 @@ const pad = (value) => String(value).padStart(2, "0");
+ /** The UTC calendar day of an ISO timestamp, as "YYYY-MM-DD". */
+ export function dayKey(timestamp) {
+-  const date = new Date(timestamp);
++  const parsed = new Date(timestamp);
++  // Shift west-of-UTC clocks forward so local getters see the UTC day.
++  const offset = Math.max(0, parsed.getTimezoneOffset());
++  const date = new Date(parsed.getTime() + offset * 60_000);
+   if (Number.isNaN(date.getTime())) throw new RangeError(`invalid timestamp: ${timestamp}`);
+   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+ }

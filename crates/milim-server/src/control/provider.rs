@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use milim_agents::AgentStepHook as _;
-use milim_core::api::openai::ChatMessage;
+use milim_core::api::openai::{ChatMessage, Content, ContentPart};
 use milim_core::{Error, Result};
 use milim_inference::{CompletionRequest, StreamEvent};
 use milim_storage::UserDataStore;
@@ -23,6 +23,7 @@ use super::metrics::response_metrics_value;
 use super::preview_runtime::managed_preview_runtime_context;
 use super::run_config::{parse_reasoning_effort, sampling_from_generation};
 use super::{AcceptedTurnV1, RunManager, RunOutcome};
+use crate::privacy::PrivacyMode;
 use crate::routes::{service_for_run, RunContext};
 use crate::AppState;
 
@@ -64,7 +65,13 @@ impl RunManager {
         accepted: &AcceptedTurnV1,
         stop: &mut watch::Receiver<bool>,
     ) -> Result<RunOutcome> {
-        let mut messages = control_chat_messages(&self.store, thread_id)?;
+        // A request without tools cannot carry earlier runs' tool calls.
+        let target = ReplayTarget {
+            model: &accepted.config.model,
+            privacy: PrivacyMode::parse(&accepted.config.privacy),
+            tools: false,
+        };
+        let mut messages = control_chat_messages(&self.store, thread_id, &target)?;
         if let Some(context) = managed_preview_runtime_context(&accepted.preview_runtime) {
             messages.insert(0, ChatMessage::text("system", context));
         }
@@ -197,6 +204,19 @@ impl RunManager {
 /// desktop renderer words its own checkpoint replay the same way.
 const CHECKPOINT_NOTE: &str = "Previous thread context checkpoint. Treat this as the durable state for earlier messages that remain visible in the UI but are not replayed below.";
 
+/// What the next request can take from earlier runs' recorded messages.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReplayTarget<'a> {
+    /// The model the next request goes to.
+    pub(super) model: &'a str,
+    /// The privacy mode of the next request.
+    pub(super) privacy: PrivacyMode,
+    /// Whether the next request offers tools. Providers reject tool calls in
+    /// a history sent without tools, so then every earlier run replays as
+    /// its text and work log.
+    pub(super) tools: bool,
+}
+
 /// The model-visible transcript of a thread, rebuilt from its canonical
 /// timeline.
 ///
@@ -206,16 +226,24 @@ const CHECKPOINT_NOTE: &str = "Previous thread context checkpoint. Treat this as
 ///   after the per-turn context system message it was sent with (stored on
 ///   the run's assistant message), so the provider's cached prefix from that
 ///   turn still matches. The latest user turn gets fresh context instead.
-/// - Assistant turns replay their model-visible text (without harness
-///   notices), then the run's work log, then why the run ended early. The
-///   latest turn's work log keeps more detail than earlier ones; only that
-///   one message changes when a new turn starts, so the cached prefix before
-///   it stays stable.
+/// - A tool-agent run that recorded its own messages (see
+///   [`TurnMessages`](super::journal::TurnMessages)) replays them as its
+///   model last saw them: tool calls, model-visible tool results, and
+///   intermediate text, then why the run ended early. That replay is the
+///   same on every later turn, so the next turn's prefix matches the
+///   previous turn's last request unless something in it was scrubbed.
+/// - Other assistant turns (account runtimes, plain chat, runs from before
+///   messages were recorded or under Redact privacy) replay their
+///   model-visible text (without harness notices), then the run's work log,
+///   then why the run ended early. The latest turn's work log keeps more
+///   detail than earlier ones; only that one message changes when a new turn
+///   starts, so the cached prefix before it stays stable.
 /// - A user turn whose run was stopped or failed before producing anything
 ///   is answered by a marker instead of running into the next user turn.
 pub(super) fn control_chat_messages(
     store: &UserDataStore,
     thread_id: &str,
+    target: &ReplayTarget<'_>,
 ) -> Result<Vec<ChatMessage>> {
     let mut stored = store
         .control_projected_messages(thread_id)?
@@ -249,21 +277,46 @@ pub(super) fn control_chat_messages(
             && value.get("steering").and_then(Value::as_bool) != Some(true)
     };
     let latest_user = stored.iter().rposition(is_turn);
-    let turn_contexts = stored
+    let run_of = |value: &Value| {
+        value
+            .get("runId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let assistants = stored
         .iter()
         .filter(|value| value.get("role").and_then(Value::as_str) == Some("assistant"))
-        .filter_map(|value| {
+        .filter_map(|value| Some((run_of(value)?, value)))
+        .collect::<Vec<_>>();
+    let turn_contexts = assistants
+        .iter()
+        .filter_map(|(run_id, value)| {
             Some((
-                value.get("runId")?.as_str()?.to_string(),
+                run_id.clone(),
                 value.get("turnContext")?.as_str()?.to_string(),
             ))
         })
         .collect::<HashMap<_, _>>();
+    let mut recorded_turns = assistants
+        .iter()
+        .filter(|_| target.tools)
+        .filter_map(|(run_id, value)| {
+            Some((run_id.clone(), recorded_turn(store, run_id, value, target)?))
+        })
+        .collect::<HashMap<_, _>>();
+    // Steering that a recorded run never consumed (it ended first) replays
+    // after the run's messages rather than before them.
+    let mut unconsumed_steering = Vec::new();
     let mut unanswered_run: Option<String> = None;
     for (index, mut value) in stored.into_iter().enumerate() {
         match value.get("role").and_then(Value::as_str) {
             Some("assistant") => {
                 unanswered_run = None;
+                if let Some(turn) = run_of(&value).and_then(|run| recorded_turns.remove(&run)) {
+                    messages.extend(turn);
+                    messages.append(&mut unconsumed_steering);
+                    continue;
+                }
                 let budget = if Some(index) == latest_assistant {
                     WORK_LOG_LATEST_CHARS
                 } else {
@@ -275,10 +328,7 @@ pub(super) fn control_chat_messages(
                 if let Some(run_id) = unanswered_run.take() {
                     messages.extend(unanswered_run_marker(store, &run_id)?);
                 }
-                unanswered_run = value
-                    .get("runId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                unanswered_run = run_of(&value);
                 if Some(index) != latest_user {
                     if let Some(context) = unanswered_run
                         .as_ref()
@@ -289,15 +339,141 @@ pub(super) fn control_chat_messages(
                 }
                 replay_prompt_content(&mut value);
             }
+            Some("user") => {
+                replay_prompt_content(&mut value);
+                if let Some(turn) = run_of(&value).and_then(|run| recorded_turns.get(&run)) {
+                    let text = value
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let consumed = turn
+                        .iter()
+                        .any(|message| message.role == "user" && message.text_content() == text);
+                    if !consumed {
+                        with_image_attachments(&mut value);
+                        unconsumed_steering.push(chat_message(value)?);
+                    }
+                    continue;
+                }
+            }
             _ => replay_prompt_content(&mut value),
         }
         with_image_attachments(&mut value);
-        messages.push(
-            serde_json::from_value(value)
-                .map_err(|error| Error::Other(format!("invalid control chat message: {error}")))?,
-        );
+        messages.push(chat_message(value)?);
     }
     Ok(messages)
+}
+
+fn chat_message(value: Value) -> Result<ChatMessage> {
+    serde_json::from_value(value)
+        .map_err(|error| Error::Other(format!("invalid control chat message: {error}")))
+}
+
+/// A run's recorded messages ready for `target`, or `None` when the run
+/// replays as its text and work log instead: it recorded none, recorded them
+/// under Redact privacy (their placeholders would collide with the next
+/// request's own), or they hold something a Block request would refuse.
+///
+/// A turn another model produced drops the continuation data and reasoning
+/// only that model can use, and its tool call ids are made acceptable to
+/// every adapter. Without Off privacy, images become a short note, since the
+/// outbound gate refuses image data.
+fn recorded_turn(
+    store: &UserDataStore,
+    run_id: &str,
+    message: &Value,
+    target: &ReplayTarget<'_>,
+) -> Option<Vec<ChatMessage>> {
+    let recorded = match super::journal::turn_messages(store, run_id) {
+        Ok(recorded) => recorded?,
+        Err(error) => {
+            tracing::warn!(%run_id, "replaying the run's work log instead of its messages: {error}");
+            return None;
+        }
+    };
+    if PrivacyMode::parse(&recorded.privacy) == PrivacyMode::Redact
+        || !recorded
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant")
+    {
+        return None;
+    }
+    let mut turn = recorded.messages;
+    if recorded.model != target.model {
+        for message in &mut turn {
+            message.provider_state = None;
+            message.reasoning_content = None;
+            for call in message.tool_calls.iter_mut().flatten() {
+                call.id = call.id.as_deref().map(portable_call_id);
+            }
+            message.tool_call_id = message.tool_call_id.as_deref().map(portable_call_id);
+        }
+    }
+    if target.privacy != PrivacyMode::Off {
+        for part in turn
+            .iter_mut()
+            .flat_map(|message| match &mut message.content {
+                Some(Content::Parts(parts)) => parts.as_mut_slice(),
+                _ => &mut [],
+            })
+        {
+            if matches!(part, ContentPart::ImageUrl { .. }) {
+                *part = ContentPart::Text {
+                    text: IMAGE_NOT_REPLAYED.to_string(),
+                };
+            }
+        }
+    }
+    if target.privacy == PrivacyMode::Block
+        && !crate::privacy::scan_request(&CompletionRequest {
+            model: String::new(),
+            messages: turn.clone(),
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: Default::default(),
+            reasoning_effort: None,
+        })
+        .is_empty()
+    {
+        return None;
+    }
+    if let Some(marker) = message.get("interruption").and_then(Value::as_str) {
+        match turn.last_mut() {
+            Some(last)
+                if last.role == "assistant"
+                    && last.tool_calls.is_none()
+                    && matches!(&last.content, Some(Content::Text(text)) if !text.trim().is_empty()) =>
+            {
+                let text = last.text_content();
+                last.content = Some(Content::Text(format!("{}\n\n{marker}", text.trim_end())));
+            }
+            _ => turn.push(ChatMessage::text("assistant", marker)),
+        }
+    }
+    Some(turn)
+}
+
+/// What replaces an earlier turn's image when privacy is not Off.
+const IMAGE_NOT_REPLAYED: &str =
+    "[image from an earlier turn not replayed: the privacy gate does not send images]";
+
+/// A tool call id in the characters every adapter accepts (Anthropic allows
+/// only letters, digits, `_`, and `-`), mapped the same way for a call and
+/// its result.
+fn portable_call_id(id: &str) -> String {
+    id.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn replay_prompt_content(message: &mut Value) {

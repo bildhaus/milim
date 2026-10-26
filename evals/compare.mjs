@@ -6,6 +6,7 @@
 //
 //   node evals/compare.mjs evals/results/<a>.json evals/results/<b>.json [--fail-on-regression]
 //   node evals/compare.mjs --a a1.json a2.json --b b1.json b2.json [--alpha 0.05] [--fail-on-regression]
+//   node evals/compare.mjs evals/baselines/<model>.json gate.json --shared-only --fail-on-regression
 
 import { readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -111,6 +112,15 @@ function sideStats(pool, ids) {
     mean_cached_input_tokens: metric((m) => m.cached_input_tokens),
     mean_cost_usd: metric((m) => m.cost_usd),
     mean_wall_s: mean(samples.map((sample) => sample.wall_ms / 1000)),
+    // Trajectory waste (lib/trajectory.mjs); null for results recorded
+    // before these metrics existed.
+    mean_redundant_reads: metric((m) => m.redundant_reads),
+    mean_failed_edits: metric((m) => m.failed_edits),
+    mean_repeated_identical_calls: metric((m) => m.repeated_identical_calls),
+    mean_test_build_runs: metric((m) => m.test_build_runs),
+    mean_denied_retries: metric((m) => m.denied_retries),
+    mean_steps_to_first_change: metric((m) => m.steps_to_first_change),
+    mean_first_change_s: metric((m) => (Number.isFinite(m.first_change_ms) ? m.first_change_ms / 1000 : null)),
   };
 }
 
@@ -130,11 +140,13 @@ function parseArgs(argv) {
   let current = "positional";
   let alpha = 0.05;
   let failOnRegression = false;
+  let sharedOnly = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--a" || arg === "--b") current = arg.slice(2);
     else if (arg === "--alpha") alpha = Number(argv[(index += 1)]);
     else if (arg === "--fail-on-regression") failOnRegression = true;
+    else if (arg === "--shared-only") sharedOnly = true;
     else if (arg.startsWith("--")) throw new Error(`unknown option ${arg}`);
     else sides[current].push(arg);
   }
@@ -145,7 +157,7 @@ function parseArgs(argv) {
   }
   if (sides.a.length === 0 || sides.b.length === 0) throw new Error("both a baseline and a candidate are required");
   if (!(alpha > 0 && alpha < 1)) throw new Error("--alpha must be between 0 and 1");
-  return { a: sides.a, b: sides.b, alpha, failOnRegression };
+  return { a: sides.a, b: sides.b, alpha, failOnRegression, sharedOnly };
 }
 
 function main() {
@@ -153,8 +165,8 @@ function main() {
   try {
     options = parseArgs(process.argv.slice(2));
   } catch (error) {
-    console.error(`${error.message}\nusage: node evals/compare.mjs <baseline.json> <candidate.json> [--fail-on-regression]
-       node evals/compare.mjs --a <baseline.json>... --b <candidate.json>... [--alpha 0.05] [--fail-on-regression]`);
+    console.error(`${error.message}\nusage: node evals/compare.mjs <baseline.json> <candidate.json> [--fail-on-regression] [--shared-only]
+       node evals/compare.mjs --a <baseline.json>... --b <candidate.json>... [--alpha 0.05] [--fail-on-regression] [--shared-only]`);
     process.exit(2);
   }
   const { alpha } = options;
@@ -171,7 +183,9 @@ function main() {
 
   console.log("| Task | Baseline | Candidate | Change | p | Steps | Tool calls | Tokens |");
   console.log("|---|---:|---:|---|---:|---:|---:|---:|");
-  const ids = [...new Set([...poolA.keys(), ...poolB.keys()])].sort();
+  // --shared-only lists only tasks both sides ran, e.g. a CI subset against
+  // a full-suite baseline; the suite-level test always uses shared tasks.
+  const ids = (options.sharedOnly ? [...shared] : [...new Set([...poolA.keys(), ...poolB.keys()])]).sort();
   let regressions = 0;
   let down = 0;
   let up = 0;
@@ -221,6 +235,13 @@ function main() {
     ["Mean cached input tokens", "mean_cached_input_tokens", 0],
     ["Mean cost USD", "mean_cost_usd", 4],
     ["Mean wall s", "mean_wall_s", 1],
+    ["Mean redundant reads", "mean_redundant_reads", 2],
+    ["Mean failed edits", "mean_failed_edits", 2],
+    ["Mean repeated identical calls", "mean_repeated_identical_calls", 2],
+    ["Mean test/build runs", "mean_test_build_runs", 1],
+    ["Mean denied-call retries", "mean_denied_retries", 2],
+    ["Mean steps to first change", "mean_steps_to_first_change", 1],
+    ["Mean s to first change", "mean_first_change_s", 1],
   ]) {
     console.log(`| ${label} | ${fmt(sa[key], digits)} | ${fmt(sb[key], digits)} | ${delta(sa[key], sb[key], digits)} |`);
   }

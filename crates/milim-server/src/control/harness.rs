@@ -114,6 +114,7 @@ impl RunManager {
             thread_id: thread_id.to_string(),
             run_id: run_id.to_string(),
             sent_step: Default::default(),
+            request_index: Default::default(),
         };
         let boundary_request = json!({
             "adapter": accepted.config.adapter,

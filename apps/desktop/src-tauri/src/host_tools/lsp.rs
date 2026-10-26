@@ -1,10 +1,14 @@
-//! A minimal Language Server Protocol client used only for diagnostics.
+//! A minimal Language Server Protocol client for diagnostics and code
+//! navigation.
 //!
 //! Servers start lazily, one per workspace and server command, stay alive
 //! across runs, and shut down after [`IDLE_SHUTDOWN`] without use. A
 //! diagnostics request opens the file (or replaces its text), saves it, and
 //! waits briefly for the server's `textDocument/publishDiagnostics` push for
-//! that document. Messages are JSON-RPC 2.0 with `Content-Length` framing.
+//! that document. A navigation request (definition, references, hover,
+//! symbols) syncs the file's current text the same way, without saving, and
+//! returns the server's answer. Messages are JSON-RPC 2.0 with
+//! `Content-Length` framing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +39,8 @@ const RETRY_FAILED_AFTER: Duration = Duration::from_secs(5 * 60);
 pub(super) const READY_WAIT: Duration = Duration::from_secs(10);
 /// How long the `diagnostics` tool waits for a diagnostics push.
 pub(super) const PUSH_WAIT: Duration = Duration::from_secs(3);
+/// How long a navigation request may take once the server is ready.
+pub(super) const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// Extra time an edit may spend on diagnostics, including a cold start.
 const AFTER_EDIT_BUDGET: Duration = Duration::from_millis(1500);
 /// Error diagnostics appended to an edit result.
@@ -355,14 +361,25 @@ pub(super) fn file_uri(path: &Path) -> String {
     uri
 }
 
-/// A comparison key for a document URI, tolerant of how servers re-encode it.
-fn uri_key(uri: &str) -> String {
-    let bytes = uri.as_bytes();
+/// The local path a `file://` URI names, or `None` for another scheme.
+pub(super) fn uri_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let decoded = percent_decode(rest);
+    // `file:///C:/x` names `C:/x` on Windows.
+    let decoded = match decoded.strip_prefix('/') {
+        Some(drive) if cfg!(windows) && drive.as_bytes().get(1) == Some(&b':') => drive,
+        _ => &decoded,
+    };
+    Some(PathBuf::from(decoded))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&uri[index + 1..index + 3], 16) {
+            if let Ok(byte) = u8::from_str_radix(&text[index + 1..index + 3], 16) {
                 decoded.push(byte);
                 index += 3;
                 continue;
@@ -371,7 +388,12 @@ fn uri_key(uri: &str) -> String {
         decoded.push(bytes[index]);
         index += 1;
     }
-    let key = String::from_utf8_lossy(&decoded).into_owned();
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// A comparison key for a document URI, tolerant of how servers re-encode it.
+fn uri_key(uri: &str) -> String {
+    let key = percent_decode(uri);
     if cfg!(windows) {
         key.to_lowercase()
     } else {
@@ -541,6 +563,48 @@ impl LspManager {
         })
     }
 
+    /// Send the navigation request `method` to the language server for
+    /// `path`, after syncing the file's current text when `document` is set
+    /// (`params` then gets its `textDocument`). Returns the server's name
+    /// and result; the error is the model-visible reason there is none.
+    pub(super) async fn navigate(
+        &self,
+        root: &Path,
+        path: &Path,
+        method: &str,
+        mut params: Value,
+        document: bool,
+    ) -> std::result::Result<(String, Value), String> {
+        let settings = self.settings();
+        let extension = extension_of(path).ok_or_else(|| {
+            format!(
+                "{} has no file extension, so no language server applies",
+                path.display()
+            )
+        })?;
+        let launch = self
+            .launch_for(&settings, &extension)
+            .ok_or_else(|| no_server_message(&extension))?;
+        let server = self.server(root, &launch)?;
+        if !server.wait_ready(Instant::now() + READY_WAIT).await? {
+            return Err(format!(
+                "{} is still starting; try again in a few seconds, or use grep meanwhile",
+                launch.name
+            ));
+        }
+        server.touch();
+        if document {
+            let text = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            server.sync(&path, &text, false).await?;
+            params["textDocument"] = json!({ "uri": file_uri(&path) });
+        }
+        let result = server.request(method, params, NAVIGATION_TIMEOUT).await?;
+        Ok((launch.name, result))
+    }
+
     /// Error diagnostics for a file an edit just wrote, within a tight
     /// budget. `None` when no server applies, it is still starting, it did
     /// not report in time, or after-edit diagnostics are turned off. A cold
@@ -625,6 +689,8 @@ enum ServerState {
 struct Document {
     /// Last version sent; 0 means not open.
     version: i64,
+    /// Hash of the text last sent.
+    text_hash: u64,
     /// Diagnostics pushes received for the document.
     publishes: u64,
     diagnostics: Vec<Diagnostic>,
@@ -854,6 +920,62 @@ impl LspServer {
     /// Send `text` as the document's current content and wait until
     /// `deadline` for the server to report on it. Returns the latest
     /// diagnostics and whether they describe this text.
+    /// Make `text` the open document's content: `didOpen` the first time,
+    /// `didChange` later. Unless `force` is set, text the server already has
+    /// is not sent again. Returns the document's key and how many
+    /// diagnostics pushes it had received before.
+    async fn sync(
+        &self,
+        path: &Path,
+        text: &str,
+        force: bool,
+    ) -> std::result::Result<(String, u64), String> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let text_hash = hasher.finish();
+        let uri = file_uri(path);
+        let key = uri_key(&uri);
+        let (before, message) = {
+            let mut documents = self
+                .documents
+                .lock()
+                .map_err(|_| "diagnostics table poisoned".to_string())?;
+            let document = documents.entry(key.clone()).or_default();
+            let before = document.publishes;
+            if !force && document.version > 0 && document.text_hash == text_hash {
+                (before, None)
+            } else {
+                document.version += 1;
+                document.text_hash = text_hash;
+                let message = if document.version == 1 {
+                    (
+                        "textDocument/didOpen",
+                        json!({ "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id(path),
+                            "version": 1,
+                            "text": text,
+                        }}),
+                    )
+                } else {
+                    (
+                        "textDocument/didChange",
+                        json!({
+                            "textDocument": { "uri": uri, "version": document.version },
+                            "contentChanges": [{ "text": text }],
+                        }),
+                    )
+                };
+                (before, Some(message))
+            }
+        };
+        if let Some((method, params)) = message {
+            self.notify(method, params).await?;
+        }
+        Ok((key, before))
+    }
+
     async fn diagnose(
         &self,
         path: &Path,
@@ -863,39 +985,8 @@ impl LspServer {
         self.touch();
         let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let uri = file_uri(&path);
-        let key = uri_key(&uri);
         let mut publishes = self.publishes.subscribe();
-        let (before, method, params) = {
-            let mut documents = self
-                .documents
-                .lock()
-                .map_err(|_| "diagnostics table poisoned".to_string())?;
-            let document = documents.entry(key.clone()).or_default();
-            let before = document.publishes;
-            document.version += 1;
-            if document.version == 1 {
-                (
-                    before,
-                    "textDocument/didOpen",
-                    json!({ "textDocument": {
-                        "uri": uri,
-                        "languageId": language_id(&path),
-                        "version": 1,
-                        "text": text,
-                    }}),
-                )
-            } else {
-                (
-                    before,
-                    "textDocument/didChange",
-                    json!({
-                        "textDocument": { "uri": uri, "version": document.version },
-                        "contentChanges": [{ "text": text }],
-                    }),
-                )
-            }
-        };
-        self.notify(method, params).await?;
+        let (key, before) = self.sync(&path, text, true).await?;
         // Some servers (rust-analyzer's cargo check) only report on save.
         self.notify(
             "textDocument/didSave",
@@ -982,8 +1073,19 @@ async fn initialize(server: Arc<LspServer>) {
             "textDocument": {
                 "synchronization": { "didSave": true, "dynamicRegistration": false },
                 "publishDiagnostics": { "relatedInformation": false },
+                "definition": { "dynamicRegistration": false, "linkSupport": true },
+                "references": { "dynamicRegistration": false },
+                "hover": { "dynamicRegistration": false, "contentFormat": ["markdown", "plaintext"] },
+                "documentSymbol": {
+                    "dynamicRegistration": false,
+                    "hierarchicalDocumentSymbolSupport": true,
+                },
             },
-            "workspace": { "configuration": true, "workspaceFolders": true },
+            "workspace": {
+                "configuration": true,
+                "workspaceFolders": true,
+                "symbol": { "dynamicRegistration": false },
+            },
             "window": { "workDoneProgress": true },
         },
     });
@@ -1085,7 +1187,11 @@ pub(super) mod tests {
 
     /// A POSIX sh language server: answers `initialize` and `shutdown`,
     /// asks for configuration once, and reports one error at line 2,
-    /// column 5 for every opened or changed document.
+    /// column 5 for every opened or changed document. Navigation requests
+    /// answer with fixed positions in the requested (or last opened)
+    /// document: a definition at 2:4, references at 2:4 and 1:1, a hover,
+    /// a `main` function symbol with an `inner` child, and a `main`
+    /// workspace symbol.
     #[cfg(unix)]
     pub(in crate::host_tools) fn fake_server(dir: &Path) -> LspSettings {
         use std::os::unix::fs::PermissionsExt;
@@ -1104,7 +1210,15 @@ while :; do
   [ "$len" -gt 0 ] 2>/dev/null || exit 0
   body=$(dd bs=1 count="$len" 2>/dev/null)
   id=$(printf '%s' "$body" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  req_uri=$(printf '%s' "$body" | sed -n 's/.*"uri":"\([^"]*\)".*/\1/p')
+  [ -n "$req_uri" ] && last_uri="$req_uri"
+  loc() { printf '{"uri":"%s","range":{"start":{"line":%s,"character":%s},"end":{"line":%s,"character":%s}}}' "$last_uri" "$1" "$2" "$1" "$2"; }
   case "$body" in
+    *'"method":"textDocument/definition"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":[$(loc 1 3)]}" ;;
+    *'"method":"textDocument/references"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":[$(loc 1 3),$(loc 0 0)]}" ;;
+    *'"method":"textDocument/hover"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"fn main()\"}}}" ;;
+    *'"method":"textDocument/documentSymbol"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":[{\"name\":\"main\",\"kind\":12,\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":12}},\"selectionRange\":{\"start\":{\"line\":1,\"character\":3},\"end\":{\"line\":1,\"character\":7}},\"children\":[{\"name\":\"inner\",\"kind\":13,\"range\":{\"start\":{\"line\":1,\"character\":10},\"end\":{\"line\":1,\"character\":11}},\"selectionRange\":{\"start\":{\"line\":1,\"character\":10},\"end\":{\"line\":1,\"character\":11}}}]}]}" ;;
+    *'"method":"workspace/symbol"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":[{\"name\":\"main\",\"kind\":12,\"containerName\":\"crate\",\"location\":$(loc 1 3)}]}" ;;
     *'"method":"initialize"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"capabilities\":{}}}" ;;
     *'"method":"initialized"'*) send '{"jsonrpc":"2.0","id":"cfg","method":"workspace/configuration","params":{"items":[{}]}}' ;;
     *'"method":"shutdown"'*) send "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":null}" ;;

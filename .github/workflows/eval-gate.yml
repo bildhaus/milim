@@ -1,0 +1,99 @@
+# Agent-quality regression gate (evals/README.md, "Regression gate"). On a
+# pull request that touches the agent harness, this runs a small task subset
+# with --repeat 3 against a fresh headless launch of the real Tauri debug
+# binary (the same build and launch as the nightly subset) and compares it
+# with the committed baseline for the same model,
+# evals/baselines/<model id with every character outside [A-Za-z0-9._-]
+# replaced by _>.json, using compare.mjs --fail-on-regression.
+#
+# It succeeds with a notice, without building anything, when the
+# MILIM_EVAL_PROVIDER_KEY secret, the model variable, or the baseline file is
+# missing. Pull requests from forks get no secrets and never run it.
+name: Eval regression gate
+
+on:
+  pull_request:
+    paths:
+      - crates/milim-agents/**
+      - crates/milim-server/src/agent_prompt.rs
+      - crates/milim-server/src/control/**
+      - crates/milim-server/src/routes/agents/**
+      - crates/milim-server/src/routes/agents.rs
+      - apps/desktop/src-tauri/src/host_tools/**
+      - apps/desktop/src-tauri/src/host_tools.rs
+      - crates/milim-tools/**
+      - crates/milim-inference/**
+      - evals/**
+      - .github/workflows/eval-gate.yml
+      - .github/actions/desktop-debug-build/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: eval-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Agent eval regression gate
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      MILIM_EVAL_MODEL: ${{ vars.MILIM_EVAL_GATE_MODEL || vars.MILIM_EVAL_MODEL }}
+      MILIM_EVAL_TASKS: ${{ vars.MILIM_EVAL_GATE_TASKS || 'bugfix-paginate,run-tests-inventory,ci-log-timezone,multiturn-list-then-fix,multiturn-undo-last-change,approval-denied-generated-write' }}
+      MILIM_EVAL_ARTIFACT_NAME: eval-results-gate
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check secret, model, and baseline
+        id: plan
+        shell: bash
+        env:
+          MILIM_EVAL_PROVIDER_KEY: ${{ secrets.MILIM_EVAL_PROVIDER_KEY }}
+        run: |
+          skip() {
+            echo "::notice title=Eval gate skipped::$1"
+            echo "Eval regression gate skipped: $1" >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          [ -n "$MILIM_EVAL_PROVIDER_KEY" ] || skip "the MILIM_EVAL_PROVIDER_KEY secret is not available."
+          [ -n "$MILIM_EVAL_MODEL" ] || skip "set the MILIM_EVAL_GATE_MODEL (or MILIM_EVAL_MODEL) repository variable."
+          slug="$(printf '%s' "$MILIM_EVAL_MODEL" | tr -c 'A-Za-z0-9._-' '_')"
+          baseline="evals/baselines/$slug.json"
+          [ -f "$baseline" ] || skip "no committed baseline $baseline for $MILIM_EVAL_MODEL (see evals/baselines/README.md)."
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Debug desktop build
+        if: steps.plan.outputs.run == 'true'
+        uses: ./.github/actions/desktop-debug-build
+        with:
+          save-rust-cache: "false"
+      - name: Agent evals (gate subset, 3 samples per task)
+        id: evals
+        if: steps.plan.outputs.run == 'true'
+        shell: bash
+        timeout-minutes: 120
+        env:
+          MILIM_EVAL_PROVIDER_KEY: ${{ secrets.MILIM_EVAL_PROVIDER_KEY }}
+          EVAL_PROVIDER_BASE_URL: ${{ vars.MILIM_EVAL_PROVIDER_BASE_URL || 'https://openrouter.ai/api/v1' }}
+        run: bash evals/ci/headless-evals.sh --repeat 3 --out evals/results/gate.json --fail-on-error
+      - name: Compare with the baseline
+        if: steps.plan.outputs.run == 'true'
+        shell: bash
+        env:
+          BASELINE: ${{ steps.plan.outputs.baseline }}
+        run: |
+          node evals/compare.mjs "$BASELINE" evals/results/gate.json --shared-only --fail-on-regression | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload eval results
+        if: ${{ always() && steps.plan.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: eval-results-gate
+          path: evals/results/gate.json
+          if-no-files-found: warn

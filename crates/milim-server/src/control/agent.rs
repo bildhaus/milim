@@ -17,7 +17,7 @@ use super::journal::RunJournal;
 use super::linked_threads::linked_run_context;
 use super::metrics::{provider_context_window, provider_pricing, response_metrics_value};
 use super::preview_runtime::managed_preview_runtime_context;
-use super::provider::control_chat_messages;
+use super::provider::{control_chat_messages, ReplayTarget};
 use super::run_config::{
     compose_labeled_instructions, frozen_instruction_layers, frozen_run_instructions,
     parse_reasoning_effort, sampling_from_generation,
@@ -67,7 +67,14 @@ impl RunManager {
                 enabled_skills: accepted.config.enabled_skills.clone(),
                 avatar: "sparkles".into(),
             });
-        let messages = control_chat_messages(&self.store, thread_id)?;
+        let tool_mode = milim_agents::normalize_tool_mode(&agent.tool_mode, &agent.enabled_tools);
+        let target = ReplayTarget {
+            model: &accepted.config.model,
+            privacy: crate::privacy::PrivacyMode::parse(&accepted.config.privacy),
+            tools: !(tool_mode == "none"
+                || (tool_mode == "custom" && agent.enabled_tools.is_empty())),
+        };
+        let messages = control_chat_messages(&self.store, thread_id, &target)?;
         let turn_context = [
             linked_run_context(&accepted.config, &accepted.mailbox_context),
             managed_preview_runtime_context(&accepted.preview_runtime),
@@ -113,6 +120,7 @@ impl RunManager {
             provider_pricing(state, &accepted.config.model).await,
             provider_context_window(state, &accepted.config.model).await,
             journal.clone(),
+            !accepted.unattended && accepted.mailbox_origin.is_none(),
         )?;
         if let Some(turn_context) = sent_turn_context {
             self.turn_contexts
@@ -122,11 +130,15 @@ impl RunManager {
         }
         let mut deltas = DeltaBuffer::new(self, thread_id, run_id);
         let mut work_log = WorkLog::default();
+        // The decision the run ended on; its text closes the assistant
+        // message for clients without decision cards and for later turns.
+        let mut decision_text: Option<String> = None;
         loop {
             let event = tokio::select! {
                 changed = stop.changed() => {
                     if changed.is_ok() && *stop.borrow() {
                         deltas.flush()?;
+                        record_turn_messages(&journal, deltas.step_text());
                         self.persist_interrupted_output(
                             thread_id,
                             run_id,
@@ -204,6 +216,15 @@ impl RunManager {
                 milim_agents::AgentEvent::Hook(_) => {
                     deltas.flush()?;
                     deltas.mark_step_boundary();
+                }
+                milim_agents::AgentEvent::UserDecisionRequested { decision, .. } => {
+                    deltas.flush()?;
+                    decision_text = decision
+                        .get("fallback_text")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string);
                 }
                 milim_agents::AgentEvent::ToolApprovalRequired {
                     approval_id,
@@ -290,6 +311,7 @@ impl RunManager {
                 } => {
                     deltas.flush()?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
+                    record_turn_messages(&journal, "");
                     let metrics = response_metrics_value(
                         state,
                         &self.store,
@@ -299,12 +321,18 @@ impl RunManager {
                         None,
                     )
                     .await?;
-                    let replay = AssistantReplay::from_run(
+                    let mut replay = AssistantReplay::from_run(
                         &deltas,
                         &work_log,
                         stopped_at_limit.then(|| RUN_LIMIT_MARKER.to_string()),
                     );
-                    let (content, reasoning) = deltas.into_output();
+                    let (mut content, reasoning) = deltas.into_output();
+                    if let Some(text) = decision_text.as_deref() {
+                        append_paragraph(&mut content, text);
+                        if let Some(prompt_content) = replay.prompt_content.as_mut() {
+                            append_paragraph(prompt_content, text);
+                        }
+                    }
                     self.complete_assistant_message_with(
                         thread_id,
                         run_id,
@@ -322,6 +350,7 @@ impl RunManager {
                 milim_agents::AgentEvent::Error { message } => {
                     deltas.flush()?;
                     self.persist_and_emit(thread_id, Some(run_id), &event_type, value)?;
+                    record_turn_messages(&journal, deltas.step_text());
                     // The run error wins over a failure to keep its output.
                     let _ = self.persist_interrupted_output(
                         thread_id,
@@ -340,6 +369,7 @@ impl RunManager {
         }
         let error = Error::Other("Agent stream ended without a terminal event".into());
         deltas.flush()?;
+        record_turn_messages(&journal, deltas.step_text());
         let _ = self.persist_interrupted_output(
             thread_id,
             run_id,
@@ -371,4 +401,25 @@ impl RunManager {
         self.persist_assistant_message(thread_id, run_id, content, reasoning, None, replay)?;
         Ok(())
     }
+}
+
+/// Record the run's own messages for later turns (see
+/// [`super::journal::TurnMessages`]). Best effort: without them a later turn
+/// replays the run's work log instead, so a failure never fails the run.
+fn record_turn_messages(journal: &RunJournal, partial_step: &str) {
+    if let Err(error) = journal.commit_turn_messages(partial_step) {
+        tracing::warn!(
+            run_id = %journal.run_id,
+            "failed to record the run's messages for replay: {error}"
+        );
+    }
+}
+
+/// Append `text` to `content` as its own paragraph.
+fn append_paragraph(content: &mut String, text: &str) {
+    content.truncate(content.trim_end().len());
+    if !content.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str(text);
 }

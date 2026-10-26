@@ -6,12 +6,15 @@
 //   alt-<name>.patch | .mjs         other correct solutions; must PASS
 //   wrong-<name>.patch | .mjs       plausible wrong solutions; must FAIL
 // A .patch is applied with `git apply`; a .mjs runs with the repository as
-// its working directory (EVAL_TASK_DIR points at the task directory).
+// its working directory (EVAL_TASK_DIR points at the task directory) and may
+// simulate a multi-turn run with `recordTurn` from lib/trajectory.mjs, which
+// writes the EVAL_TRAJECTORY file the check then reads.
 //
 //   node evals/validate.mjs [--tasks a,b] [--repeat N] [--strict] [--verbose]
 
 import { spawnSync } from "node:child_process";
-import { readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, loadTasks, missingRequirement, prepareRepo, runCheck, scrubbedEnv } from "./lib/tasks.mjs";
 
@@ -37,7 +40,7 @@ const repeat = Number(option("--repeat") ?? 1);
 const strict = flag("--strict");
 const verbose = flag("--verbose");
 
-function applySolution(task, repo, file) {
+function applySolution(task, repo, file, trajectory) {
   const path = join(task.dir, file);
   if (file.endsWith(".patch")) {
     git(repo, ["apply", "--whitespace=nowarn", path]);
@@ -47,7 +50,7 @@ function applySolution(task, repo, file) {
     cwd: repo,
     encoding: "utf8",
     timeout: 120_000,
-    env: scrubbedEnv({ EVAL_REPO: repo, EVAL_TASK_DIR: task.dir }),
+    env: scrubbedEnv({ EVAL_REPO: repo, EVAL_TASK_DIR: task.dir, EVAL_TRAJECTORY: trajectory }),
   });
   if (result.status !== 0) {
     throw new Error(`${file} exited ${result.status}: ${`${result.stdout}${result.stderr}`.trim().slice(0, 400)}`);
@@ -58,16 +61,21 @@ const indent = (text) => text.split("\n").map((line) => `      ${line}`).join("\
 
 /** Apply `file` (or nothing) to a fresh copy and run the check `times` times. */
 function trial(task, file, times) {
-  const repo = prepareRepo(task);
+  let repo;
+  // Outside the repository, like the runner's, so it is never a change.
+  const scratch = mkdtempSync(join(tmpdir(), "milim-eval-trajectory-"));
+  const trajectory = join(scratch, "trajectory.json");
   try {
-    if (file) applySolution(task, repo, file);
+    repo = prepareRepo(task);
+    if (file) applySolution(task, repo, file, trajectory);
     const checks = [];
-    for (let index = 0; index < times; index += 1) checks.push(runCheck(task, repo));
+    for (let index = 0; index < times; index += 1) checks.push(runCheck(task, repo, { trajectory }));
     return { checks };
   } catch (error) {
     return { error: error.message, checks: [] };
   } finally {
-    rmSync(repo, { recursive: true, force: true });
+    if (repo) rmSync(repo, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 

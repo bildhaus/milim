@@ -11,7 +11,9 @@ use milim_core::{Error, Result};
 use milim_tools::{Tool, ToolConcurrency, ToolEffect};
 
 use super::lsp::{render_line, PUSH_WAIT, READY_WAIT};
-use super::{host_tool_scoping, optional_arg_str, root_of, safe_join, HostCtx, PathDisplay};
+use super::{
+    host_tool_scoping, missing_path, optional_arg_str, root_of, safe_join, HostCtx, PathDisplay,
+};
 
 /// Files checked by one call without a path.
 const MAX_FILES: usize = 20;
@@ -29,7 +31,9 @@ impl Tool for DiagnosticsTool {
         "diagnostics"
     }
     fn description(&self) -> &str {
-        "Report compiler and linter errors and warnings from the workspace's language server (rust-analyzer, typescript-language-server, pyright/pylsp, gopls, or one configured in ~/.milim/settings.json). With a path, checks that file; without one, checks the files written or edited in this run."
+        "Report compiler and linter errors and warnings from the workspace's language server (rust-analyzer, typescript-language-server, pyright/pylsp, gopls, or one configured in ~/.milim/settings.json). With a path, checks that file; without one, checks the files written or edited in this run.\n\
+         Use it after changes to confirm they type-check, or to see a file's existing problems. It does not run tests or the full build; use shell for those.\n\
+         Example: {\"path\": \"src/lib.rs\"}"
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
@@ -53,8 +57,13 @@ impl Tool for DiagnosticsTool {
         let paths = match requested {
             Some(rel) => {
                 let path = safe_join(&self.ctx.ws, rel)?;
+                if !path.exists() {
+                    return Err(missing_path(&self.ctx, &path, rel, "diagnostics"));
+                }
                 if !path.is_file() {
-                    return Err(Error::InvalidRequest(format!("{rel} is not a file")));
+                    return Err(Error::InvalidRequest(format!(
+                        "{rel} is a directory; pass a file, or omit path to check the files changed in this run"
+                    )));
                 }
                 vec![path]
             }

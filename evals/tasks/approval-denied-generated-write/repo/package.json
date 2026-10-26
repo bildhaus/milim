@@ -1,0 +1,9 @@
+{
+  "name": "users-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "test": "node --test test/"
+  }
+}

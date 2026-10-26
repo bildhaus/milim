@@ -1,0 +1,36 @@
+# Toolchains, desktop dependencies, and the real Tauri debug binary that
+# `pnpm -C apps/desktop verify:tauri` builds at
+# apps/desktop/src-tauri/target/tauri-verify/debug/milim-desktop. Shared by
+# the nightly macOS launch job and the eval regression gate; the caller
+# checks out the repository first.
+name: Desktop debug build
+description: Install toolchains and dependencies, then build the Tauri debug binary.
+
+inputs:
+  save-rust-cache:
+    description: Whether this run may save the Rust build cache.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: pnpm/action-setup@v5
+      with:
+        version: 9.15.9
+    - uses: actions/setup-node@v5
+      with:
+        node-version: '22.23.4'
+        cache: pnpm
+        cache-dependency-path: apps/desktop/pnpm-lock.yaml
+    - uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ inputs.save-rust-cache }}
+        workspaces: apps/desktop/src-tauri -> target
+    - name: Install desktop dependencies
+      shell: bash
+      run: pnpm -C apps/desktop install --frozen-lockfile
+    - name: Debug desktop build
+      shell: bash
+      run: pnpm -C apps/desktop verify:tauri

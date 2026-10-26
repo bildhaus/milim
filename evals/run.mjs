@@ -10,11 +10,13 @@
 //   node evals/run.mjs --self-test    # plumbing check with the mock-echo model
 
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { resolveControlCredentials, retryUntilReady } from "./lib/control.mjs";
-import { EVALS, loadTasks, missingRequirement, prepareRepo, runCheck, taskTimeout } from "./lib/tasks.mjs";
+import { changedPaths, EVALS, loadTasks, missingRequirement, prepareRepo, runCheck, snapshotTree, taskTimeout } from "./lib/tasks.mjs";
+import { emptyTrajectory, matchingRule, parseArguments, wasteMetrics, writeTrajectory } from "./lib/trajectory.mjs";
 
 const RESULTS_DIR = join(EVALS, "results");
 const SCHEMA_VERSION = 2;
@@ -340,14 +342,111 @@ export function collectMetrics(events, timelineItems, runIds) {
   };
 }
 
+/**
+ * Tool calls of the sample's runs in order, for the trajectory and its waste
+ * metrics. Names and arguments come from the timeline's `tool_call` items,
+ * outcomes from the matching `tool_result` items (joined by call id), and
+ * the model step and time from the ledger's `tool_result_committed` events.
+ * `step` is numbered across turns, so turn 2's first step follows turn 1's
+ * last. Runtimes that project only results get calls without arguments.
+ */
+export function collectToolCalls(events, timelineItems, runIds) {
+  const order = [runIds].flat().filter(Boolean);
+  const turnOf = new Map(order.map((runId, index) => [runId, index + 1]));
+  const items = timelineItems.filter((item) => turnOf.has(item.run_id)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  // Global step numbers: every run's distinct steps, in run order.
+  const stepIndex = new Map();
+  let offset = 0;
+  for (const runId of order) {
+    const steps = [
+      ...new Set(
+        events
+          .filter((event) => event.run_id === runId && REQUEST_EVENTS.has(eventType(event)))
+          .map(stepOf)
+          .filter((step) => step !== null),
+      ),
+    ].sort((a, b) => a - b);
+    steps.forEach((step, index) => stepIndex.set(`${runId}:${step}`, offset + index + 1));
+    offset += steps.length;
+  }
+  const committed = new Map(
+    events
+      .filter((event) => eventType(event) === "tool_result_committed" && event.data?.call_id)
+      .map((event) => [`${event.run_id}:${event.data.call_id}`, event]),
+  );
+  const outcome = (item) => {
+    const result = item?.data?.result;
+    const denied = Boolean(result && typeof result === "object" && result.denied === true);
+    const error = result && typeof result === "object" && result.error !== undefined ? String(result.error).slice(0, 300) : null;
+    return { is_error: item ? toolResultIsError(item.data) : false, denied, error };
+  };
+  const calls = [];
+  for (const runId of order) {
+    const runItems = items.filter((item) => item.run_id === runId);
+    const results = runItems.filter((item) => eventType(item) === "tool_result");
+    const pending = [...results];
+    const callItems = runItems.filter((item) => eventType(item) === "tool_call");
+    const source = callItems.length > 0 ? callItems : results;
+    for (const item of source) {
+      const callId = item.data?.call_id ?? null;
+      let result = item;
+      if (callItems.length > 0) {
+        const index = pending.findIndex((candidate) =>
+          callId ? candidate.data?.call_id === callId : candidate.data?.name === item.data?.name,
+        );
+        result = index >= 0 ? pending.splice(index, 1)[0] : null;
+      }
+      const ledger = callId ? committed.get(`${runId}:${callId}`) : null;
+      const step = ledger ? stepOf(ledger) : null;
+      calls.push({
+        turn: turnOf.get(runId),
+        name: item.data?.name ?? null,
+        arguments: callItems.length > 0 ? parseArguments(item.data?.arguments) : null,
+        ...outcome(result),
+        created_at_ms: ledger?.created_at_ms ?? result?.created_at_ms ?? null,
+        step: step === null ? null : stepIndex.get(`${runId}:${step}`) ?? null,
+      });
+    }
+  }
+  return calls;
+}
+
+/** The last assistant message text of a run, from the timeline. */
+function runAnswer(timelineItems, runId) {
+  const message = timelineItems.filter((item) => item.run_id === runId && item.data?.role === "assistant").at(-1);
+  const content = message?.data?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map((part) => (typeof part === "string" ? part : part?.text ?? "")).join("");
+  return "";
+}
+
 // ----- one task sample -----
 
-async function waitForRun(client, threadId, runId, deadline, counters) {
+/**
+ * Decide one approval request under the task's policy: deny it when a deny
+ * rule matches (a `first_only` rule only the first time), approve it
+ * otherwise. Returns `{ decision, rule }`.
+ */
+export function decideApproval(policy, request, ruleHits) {
+  const rules = policy?.deny ?? [];
+  const name = request?.name ?? request?.tool ?? "";
+  const args = request?.arguments ?? request?.input ?? request ?? {};
+  const rule = matchingRule(rules, name, args);
+  if (rule < 0) return { decision: "approve", rule: null };
+  ruleHits[rule] = (ruleHits[rule] ?? 0) + 1;
+  if (rules[rule].first_only && ruleHits[rule] > 1) return { decision: "approve", rule: null };
+  return { decision: "deny", rule };
+}
+
+async function waitForRun(client, threadId, runId, deadline, counters, policy, turn) {
   let lastApprovalCheck = 0;
   let resolvedRunId = runId;
+  // A task with an approval policy runs in Review mode and waits on every
+  // consequential call, so poll its approvals more often.
+  const approvalPollMs = policy ? 1_000 : 4_000;
   for (;;) {
     if (Date.now() > deadline) return { timedOut: true, runId: resolvedRunId };
-    if (Date.now() - lastApprovalCheck > 4_000) {
+    if (Date.now() - lastApprovalCheck > approvalPollMs) {
       lastApprovalCheck = Date.now();
       const bootstrap = await client.bootstrap();
       if (!resolvedRunId) {
@@ -355,10 +454,30 @@ async function waitForRun(client, threadId, runId, deadline, counters) {
       }
       for (const approval of bootstrap.pending_approvals ?? []) {
         if (approval.thread_id !== threadId || approval.status !== "pending") continue;
-        // Open mode should not ask; if the runtime still does, approve so the
-        // eval measures the agent instead of stalling, and count it.
-        await client.command("approval.resolve", threadId, { approval_id: approval.id, decision: "approve" });
-        counters.autoApproved += 1;
+        if (counters.decided.has(approval.id)) continue;
+        // Without a policy (Open mode) nothing should ask; if the runtime
+        // still does, approve so the eval measures the agent instead of
+        // stalling, and count it. With a policy, deny what its rules match.
+        const { decision, rule } = decideApproval(policy, approval.request, counters.ruleHits);
+        try {
+          await client.command("approval.resolve", threadId, { approval_id: approval.id, decision });
+        } catch (error) {
+          // The run may have ended or resolved it meanwhile; the next poll
+          // sees whether it is still pending.
+          if (rule !== null) counters.ruleHits[rule] -= 1;
+          process.stderr.write(`(approval ${approval.id}: ${error.message}) `);
+          continue;
+        }
+        counters.decided.add(approval.id);
+        if (decision === "approve") counters.autoApproved += 1;
+        counters.approvals.push({
+          turn,
+          approval_id: approval.id,
+          name: approval.request?.name ?? null,
+          arguments: parseArguments(approval.request?.arguments),
+          decision,
+          rule,
+        });
       }
     }
     if (resolvedRunId) {
@@ -444,12 +563,19 @@ async function runTask(client, task, config, sample = 1) {
   const started = Date.now();
   const record = newRecord(task, sample);
   let repo;
+  // The trajectory file lives outside the workspace so the agent never sees
+  // it and it never counts as a change.
+  const scratch = mkdtempSync(join(tmpdir(), `milim-eval-trajectory-${task.id}-`));
+  const trajectoryPath = join(scratch, "trajectory.json");
+  const trajectory = emptyTrajectory();
+  const policy = task.approvals;
   try {
     repo = prepareRepo(task);
     const settings = {
       folder: repo,
       model: config.model,
-      toolApproval: "open",
+      // A task with an approval policy needs a mode that asks (Review).
+      toolApproval: policy?.mode ?? "open",
       privacy: "off",
       memory: false,
     };
@@ -461,7 +587,7 @@ async function runTask(client, task, config, sample = 1) {
       settings,
     });
     record.thread_id = created.thread_id;
-    const counters = { autoApproved: 0 };
+    const counters = { autoApproved: 0, decided: new Set(), ruleHits: {}, approvals: [] };
     // Turns go to the same thread in order; a turn that did not complete
     // ends the sample because later turns build on its work.
     for (const [index, turn] of task.turns.entries()) {
@@ -470,7 +596,7 @@ async function runTask(client, task, config, sample = 1) {
       record.turns.push(entry);
       const sent = await client.command("turn.send", record.thread_id, { text: turn.prompt, attachments: [] });
       const deadline = turnStarted + turn.timeout_s * config.timeoutScale * 1000;
-      const waited = await waitForRun(client, record.thread_id, sent.run_id, deadline, counters);
+      const waited = await waitForRun(client, record.thread_id, sent.run_id, deadline, counters, policy, index + 1);
       entry.run_id = waited.runId ?? null;
       let inspection = waited.inspection;
       if (waited.timedOut) {
@@ -485,11 +611,24 @@ async function runTask(client, task, config, sample = 1) {
       const run = inspection?.run;
       if (run) {
         entry.run_ms = run.completed_at_ms ? run.completed_at_ms - run.created_at_ms : null;
+        entry.started_at_ms = run.created_at_ms ?? null;
         entry.error = run.error ?? null;
       }
+      // What this turn left in the workspace, before the next turn changes it.
+      trajectory.turns.push({
+        turn: entry.turn,
+        prompt: turn.prompt,
+        run_id: entry.run_id,
+        run_status: entry.run_status,
+        answer: "",
+        ended_at_ms: Date.now(),
+        snapshot: snapshotTree(repo),
+        changed_files: changedPaths(repo),
+      });
       if (entry.timed_out || entry.run_status !== "completed") break;
     }
     record.auto_approved = counters.autoApproved;
+    trajectory.approvals = counters.approvals;
     const runIds = record.turns.map((turn) => turn.run_id).filter(Boolean);
     if (runIds.length > 0) {
       const [events, timeline] = await Promise.all([
@@ -502,9 +641,19 @@ async function runTask(client, task, config, sample = 1) {
           (item) => item.run_id === turn.run_id && eventType(item) === "done" && item.data?.stopped_at_limit === true,
         );
       }
-      record.metrics = collectMetrics(events, timeline, runIds);
+      for (const entry of trajectory.turns) {
+        entry.answer = entry.run_id ? runAnswer(timeline, entry.run_id) : "";
+        const turn = record.turns[entry.turn - 1];
+        if (turn) turn.answer = entry.answer.length > 2_000 ? `${entry.answer.slice(0, 2_000)}...` : entry.answer;
+      }
+      trajectory.tool_calls = collectToolCalls(events, timeline, runIds);
+      record.metrics = {
+        ...collectMetrics(events, timeline, runIds),
+        ...wasteMetrics(trajectory.tool_calls, { rules: policy?.deny, startedAtMs: record.turns[0]?.started_at_ms }),
+      };
     }
-    record.check = runCheck(task, repo);
+    writeTrajectory(trajectoryPath, trajectory);
+    record.check = runCheck(task, repo, { trajectory: trajectoryPath });
     record.check_passed = record.check.passed;
     if (config.archive) {
       await client.command("thread.archive", record.thread_id, { archived: true }).catch(() => {});
@@ -512,7 +661,8 @@ async function runTask(client, task, config, sample = 1) {
   } catch (error) {
     record.error = error.message;
     if (repo && !record.check) {
-      record.check = runCheck(task, repo);
+      writeTrajectory(trajectoryPath, trajectory);
+      record.check = runCheck(task, repo, { trajectory: trajectoryPath });
       record.check_passed = record.check.passed;
     }
   } finally {
@@ -527,6 +677,8 @@ async function runTask(client, task, config, sample = 1) {
     record.wall_ms = Date.now() - started;
     if (repo && !config.keep) rmSync(repo, { recursive: true, force: true });
     else if (repo) record.repo = repo;
+    if (config.keep) record.trajectory = trajectoryPath;
+    else rmSync(scratch, { recursive: true, force: true });
   }
   return record;
 }
@@ -588,9 +740,25 @@ export function summarizeTasks(records) {
       mean_tokens: metric((m) => m.total_tokens),
       mean_cost_usd: metric((m) => m.cost_usd),
       mean_wall_ms: mean(samples.map((sample) => sample.wall_ms)),
+      ...Object.fromEntries(WASTE_METRICS.map((key) => [`mean_${key}`, metric((m) => m[key])])),
     };
   });
 }
+
+/** Trajectory waste metrics (lib/trajectory.mjs), summarized per task and suite. */
+export const WASTE_METRICS = [
+  "redundant_reads",
+  "failed_edits",
+  "repeated_identical_calls",
+  "test_build_runs",
+  "denied_calls",
+  "denied_retries",
+  "calls_to_first_change",
+  "steps_to_first_change",
+  "first_change_ms",
+];
+/** Waste metrics the suite summary sums; the rest are averaged. */
+const SUMMED_WASTE = new Set(["redundant_reads", "failed_edits", "repeated_identical_calls", "denied_calls", "denied_retries"]);
 
 function aggregate(records, taskSummary) {
   const graded = records.filter((record) => record.status !== "skipped");
@@ -625,6 +793,13 @@ function aggregate(records, taskSummary) {
     total_cached_input_tokens: sum((m) => m.cached_input_tokens),
     total_cost_usd: costs.length ? costs.reduce((a, b) => a + b, 0) : null,
     mean_wall_ms: mean(graded.map((record) => record.wall_ms)),
+    ...Object.fromEntries(
+      WASTE_METRICS.map((key) =>
+        SUMMED_WASTE.has(key)
+          ? [`total_${key}`, sum((m) => m[key])]
+          : [`mean_${key}`, mean(withMetrics.map((record) => record.metrics[key]))],
+      ),
+    ),
   };
 }
 
@@ -656,6 +831,9 @@ export function markdownTable(result) {
       `Mean steps ${fmt(summary.mean_steps, 1)}, mean tool calls ${fmt(summary.mean_tool_calls, 1)}, tool errors ${summary.total_tool_errors}, ` +
       `context compactions ${summary.total_context_compactions}, retries ${summary.total_retries}, ` +
       `tokens ${summary.total_tokens} (${summary.total_cached_input_tokens} cached), cost ${summary.total_cost_usd == null ? "-" : `$${fmt(summary.total_cost_usd, 4)}`}.`,
+    `Waste: ${summary.total_redundant_reads} redundant reads, ${summary.total_failed_edits} failed edits, ` +
+      `${summary.total_repeated_identical_calls} repeated identical calls, ${summary.total_denied_retries} denied-call retries; ` +
+      `mean test/build runs ${fmt(summary.mean_test_build_runs, 1)}, mean steps to first change ${fmt(summary.mean_steps_to_first_change, 1)}.`,
   );
   if (flagged.length > 0) {
     rows.push("", "Flagged samples:");
@@ -687,7 +865,9 @@ async function main() {
   }
   if (flag("--dry-run")) {
     for (const task of tasks) {
-      const turns = task.turns.length > 1 ? ` (${task.turns.length} turns)` : "";
+      const turns =
+        (task.turns.length > 1 ? ` (${task.turns.length} turns)` : "") +
+        (task.approvals ? ` [${task.approvals.mode}, ${task.approvals.deny.length} deny rule(s)]` : "");
       const missing = missingRequirement(task);
       console.log(
         `${task.id.padEnd(30)} ${task.category.padEnd(22)} ${String(taskTimeout(task)).padStart(4)}s  ${task.title}${turns}${missing ? `  [skipped: ${missing}]` : ""}`,

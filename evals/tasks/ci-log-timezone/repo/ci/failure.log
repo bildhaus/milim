@@ -1,0 +1,118 @@
+2024-03-11T13:02:11.4410377Z Requested labels: ubuntu-latest
+2024-03-11T13:02:11.4410702Z Job defined at: acme/sales-report/.github/workflows/test.yml@refs/heads/main
+2024-03-11T13:02:11.4410813Z Waiting for a runner to pick up this job...
+2024-03-11T13:02:12.1069401Z Job is about to start running on the hosted runner: GitHub Actions 42 (hosted)
+2024-03-11T13:02:14.6371130Z Current runner version: '2.314.1'
+2024-03-11T13:02:14.6393405Z ##[group]Operating System
+2024-03-11T13:02:14.6394029Z Ubuntu
+2024-03-11T13:02:14.6394344Z 22.04.4
+2024-03-11T13:02:14.6394637Z LTS
+2024-03-11T13:02:14.6394995Z ##[endgroup]
+2024-03-11T13:02:14.6395330Z ##[group]Runner Image
+2024-03-11T13:02:14.6395713Z Image: ubuntu-22.04
+2024-03-11T13:02:14.6396000Z Version: 20240304.1.0
+2024-03-11T13:02:14.6396830Z ##[endgroup]
+2024-03-11T13:02:14.6398912Z ##[group]GITHUB_TOKEN Permissions
+2024-03-11T13:02:14.6400950Z Contents: read
+2024-03-11T13:02:14.6401455Z Metadata: read
+2024-03-11T13:02:14.6401812Z ##[endgroup]
+2024-03-11T13:02:14.6405163Z Secret source: Actions
+2024-03-11T13:02:14.6405819Z Prepare workflow directory
+2024-03-11T13:02:14.7012345Z Prepare all required actions
+2024-03-11T13:02:14.7166590Z Getting action download info
+2024-03-11T13:02:14.9310582Z Download action repository 'actions/checkout@v4' (SHA:b4ffde65f46336ab88eb53be808477a3936bae11)
+2024-03-11T13:02:15.0411027Z Download action repository 'actions/setup-node@v4' (SHA:60edb5dd545a775178f52524783378180af0d1f8)
+2024-03-11T13:02:15.3311174Z Complete job name: test
+2024-03-11T13:02:15.4113806Z ##[group]Run actions/checkout@v4
+2024-03-11T13:02:15.4114201Z with:
+2024-03-11T13:02:15.4114473Z   repository: acme/sales-report
+2024-03-11T13:02:15.4115005Z   fetch-depth: 1
+2024-03-11T13:02:15.4116550Z env:
+2024-03-11T13:02:15.4116799Z   TZ: America/New_York
+2024-03-11T13:02:15.4117001Z ##[endgroup]
+2024-03-11T13:02:15.9871410Z Syncing repository: acme/sales-report
+2024-03-11T13:02:16.5032118Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +4f1c2e9a7b3d...:refs/remotes/origin/main
+2024-03-11T13:02:16.9102213Z HEAD is now at 4f1c2e9 Bucket the daily report by day instead of by hour
+2024-03-11T13:02:17.0314561Z ##[group]Run actions/setup-node@v4
+2024-03-11T13:02:17.0314922Z with:
+2024-03-11T13:02:17.0315176Z   node-version: 22
+2024-03-11T13:02:17.0315402Z   cache: npm
+2024-03-11T13:02:17.0316012Z env:
+2024-03-11T13:02:17.0316244Z   TZ: America/New_York
+2024-03-11T13:02:17.0316431Z ##[endgroup]
+2024-03-11T13:02:17.2001237Z Found in cache @ /opt/hostedtoolcache/node/22.0.0/x64
+2024-03-11T13:02:17.2045519Z Environment details
+2024-03-11T13:02:17.6101236Z node: v22.0.0
+2024-03-11T13:02:17.6101771Z npm: 10.5.1
+2024-03-11T13:02:17.6102003Z yarn: 1.22.22
+2024-03-11T13:02:17.6512301Z ##[warning]Cache service responded with 503 during reserve, retrying in 5s
+2024-03-11T13:02:22.6604022Z Cache restored successfully
+2024-03-11T13:02:22.7310088Z ##[group]Run npm ci
+2024-03-11T13:02:22.7310415Z npm ci
+2024-03-11T13:02:22.7316244Z env:
+2024-03-11T13:02:22.7316501Z   TZ: America/New_York
+2024-03-11T13:02:22.7316702Z ##[endgroup]
+2024-03-11T13:02:23.4410215Z npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.
+2024-03-11T13:02:23.9873014Z
+2024-03-11T13:02:23.9873702Z up to date, audited 1 package in 412ms
+2024-03-11T13:02:23.9874301Z found 0 vulnerabilities
+2024-03-11T13:02:24.0313305Z ##[group]Run npm test
+2024-03-11T13:02:24.0313677Z npm test
+2024-03-11T13:02:24.0318910Z env:
+2024-03-11T13:02:24.0319131Z   TZ: America/New_York
+2024-03-11T13:02:24.0319338Z ##[endgroup]
+2024-03-11T13:02:24.2011402Z
+2024-03-11T13:02:24.2012010Z > sales-report@1.4.0 test
+2024-03-11T13:02:24.2012399Z > node --test test/
+2024-03-11T13:02:24.2012612Z
+2024-03-11T13:02:24.3398807Z (node:2187) ExperimentalWarning: The test runner glob option is experimental and might change at any time
+2024-03-11T13:02:24.3399344Z (Use `node --trace-warnings ...` to show where the warning was created)
+2024-03-11T13:02:24.4211730Z ✔ day keys (1.204ms)
+2024-03-11T13:02:24.4221018Z ✖ groups orders into daily totals (2.871ms)
+2024-03-11T13:02:24.4221603Z   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+2024-03-11T13:02:24.4221979Z   + actual - expected
+2024-03-11T13:02:24.4222203Z
+2024-03-11T13:02:24.4222442Z     {
+2024-03-11T13:02:24.4222668Z   +   '2024-03-09': 12750,
+2024-03-11T13:02:24.4222911Z   -   '2024-03-09': 5250,
+2024-03-11T13:02:24.4223133Z   +   '2024-03-10': 2100
+2024-03-11T13:02:24.4223402Z   -   '2024-03-10': 9600
+2024-03-11T13:02:24.4223619Z     }
+2024-03-11T13:02:24.4223812Z
+2024-03-11T13:02:24.4224035Z       at TestContext.<anonymous> (file:///home/runner/work/sales-report/sales-report/test/report.test.js:19:10)
+2024-03-11T13:02:24.4224410Z       at Test.runInAsyncScope (node:async_hooks:206:9)
+2024-03-11T13:02:24.4224699Z       at Test.run (node:internal/test_runner/test:639:25)
+2024-03-11T13:02:24.4224977Z       at Test.processPendingSubtests (node:internal/test_runner/test:382:18)
+2024-03-11T13:02:24.4225211Z       at Test.postRun (node:internal/test_runner/test:730:19)
+2024-03-11T13:02:24.4225489Z       at Test.run (node:internal/test_runner/test:688:12)
+2024-03-11T13:02:24.4225730Z       at async startSubtestAfterBootstrap (node:internal/test_runner/harness:223:3) {
+2024-03-11T13:02:24.4225988Z     generatedMessage: true,
+2024-03-11T13:02:24.4226201Z     code: 'ERR_ASSERTION',
+2024-03-11T13:02:24.4226422Z     actual: { '2024-03-09': 12750, '2024-03-10': 2100 },
+2024-03-11T13:02:24.4226680Z     expected: { '2024-03-09': 5250, '2024-03-10': 9600 },
+2024-03-11T13:02:24.4226899Z     operator: 'deepStrictEqual'
+2024-03-11T13:02:24.4227104Z   }
+2024-03-11T13:02:24.4227310Z
+2024-03-11T13:02:24.4231162Z ✖ busiest day (0.512ms)
+2024-03-11T13:02:24.4231580Z   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+2024-03-11T13:02:24.4231893Z   + actual - expected
+2024-03-11T13:02:24.4232104Z
+2024-03-11T13:02:24.4232312Z     {
+2024-03-11T13:02:24.4232513Z   +   cents: 12750,
+2024-03-11T13:02:24.4232724Z   +   day: '2024-03-09'
+2024-03-11T13:02:24.4232922Z   -   cents: 9600,
+2024-03-11T13:02:24.4233124Z   -   day: '2024-03-10'
+2024-03-11T13:02:24.4233319Z     }
+2024-03-11T13:02:24.4233524Z
+2024-03-11T13:02:24.4233725Z       at TestContext.<anonymous> (file:///home/runner/work/sales-report/sales-report/test/report.test.js:23:10)
+2024-03-11T13:02:24.4234016Z ℹ tests 3
+2024-03-11T13:02:24.4234210Z ℹ suites 0
+2024-03-11T13:02:24.4234402Z ℹ pass 1
+2024-03-11T13:02:24.4234593Z ℹ fail 2
+2024-03-11T13:02:24.4234789Z ℹ cancelled 0
+2024-03-11T13:02:24.4234982Z ℹ skipped 0
+2024-03-11T13:02:24.4235176Z ℹ todo 0
+2024-03-11T13:02:24.4235371Z ℹ duration_ms 98.211
+2024-03-11T13:02:24.4512037Z ##[error]Process completed with exit code 1.
+2024-03-11T13:02:24.4610233Z Post job cleanup.
+2024-03-11T13:02:24.6013341Z Cleaning up orphan processes

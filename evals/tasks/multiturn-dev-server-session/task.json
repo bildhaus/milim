@@ -1,0 +1,21 @@
+{
+  "id": "multiturn-dev-server-session",
+  "title": "Keep a dev server running across turns and query the same process",
+  "category": "multi-turn",
+  "turns": [
+    {
+      "prompt": "Start the dev server with `npm run dev` and leave it running in the background; it prints its URL when it is ready. Then call GET /health on it and tell me the boot id it reports.",
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Call GET /counter on the server that is already running three times and tell me the last value it returned, plus the boot id the server reports now. Don't restart it.",
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Thanks. Stop the dev server now.",
+      "timeout_s": 120
+    }
+  ],
+  "timeout_s": 180,
+  "check": "node check.mjs"
+}

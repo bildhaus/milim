@@ -1,0 +1,13 @@
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -9,10 +9,6 @@ on:
+ jobs:
+   test:
+     runs-on: ubuntu-latest
+-    env:
+-      # Run in the finance team's timezone so the nightly export job and the
+-      # tests see the same wall clock.
+-      TZ: America/New_York
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-node@v4

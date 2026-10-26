@@ -96,7 +96,13 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web. Returns a numbered list of result titles, URLs, and snippets; use http_fetch to read a result."
+        concat!(
+            "Search the web. Returns a numbered list of result titles, URLs, and snippets.\n",
+            "Use it for information outside the workspace or newer than your training data: library docs, release notes, error messages, current events.\n",
+            "Snippets are short and can be stale; read the most relevant results with http_fetch before relying on details.\n",
+            "Don't use it for files in the workspace (use the file tools) or for a URL you already have (fetch it directly).\n",
+            "Write focused keyword queries, not full sentences. Example: {\"query\": \"tokio JoinSet abort_all\", \"max_results\": 5}"
+        )
     }
 
     fn input_schema(&self) -> Value {

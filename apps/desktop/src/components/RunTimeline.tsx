@@ -11,7 +11,7 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   aborted: "Stopped",
   error: "Error",
 };
-const MUTATING_TOOLS = new Set(["write_file", "edit_file", "patch_file"]);
+const MUTATING_TOOLS = new Set(["write_file", "edit_file", "apply_patch", "notebook_edit", "patch_file"]);
 
 export function formatRunDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -61,6 +61,17 @@ function fileChangeSummary(run: RunTrace): string | null {
     const path = stringArg(args, "path");
     if (path) files.add(path);
     const result = asRecord(step.result);
+    // apply_patch names its files in the result rather than a `path` argument.
+    for (const file of Array.isArray(result?.files) ? result.files : []) {
+      const record = asRecord(file);
+      for (const key of ["moved_to", "path"]) {
+        const value = record?.[key];
+        if (typeof value === "string") {
+          files.add(value);
+          break;
+        }
+      }
+    }
     added += numberField(result, ["added", "additions", "insertions", "lines_added"]);
     removed += numberField(result, ["removed", "removals", "deletions", "lines_removed"]);
   }

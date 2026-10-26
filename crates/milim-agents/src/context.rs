@@ -196,6 +196,15 @@ pub(crate) struct SummaryPlan {
 }
 
 impl SummaryPlan {
+    /// Where the summarized span ends. Messages from here on stay verbatim.
+    pub(crate) fn end(&self) -> usize {
+        if self.after.is_empty() {
+            self.before.end
+        } else {
+            self.after.end
+        }
+    }
+
     fn messages<'a>(&self, messages: &'a [ChatMessage]) -> impl Iterator<Item = &'a ChatMessage> {
         messages[self.before.clone()]
             .iter()
@@ -347,7 +356,23 @@ fn transcript<'a>(messages: impl Iterator<Item = &'a ChatMessage>, max_chars: us
     out
 }
 
-pub(crate) const SUMMARY_INSTRUCTIONS: &str = "You condense the earlier part of an agent's working session so it can continue with less context. Write a concise summary that preserves: the goals and constraints the user stated, decisions made, files and commands touched with their key results, errors hit and how they were resolved, and any open threads. When the transcript starts with an earlier summary, fold its content into yours. Use short bullet points. Do not invent details and do not address the user.";
+pub(crate) const SUMMARY_INSTRUCTIONS: &str = "Condense the earlier part of an agent's working session so it can continue with less context. Write a concise summary that preserves: the goals and constraints the user stated, decisions made, files and commands touched with their key results, errors hit and how they were resolved, and any open threads. When the earlier part starts with an earlier summary, fold its content into yours. Use short bullet points. Do not invent details and do not address the user.";
+
+/// Opens the request that ends a summary request sent as the run's own
+/// message prefix.
+pub(crate) const SUMMARY_REQUEST_MARKER: &str = "[Context compaction request]";
+
+/// The user message appended to the run's own message prefix to ask for its
+/// summary. The prefix ends where the summarized span ends, so this message
+/// is the marker the summary runs up to.
+pub(crate) fn summary_request_message() -> ChatMessage {
+    ChatMessage::text(
+        "user",
+        format!(
+            "{SUMMARY_REQUEST_MARKER}\nPause the task. Summarize the conversation above, from the first message after the system prompt up to this request. {SUMMARY_INSTRUCTIONS} Reply with the summary only; do not call tools."
+        ),
+    )
+}
 
 pub(crate) fn summary_message(summary: &str) -> ChatMessage {
     ChatMessage::text("system", format!("{SUMMARY_PREFIX}\n{}", summary.trim()))

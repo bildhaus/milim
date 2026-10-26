@@ -9,6 +9,7 @@ export type SettingSearchEntry = {
 
 export const SETTINGS_SEARCH_ENTRIES: SettingSearchEntry[] = [
   { id: "models-run-limits", label: "Provider run limits", section: "models", aliases: ["budget", "spend", "cost", "time limit", "steps"] },
+  { id: "models-worker-limits", label: "Worker budget", section: "models", aliases: ["workers", "delegation", "delegate", "tokens", "steps", "time limit", "budget"] },
   { id: "app-window-layout", label: "Window and layout", section: "app", aliases: ["app", "general", "always on top", "ui size", "zoom", "account usage", "account quota", "quota", "codex", "claude", "new chat"] },
   { id: "app-panel-sizes", label: "Panel sizes", section: "app", aliases: ["reset panel sizes", "resize", "panel width", "sidebar width", "side panel width", "inspector width", "context width", "rail width", "sheet size", "drag to resize", "layout"] },
   { id: "app-thread-navigation", label: "Thread navigation", section: "app", aliases: ["sidebar", "sidebar organization", "thread organization", "top bar", "bottom bar", "placement", "projects", "inbox", "settle", "settled", "finished threads", "recent activity", "folders", "organization"] },

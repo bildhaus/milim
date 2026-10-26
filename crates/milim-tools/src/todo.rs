@@ -117,7 +117,12 @@ impl Tool for TodoWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Replace your task checklist for multi-step work. Send the whole list each time; keep at most one item in_progress and mark items completed as soon as they are done."
+        concat!(
+            "Replace your task checklist for multi-step work. Send the whole list each time; keep at most one item in_progress and mark items completed as soon as they are done.\n",
+            "Use it for tasks with three or more distinct steps, or when the user asks for several things, and keep it current as you work.\n",
+            "Don't use it for a single quick change or a question you can answer directly, and don't resend an unchanged list.\n",
+            "Example: {\"todos\": [{\"content\": \"Reproduce the failing test\", \"status\": \"completed\"}, {\"content\": \"Fix the parser\", \"status\": \"in_progress\"}, {\"content\": \"Run the test suite\", \"status\": \"pending\"}]}"
+        )
     }
 
     fn input_schema(&self) -> Value {

@@ -7,6 +7,8 @@ node_modules
 dist
 .DS_Store
 *.log
+# Eval fixture: a pasted CI log the agent debugs from
+!evals/tasks/ci-log-timezone/repo/ci/failure.log
 .claude
 .playwright-mcp
 .env

@@ -1,0 +1,9 @@
+{
+  "id": "rust-release-registry",
+  "title": "Make a small Rust crate compile and order versions correctly",
+  "category": "rust",
+  "prompt": "`cargo test` fails in this crate. Fix the library so the tests pass. Don't change the tests, don't add dependencies, and don't use `unsafe`.",
+  "timeout_s": 420,
+  "requires": ["cargo"],
+  "check": "node check.mjs"
+}

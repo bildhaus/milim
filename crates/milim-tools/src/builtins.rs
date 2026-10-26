@@ -61,7 +61,11 @@ impl Tool for CurrentTimeTool {
     }
 
     fn description(&self) -> &str {
-        "Get the current UTC time as a unix timestamp."
+        concat!(
+            "Get the current UTC time as a unix timestamp in seconds, e.g. {\"unix\": 1767225600}.\n",
+            "Use it when the exact time matters: elapsed time, deadlines, or timestamps to write into files.\n",
+            "Don't call it just to learn today's date when the conversation already states it. Takes no arguments: {}"
+        )
     }
 
     fn input_schema(&self) -> Value {
@@ -325,7 +329,12 @@ impl Tool for RenderChartTool {
     }
 
     fn description(&self) -> &str {
-        "Render a native inline bar, line, pie, or scatter chart in the Milim transcript. Bar charts may be vertical or horizontal. Use this when the user asks to plot or visualize structured numeric data."
+        concat!(
+            "Render a native inline bar, line, pie, or scatter chart in the Milim transcript. Bar charts may be vertical or horizontal.\n",
+            "Use it when the user asks to plot or visualize structured numeric data you already have.\n",
+            "Don't use it for text tables, diagrams, or numbers you would have to invent.\n",
+            "Example: {\"title\": \"Build time\", \"type\": \"bar\", \"y_label\": \"seconds\", \"series\": [{\"name\": \"main\", \"points\": [{\"x\": \"Mon\", \"y\": 41}, {\"x\": \"Tue\", \"y\": 37}]}]}"
+        )
     }
 
     fn input_schema(&self) -> Value {
@@ -506,7 +515,13 @@ impl Tool for HttpFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a public http(s) URL. HTML pages are returned as readable Markdown by default; JSON and plain text pass through unchanged. Long content is paged with offset."
+        concat!(
+            "Fetch a public http(s) URL. HTML pages are returned as readable Markdown by default; JSON and plain text pass through unchanged.\n",
+            "Use it to read a web_search result, a page or docs the user linked, or a public JSON API.\n",
+            "Don't use it for workspace files, localhost or private-network addresses (refused), or pages behind a sign-in.\n",
+            "Long content is paged: when the result says to continue, call again with the offset it gives instead of refetching from the start.\n",
+            "Example: {\"url\": \"https://docs.rs/serde/latest/serde/\"}, then {\"url\": \"https://docs.rs/serde/latest/serde/\", \"offset\": 40000}"
+        )
     }
 
     fn input_schema(&self) -> Value {
@@ -715,6 +730,40 @@ fn is_public_ip(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The JSON after `Example: ` in a description, up to the end of the line.
+    fn description_example(tool: &dyn Tool) -> Value {
+        let description = tool.description();
+        let example = description.split("Example: ").nth(1).unwrap();
+        serde_json::from_str(example.lines().next().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn descriptions_say_when_to_use_a_tool_and_their_examples_are_valid() {
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(CurrentTimeTool),
+            Box::new(HttpFetchTool),
+            Box::new(RenderChartTool),
+            Box::new(crate::WebSearchTool::default()),
+            Box::new(crate::TodoWriteTool::default()),
+        ];
+        for tool in &tools {
+            let description = tool.description();
+            let lines = description.lines().count();
+            assert!((3..=8).contains(&lines), "{}: {lines} lines", tool.name());
+            assert!(description.contains("Use it"), "{}", tool.name());
+            assert!(description.contains("Don't"), "{}", tool.name());
+        }
+        // Examples a model may copy run as written.
+        RenderChartTool
+            .invoke(description_example(&RenderChartTool))
+            .await
+            .unwrap();
+        let todo = crate::TodoWriteTool::default();
+        todo.invoke(description_example(&todo)).await.unwrap();
+        let search = description_example(&crate::WebSearchTool::default());
+        assert!(search["query"].is_string() && search["max_results"].is_u64());
+    }
 
     #[test]
     fn fetch_address_policy_rejects_local_networks() {

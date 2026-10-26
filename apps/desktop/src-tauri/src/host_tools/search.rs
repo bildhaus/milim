@@ -20,8 +20,8 @@ use milim_core::{Error, Result};
 use milim_tools::{Tool, ToolConcurrency, ToolEffect};
 
 use super::{
-    arg_str, host_tool_scoping, optional_arg_str, optional_bool, optional_u64, path_description,
-    read_path, root_of, safe_join, HostCtx, PathDisplay,
+    arg_str, explain_io, host_tool_scoping, missing_path, optional_arg_str, optional_bool,
+    optional_u64, path_description, read_path, root_of, safe_join, HostCtx, PathDisplay,
 };
 
 /// Paths one `glob` call returns.
@@ -315,7 +315,19 @@ pub(super) struct Listed {
 /// Every regular file under `base`, honoring `.gitignore` inside a git
 /// repository. Symlinks are skipped so results never leave the tree.
 pub(super) fn list_files(base: &Path) -> Vec<Listed> {
-    let rels = git_listing(base).unwrap_or_else(|| walk_listing(base));
+    listed(
+        git_listing(base).unwrap_or_else(|| walk_listing(base, false)),
+        base,
+    )
+}
+
+/// Every regular file under `base`, ignored or not, skipping only `.git`
+/// (bounded like the plain walk).
+fn list_all_files(base: &Path) -> Vec<Listed> {
+    listed(walk_listing(base, true), base)
+}
+
+fn listed(rels: Vec<String>, base: &Path) -> Vec<Listed> {
     rels.into_iter()
         .filter_map(|rel| {
             let path = base.join(&rel);
@@ -354,7 +366,9 @@ fn git_listing(base: &Path) -> Option<Vec<String>> {
     Some(rels)
 }
 
-fn walk_listing(base: &Path) -> Vec<String> {
+/// Files under `base` from a bounded walk that skips VCS, dependency, build,
+/// and hidden directories, or with `everything` only `.git`.
+fn walk_listing(base: &Path, everything: bool) -> Vec<String> {
     let mut out = Vec::new();
     let mut pending = vec![(base.to_path_buf(), String::new())];
     while let Some((dir, prefix)) = pending.pop() {
@@ -372,7 +386,12 @@ fn walk_listing(base: &Path) -> Vec<String> {
                 format!("{prefix}/{name}")
             };
             if kind.is_dir() {
-                if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_str()) {
+                let skipped = if everything {
+                    name == ".git"
+                } else {
+                    name.starts_with('.') || SKIPPED_DIRS.contains(&name.as_str())
+                };
+                if !skipped {
                     pending.push((entry.path(), rel));
                 }
             } else if kind.is_file() {
@@ -515,12 +534,17 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files by glob pattern (`*`, `**`, `?`, `[...]`, `{a,b}`), e.g. `src/**/*.ts`. A pattern without `/` matches file names at any depth. Honors .gitignore; returns paths relative to the working folder, newest first, up to 500."
+        "Find files by glob pattern (`*`, `**`, `?`, `[...]`, `{a,b}`). A pattern without `/` matches file names at any depth. Returns paths relative to the working folder, newest first, up to 500 per call; page with offset.\n\
+         Use it to locate files by name or extension. Don't use it to search file contents (use grep) or to list one folder (use list_dir).\n\
+         Honors .gitignore; set include_ignored to also find ignored files such as build output, dependencies, or .env files.\n\
+         Example: {\"pattern\": \"src/**/*.test.ts\"}"
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
             "pattern":{"type":"string","description":"Glob pattern relative to path."},
-            "path":{"type":"string","description":format!("Directory to search, default the working folder. {}", path_description(&self.ctx))}
+            "path":{"type":"string","description":format!("Directory to search, default the working folder. {}", path_description(&self.ctx))},
+            "offset":{"type":"integer","minimum":0,"description":"Skip this many matches (newest first) to page through long results. Default 0."},
+            "include_ignored":{"type":"boolean","description":"Also match files that .gitignore excludes and dependency, build, and hidden directories (only .git is skipped). Default false."}
         },"required":["pattern"],"additionalProperties":false})
     }
     fn effect(&self) -> ToolEffect {
@@ -532,6 +556,13 @@ impl Tool for GlobTool {
     fn model_text(&self, result: &Value) -> Option<String> {
         let files = result.get("files")?.as_array()?;
         let pattern = result.get("pattern")?.as_str()?;
+        let count = result["count"].as_u64().unwrap_or(0);
+        if files.is_empty() && count > 0 {
+            return Some(format!(
+                "No more files: offset {} is past the {count} matches of {pattern}.",
+                result["offset"]
+            ));
+        }
         if files.is_empty() {
             return Some(format!("No files matched {pattern}."));
         }
@@ -540,11 +571,13 @@ impl Tool for GlobTool {
             .filter_map(Value::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        if result["truncated"].as_bool().unwrap_or(false) {
+        if let Some(next) = result["next_offset"].as_u64() {
+            let offset = result["offset"].as_u64().unwrap_or(0);
             let _ = write!(
                 out,
-                "\n(Showing the {} newest of {} matches. Narrow the pattern or path.)",
-                files.len(),
+                "\n(Showing matches {}-{} of {}, newest first. Continue with offset={next}, or narrow the pattern or path.)",
+                offset + 1,
+                offset + files.len() as u64,
                 result["count"]
             );
         }
@@ -554,30 +587,49 @@ impl Tool for GlobTool {
     async fn invoke(&self, args: Value) -> Result<Value> {
         let pattern = arg_str(&args, "pattern")?.to_string();
         let rel = optional_arg_str(&args, "path")?.unwrap_or("");
+        let offset = usize::try_from(optional_u64(&args, "offset", 0)?).unwrap_or(usize::MAX);
+        let include_ignored = optional_bool(&args, "include_ignored")?;
         let root = root_of(&self.ctx.ws)?;
         let base = safe_join(&self.ctx.ws, rel)?;
+        let shown = if rel.is_empty() { "." } else { rel };
+        if !base.exists() {
+            return Err(missing_path(&self.ctx, &base, shown, "glob"));
+        }
         if !base.is_dir() {
             return Err(Error::InvalidRequest(format!(
-                "{} is not a directory",
-                if rel.is_empty() { "." } else { rel }
+                "{shown} is a file, not a directory; pass its directory as path, or read it with read_file"
             )));
         }
         let relative_pattern = relative_to_base(&pattern, &base)?;
         let glob = Glob::new(&relative_pattern)?;
         tokio::task::spawn_blocking(move || {
-            let mut files = list_files(&base)
+            let listing = if include_ignored {
+                list_all_files(&base)
+            } else {
+                list_files(&base)
+            };
+            let mut files = listing
                 .into_iter()
                 .filter(|file| glob.matches(&file.rel))
                 .collect::<Vec<_>>();
             files.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.rel.cmp(&b.rel)));
             let count = files.len();
-            files.truncate(MAX_GLOB_RESULTS);
             let display = PathDisplay::new(&root);
+            let page = files
+                .iter()
+                .skip(offset)
+                .take(MAX_GLOB_RESULTS)
+                .map(|file| display.show(&file.path))
+                .collect::<Vec<_>>();
+            let next = offset.saturating_add(page.len());
+            let next_offset = (next < count).then_some(next);
             json!({
                 "pattern": pattern,
-                "files": files.iter().map(|file| display.show(&file.path)).collect::<Vec<_>>(),
+                "files": page,
                 "count": count,
-                "truncated": count > MAX_GLOB_RESULTS,
+                "offset": offset,
+                "next_offset": next_offset,
+                "truncated": next_offset.is_some(),
             })
         })
         .await
@@ -623,6 +675,8 @@ struct GrepRequest {
     /// File-name globs of the requested `type`; empty searches every type.
     types: Vec<String>,
     case_insensitive: bool,
+    /// Matches may span lines.
+    multiline: bool,
     mode: GrepMode,
     before: usize,
     after: usize,
@@ -695,13 +749,20 @@ fn type_globs(name: &str) -> Result<Vec<String>> {
     Ok(globs.iter().map(ToString::to_string).collect())
 }
 
-/// One output line of content mode.
+/// One output line of content mode, or the lines of one multi-line match.
 #[derive(Debug)]
 struct Hit {
     path: PathBuf,
     line: u64,
     text: String,
     matched: bool,
+}
+
+impl Hit {
+    /// The last line this hit covers.
+    fn last_line(&self) -> u64 {
+        self.line + self.text.matches('\n').count() as u64
+    }
 }
 
 #[derive(Debug)]
@@ -722,7 +783,10 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents with a regular expression (ripgrep syntax). Honors .gitignore and skips binary files and files over 2 MiB. output_mode: files_with_matches (default, newest first), content (path:line:text, with optional context lines), or count. Filter files with glob and/or type; page through long results with offset."
+        "Search file contents with a regular expression (ripgrep syntax). Honors .gitignore and skips binary files and files over 2 MiB. output_mode: files_with_matches (default, newest first), content (path:line:text, with optional context lines), or count. Filter files with glob and/or type; page through long results with offset.\n\
+         Use it to find where text, a call, or a config key appears. Don't use it to find files by name (use glob); for an identifier's definition or real references, code_navigation is more precise when available.\n\
+         Patterns match within one line unless multiline is set, which lets `.` and `\\n` span lines (for example `struct Config \\{.*?\\}`).\n\
+         Example: {\"pattern\": \"fn \\\\w+_handler\", \"type\": \"rust\", \"output_mode\": \"content\", \"context\": 2}"
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{
@@ -731,6 +795,7 @@ impl Tool for GrepTool {
             "glob":{"type":"string","description":"Only search files matching this glob, e.g. `*.rs` or `src/**/*.ts`."},
             "type":{"type":"string","description":"Only search files of this type: a language (rust, py, js, ts, go, java, c, cpp, md, json, yaml, ...) or a file extension."},
             "case_insensitive":{"type":"boolean","description":"Match case-insensitively. Default false."},
+            "multiline":{"type":"boolean","description":"Let a match span lines: `.` also matches line breaks and the pattern may contain `\\n` (like rg -U --multiline-dotall). A multi-line match is shown as its full lines and counts as one result. Default false."},
             "output_mode":{"type":"string","enum":["content","files_with_matches","count"],"description":"Default files_with_matches."},
             "context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context before and after each match in content mode (like grep -C). Default 0."},
             "before_context":{"type":"integer","minimum":0,"maximum":MAX_CONTEXT,"description":"Lines of context before each match (like grep -B); overrides context."},
@@ -811,7 +876,10 @@ impl Tool for GrepTool {
         let root = root_of(&self.ctx.ws)?;
         // Like read_file, grep may search saved oversized tool output.
         let target = read_path(&self.ctx.ws, rel)?;
-        let target_is_file = std::fs::metadata(&target)?.is_file();
+        let shown = if rel.is_empty() { "." } else { rel };
+        let target_is_file = std::fs::metadata(&target)
+            .map_err(|error| explain_io(&self.ctx, error.into(), &target, shown, "grep"))?
+            .is_file();
         let mode = match optional_arg_str(&args, "output_mode")?.unwrap_or("files_with_matches") {
             "content" => GrepMode::Content,
             "files_with_matches" => GrepMode::FilesWithMatches,
@@ -848,6 +916,7 @@ impl Tool for GrepTool {
                 .map(ToString::to_string),
             types,
             case_insensitive: optional_bool(&args, "case_insensitive")?,
+            multiline: optional_bool(&args, "multiline")?,
             mode,
             before: before as usize,
             after: after as usize,
@@ -914,6 +983,9 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
         } else {
             "--case-sensitive"
         });
+    if request.multiline {
+        command.args(["--multiline", "--multiline-dotall"]);
+    }
     if let Some(dir) = request.target.parent().filter(|_| request.target_is_file) {
         command.current_dir(dir);
     } else {
@@ -1025,6 +1097,8 @@ fn grep_ripgrep(rg: &Path, request: &GrepRequest) -> Result<Option<(Findings, bo
 fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
     let regex = regex::RegexBuilder::new(&request.pattern)
         .case_insensitive(request.case_insensitive)
+        .multi_line(request.multiline)
+        .dot_matches_new_line(request.multiline)
         .build()
         .map_err(|error| Error::InvalidRequest(format!("invalid regex: {error}")))?;
     let filter = request.glob.as_deref().map(Glob::new).transpose()?;
@@ -1060,41 +1134,57 @@ fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
             .collect::<Vec<_>>();
+        // The first and last line of each match. A multi-line search matches
+        // the whole file, merging matches whose lines touch, as ripgrep does.
+        let ranges = if request.multiline {
+            multiline_ranges(&regex, body)
+        } else {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| regex.is_match(line))
+                .map(|(index, _)| (index, index))
+                .collect()
+        };
         match request.mode {
             GrepMode::FilesWithMatches => {
-                if lines.iter().any(|line| regex.is_match(line)) {
+                if !ranges.is_empty() {
                     matched_files.push(path);
                 }
             }
             GrepMode::Count => {
-                let count = lines.iter().filter(|line| regex.is_match(line)).count();
+                let count = if request.multiline {
+                    multiline_count(&regex, body)
+                } else {
+                    ranges.len()
+                };
                 if count > 0 {
                     counts.push((path, count as u64));
                 }
             }
             GrepMode::Content => {
-                let matches = lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| regex.is_match(line))
-                    .map(|(index, _)| index)
-                    .collect::<Vec<_>>();
                 let mut next = 0;
-                for (position, index) in matches.iter().enumerate() {
-                    let start = index.saturating_sub(request.before).max(next);
-                    let end = (index + request.after + 1).min(lines.len());
-                    let end = matches
+                for (position, (first, last)) in ranges.iter().copied().enumerate() {
+                    let start = first.saturating_sub(request.before).max(next);
+                    let end = (last + request.after + 1).min(lines.len());
+                    let end = ranges
                         .get(position + 1)
-                        .map(|following| end.min(*following))
+                        .map(|(following, _)| end.min(*following))
                         .unwrap_or(end);
-                    for (line, text) in lines.iter().enumerate().take(end).skip(start) {
-                        hits.push(Hit {
-                            path: path.clone(),
-                            line: line as u64 + 1,
-                            text: text.to_string(),
-                            matched: line == *index,
-                        });
-                    }
+                    let context = |line: usize| Hit {
+                        path: path.clone(),
+                        line: line as u64 + 1,
+                        text: lines[line].to_string(),
+                        matched: false,
+                    };
+                    hits.extend((start..first).map(context));
+                    hits.push(Hit {
+                        path: path.clone(),
+                        line: first as u64 + 1,
+                        text: lines[first..=last].join("\n"),
+                        matched: true,
+                    });
+                    hits.extend((last + 1..end).map(context));
                     next = end;
                     matched_lines += 1;
                 }
@@ -1112,6 +1202,41 @@ fn grep_builtin(request: &GrepRequest) -> Result<(Findings, bool)> {
         },
         false,
     ))
+}
+
+/// The 0-based line of each byte where a line starts in `body`.
+fn line_starts(body: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(body.match_indices('\n').map(|(index, _)| index + 1))
+        .collect()
+}
+
+/// The first and last line of every match of `regex` in `body`, merged when
+/// one match starts on or right after the line another ends on.
+fn multiline_ranges(regex: &regex::Regex, body: &str) -> Vec<(usize, usize)> {
+    let starts = line_starts(body);
+    let line_of = |byte: usize| starts.partition_point(|start| *start <= byte) - 1;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for found in regex.find_iter(body) {
+        let first = line_of(found.start());
+        let last = line_of(found.end().saturating_sub(1).max(found.start()));
+        match ranges.last_mut() {
+            Some(range) if first <= range.1 + 1 => range.1 = range.1.max(last),
+            _ => ranges.push((first, last)),
+        }
+    }
+    ranges
+}
+
+/// ripgrep's `--count` for a multi-line search: the lines a match starts on.
+fn multiline_count(regex: &regex::Regex, body: &str) -> usize {
+    let starts = line_starts(body);
+    let mut lines = regex
+        .find_iter(body)
+        .map(|found| starts.partition_point(|start| *start <= found.start()))
+        .collect::<Vec<_>>();
+    lines.dedup();
+    lines.len()
 }
 
 fn cut_line(text: &str) -> String {
@@ -1213,7 +1338,7 @@ fn render_findings(
                     let (previous, current) = (&hits[start - 1], &hits[start]);
                     if previous.matched
                         || previous.path != current.path
-                        || previous.line + 1 != current.line
+                        || previous.last_line() + 1 != current.line
                     {
                         break;
                     }
@@ -1240,18 +1365,24 @@ fn render_findings(
                     shown_path = (hit.path.clone(), display.show(&hit.path));
                 }
                 let separator = if hit.matched { ':' } else { '-' };
-                let line = format!(
-                    "{}{separator}{}{separator}{}\n",
-                    shown_path.1,
-                    hit.line,
-                    cut_line(&hit.text)
-                );
+                // A multi-line match shows each of its lines as a match line.
+                let mut line = String::new();
+                for (offset, text) in hit.text.split('\n').enumerate() {
+                    let _ = writeln!(
+                        line,
+                        "{}{separator}{}{separator}{}",
+                        shown_path.1,
+                        hit.line + offset as u64,
+                        cut_line(text.strip_suffix('\r').unwrap_or(text))
+                    );
+                }
+                let height = hit.text.matches('\n').count() + 1;
                 let contiguous =
                     previous.is_some_and(|(path, line)| path == hit.path && line + 1 == hit.line);
                 let divider = request.context() && previous.is_some() && !contiguous;
                 if shown > 0
                     && (output.len() + line.len() + 3 > MAX_GREP_OUTPUT_BYTES
-                        || lines + 2 > MAX_GREP_OUTPUT_LINES)
+                        || lines + height + 1 > MAX_GREP_OUTPUT_LINES)
                 {
                     stopped_at = Some(index);
                     break;
@@ -1261,9 +1392,9 @@ fn render_findings(
                     lines += 1;
                 }
                 output.push_str(&line);
-                lines += 1;
+                lines += height;
                 shown += usize::from(hit.matched);
-                previous = Some((&hit.path, hit.line));
+                previous = Some((&hit.path, hit.last_line()));
                 if hit.matched {
                     last_match = previous;
                 }
@@ -1322,12 +1453,71 @@ mod tests {
             glob: None,
             types: Vec::new(),
             case_insensitive: false,
+            multiline: false,
             mode,
             before: 0,
             after: 0,
             offset: 0,
             max_results: 200,
         }
+    }
+
+    #[test]
+    fn multiline_grep_spans_lines_merges_touching_matches_and_counts_start_lines() {
+        let root = temp_dir();
+        write(
+            &root,
+            "a.rs",
+            "fn a() {\n  x\n}\nfn b() {}\nlet q = 1; let r = 2;\nfn c() {\n}\n",
+        );
+        let pattern = r"fn \w+\(\) \{.*?\}";
+        let mut content = request(&root, pattern, GrepMode::Content);
+        content.multiline = true;
+        (content.before, content.after) = (0, 1);
+        let found = grep_builtin(&content).unwrap();
+        let rendered = render_findings(found, &content, &PathDisplay::new(&root), "builtin");
+        assert_eq!(
+            rendered["output"],
+            "a.rs:1:fn a() {\na.rs:2:  x\na.rs:3:}\na.rs:4:fn b() {}\na.rs-5-let q = 1; let r = 2;\na.rs:6:fn c() {\na.rs:7:}"
+        );
+        assert_eq!(rendered["matches"], 2, "touching matches merge into one");
+
+        let mut count = request(&root, pattern, GrepMode::Count);
+        count.multiline = true;
+        let Findings::Counts(counts) = grep_builtin(&count).unwrap().0 else {
+            panic!("expected counts")
+        };
+        assert_eq!(counts, [(root.join("a.rs"), 3)]);
+        let mut same_line = request(&root, "let", GrepMode::Count);
+        same_line.multiline = true;
+        let Findings::Counts(counts) = grep_builtin(&same_line).unwrap().0 else {
+            panic!("expected counts")
+        };
+        assert_eq!(counts, [(root.join("a.rs"), 1)]);
+
+        // Without multiline the pattern cannot cross a line break.
+        let mut single = request(&root, r"\}\nfn", GrepMode::FilesWithMatches);
+        let Findings::Files(files) = grep_builtin(&single).unwrap().0 else {
+            panic!("expected files")
+        };
+        assert!(files.is_empty());
+        single.multiline = true;
+        let Findings::Files(files) = grep_builtin(&single).unwrap().0 else {
+            panic!("expected files")
+        };
+        assert_eq!(files, [root.join("a.rs")]);
+
+        let mut paged = request(&root, pattern, GrepMode::Content);
+        paged.multiline = true;
+        paged.max_results = 1;
+        let found = grep_builtin(&paged).unwrap();
+        let first = render_findings(found, &paged, &PathDisplay::new(&root), "builtin");
+        assert_eq!(first["next_offset"], 1);
+        paged.offset = 1;
+        let found = grep_builtin(&paged).unwrap();
+        let second = render_findings(found, &paged, &PathDisplay::new(&root), "builtin");
+        assert_eq!(second["output"], "a.rs:6:fn c() {\na.rs:7:}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1401,9 +1591,21 @@ mod tests {
         write(&root, "target/debug/out", "");
         write(&root, ".cache/entry", "");
         write(&root, ".env", "");
-        let mut rels = walk_listing(&root);
+        let mut rels = walk_listing(&root, false);
         rels.sort();
         assert_eq!(rels, [".env", "src/lib.rs"]);
+        let mut all = walk_listing(&root, true);
+        all.sort();
+        assert_eq!(
+            all,
+            [
+                ".cache/entry",
+                ".env",
+                "node_modules/pkg/index.js",
+                "src/lib.rs",
+                "target/debug/out"
+            ]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1596,6 +1798,19 @@ mod tests {
             );
             let builtin = render_findings(grep_builtin(&search).unwrap(), &search, &display, "");
             assert_eq!(ripgrep, builtin, "{mode:?} with type and offset");
+
+            let mut multiline = request(&root, r"fn \w+\(\) \{.*?\}|let", mode);
+            multiline.multiline = true;
+            (multiline.before, multiline.after) = (1, 1);
+            let ripgrep = render_findings(
+                grep_ripgrep(rg, &multiline).unwrap().unwrap(),
+                &multiline,
+                &display,
+                "",
+            );
+            let builtin =
+                render_findings(grep_builtin(&multiline).unwrap(), &multiline, &display, "");
+            assert_eq!(ripgrep, builtin, "{mode:?} multiline");
         }
         let _ = std::fs::remove_dir_all(root);
     }

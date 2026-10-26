@@ -68,6 +68,59 @@ pub(super) struct DelegateWorkerTaskArgs {
 #[derive(Debug, Deserialize)]
 pub(super) struct DelegateWorkersArgs {
     tasks: Vec<DelegateWorkerTaskArgs>,
+    /// `false` returns as soon as the Workers start; `wait_workers` collects
+    /// their reports.
+    #[serde(default = "default_wait")]
+    wait: bool,
+}
+
+fn default_wait() -> bool {
+    true
+}
+
+/// The Worker budget saved in the desktop settings (`workerLimits`), with
+/// the default for anything unset or out of range. Read when Workers start,
+/// so a change applies to the next Worker Run.
+pub(crate) fn worker_budget(state: &AppState) -> WorkerBudget {
+    let saved = state
+        .control
+        .as_ref()
+        .and_then(|control| {
+            control
+                .store()
+                .get_json(crate::control::MODEL_FAVORITES_SETTINGS_KEY)
+                .ok()
+                .flatten()
+        })
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    worker_budget_from_settings(
+        saved
+            .as_ref()
+            .and_then(|settings| settings.get("state")?.get("workerLimits")),
+    )
+}
+
+pub(super) fn worker_budget_from_settings(limits: Option<&Value>) -> WorkerBudget {
+    let mut budget = WorkerBudget::default();
+    let Some(limits) = limits else {
+        return budget;
+    };
+    let whole = |key: &str, range: std::ops::RangeInclusive<u64>| {
+        limits
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|value| range.contains(value))
+    };
+    if let Some(steps) = whole("maxSteps", 1..=MAX_WORKER_STEPS) {
+        budget.max_steps = steps as usize;
+    }
+    if let Some(minutes) = whole("maxMinutes", 1..=MAX_WORKER_MINUTES) {
+        budget.max_duration = Duration::from_secs(minutes * 60);
+    }
+    if let Some(tokens) = whole("maxTokens", MIN_WORKER_TOKENS..=MAX_WORKER_TOKENS) {
+        budget.max_tokens = tokens;
+    }
+    budget
 }
 
 pub(super) fn worker_model_is_available(available: &[Model], model: &str) -> bool {
@@ -554,12 +607,15 @@ pub(super) fn managed_worker_context(
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
+/// Start a proposed Worker Run under the saved [`WorkerBudget`], and schedule
+/// its wall-clock stop.
 pub(crate) async fn start_managed_worker_run(
     state: &AppState,
     supervisor: &ThreadSupervisor,
     run: &milim_agents::WorkerRun,
     tools: ToolRegistry,
 ) -> milim_core::Result<(milim_agents::WorkerRun, Vec<milim_agents::Worker>)> {
+    let budget = worker_budget(state);
     if run.status != milim_agents::WorkerRunStatus::Proposed {
         return Err(Error::InvalidRequest(
             "worker run is not awaiting approval".to_string(),
@@ -621,15 +677,18 @@ pub(crate) async fn start_managed_worker_run(
                 .as_deref()
                 .map(PathBuf::from)
                 .or_else(|| run_context.workspace.clone());
+            let worker_tools = super::registry_for_model(worker_tools, &spec.model);
             let hooks = add_native_worker_context(&mut spec, &worker_tools, workspace.as_deref());
             workers.push(supervisor.spawn_with_hooks(
                 service.clone(),
                 worker_tools,
                 hooks,
+                budget,
                 spec,
             )?);
         }
     }
+    schedule_worker_run_deadline(supervisor.clone(), running.id.clone(), budget.max_duration);
     Ok((running, workers))
 }
 
@@ -673,21 +732,64 @@ pub(super) async fn create_worker_worktree(folder: Option<PathBuf>) -> Option<Pa
     .flatten()
 }
 
-/// Stop a Worker Run still running [`WORKER_RUN_TIMEOUT`] after its Workers
-/// started. Scheduled when the Workers start, so it also holds when whoever
-/// started them stops waiting.
-pub(crate) fn schedule_worker_run_deadline(supervisor: Arc<ThreadSupervisor>, run_id: String) {
+/// Stop a Worker Run still running [`WORKER_STOP_GRACE`] past its time limit.
+/// Each native Worker stops itself at the limit between steps; this catches
+/// a step or account-runtime Worker that does not. Scheduled when the
+/// Workers start, so it also holds when whoever started them stops waiting.
+fn schedule_worker_run_deadline(supervisor: ThreadSupervisor, run_id: String, limit: Duration) {
     tokio::spawn(async move {
-        tokio::time::sleep(WORKER_RUN_TIMEOUT).await;
+        tokio::time::sleep(limit + WORKER_STOP_GRACE).await;
         let still_running = supervisor
             .worker_run(&run_id)
             .ok()
             .flatten()
             .is_some_and(|run| run.status == milim_agents::WorkerRunStatus::Running);
         if still_running {
-            let _ = supervisor.stop_run(&run_id, "worker run exceeded the five-minute deadline");
+            let _ = supervisor.stop_run(&run_id, &worker_time_limit_message(limit));
         }
     });
+}
+
+fn worker_time_limit_message(limit: Duration) -> String {
+    format!(
+        "worker run exceeded its {}-minute time limit",
+        limit.as_secs().div_ceil(60)
+    )
+}
+
+/// The result `delegate_workers` and `wait_workers` return for a Worker Run.
+/// Its notice reports the run's state to the transcript: a run that just
+/// started is announced once (`announce_start`), a finished one always. A
+/// run still waiting for approval carries none, since a proposal notice ends
+/// the delegating turn.
+fn worker_run_result(
+    supervisor: &ThreadSupervisor,
+    run: milim_agents::WorkerRun,
+    announce_start: bool,
+) -> milim_core::Result<Value> {
+    let workers = supervisor.workers_for_run(&run.id)?;
+    let (notice, note) = match run.status {
+        milim_agents::WorkerRunStatus::Proposed => (
+            None,
+            Some("This Worker Run is waiting for the user to start it.".to_string()),
+        ),
+        milim_agents::WorkerRunStatus::Running => (
+            announce_start.then(|| worker_run_notice(&run, &workers)),
+            Some(format!(
+                "Workers are still running. Call wait_workers with run_id \"{}\" to collect their reports.",
+                run.id
+            )),
+        ),
+        _ => (Some(worker_run_notice(&run, &workers)), None),
+    };
+    let mut result = json!({ "ok": true, "run": run, "workers": workers });
+    if let Some(notice) = notice {
+        result["worker_run_notice"] = notice;
+    }
+    if let Some(note) = note {
+        result["note"] = json!(note);
+    }
+    Ok(result)
 }
 
 #[async_trait]
@@ -698,14 +800,20 @@ impl Tool for DelegateWorkersTool {
     fn effect(&self) -> ToolEffect {
         ToolEffect::ReadOnly
     }
-    fn deadline_for_call(&self, _args: &Value) -> Option<Duration> {
-        Some(WORKER_RUN_TIMEOUT + WORKER_SETUP_ALLOWANCE + TOOL_WAIT_GRACE)
+    fn deadline_for_call(&self, args: &Value) -> Option<Duration> {
+        let waits = args.get("wait").and_then(Value::as_bool).unwrap_or(true);
+        let execution = if waits {
+            worker_budget(&self.state).max_duration + WORKER_STOP_GRACE
+        } else {
+            Duration::ZERO
+        };
+        Some(execution + WORKER_SETUP_ALLOWANCE + TOOL_WAIT_GRACE)
     }
     fn waits_on_other_runs(&self) -> bool {
         true
     }
     fn description(&self) -> &str {
-        "Run 1 to 4 substantial, independent tasks in parallel as Workers and return their final reports. Workers start fresh: they don't see this conversation or anything you have read, so write each task's prompt as a self-contained brief with the goal, the relevant files, any constraints, and what to report back. Do short or sequential work yourself. Workers are stopped after five minutes of execution. When this chat's delegation setting is Ask and tool approval is not Open, the plan is proposed to the user to start instead, and the call returns without reports."
+        "Run 1 to 4 substantial, independent tasks in parallel as Workers and return their final reports. Workers start fresh: they don't see this conversation or anything you have read, so write each task's prompt as a self-contained brief with the goal, the relevant files, any constraints, and what to report back. Do short or sequential work yourself. Each Worker has a budget of model steps and tokens, and a Worker Run has a long time limit (30 minutes unless the user changed it); a Worker that runs out stops between steps, and its report keeps what it wrote so far, so ask Workers to report findings as they go on long tasks. Pass `wait: false` to return as soon as the Workers start and keep working, then collect their reports with `wait_workers`. When this chat's delegation setting is Ask and tool approval is not Open, the plan is proposed to the user to start instead, and the call returns without reports."
     }
     fn input_schema(&self) -> Value {
         json!({
@@ -732,6 +840,11 @@ impl Tool for DelegateWorkersTool {
                         "required": ["prompt"],
                         "additionalProperties": false
                     }
+                },
+                "wait": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "true (default) waits for the Workers' reports. false returns the Worker Run id as soon as the Workers start; collect the reports later with wait_workers."
                 }
             },
             "required": ["tasks"],
@@ -790,22 +903,101 @@ impl Tool for DelegateWorkersTool {
             self.child_tools.clone(),
         )
         .await?;
-        schedule_worker_run_deadline(self.supervisor.clone(), run.id.clone());
+        if !args.wait {
+            return worker_run_result(&self.supervisor, run, true);
+        }
+        let limit = worker_budget(&self.state).max_duration;
         run = self
             .supervisor
-            .wait_run(&run.id, WORKER_RUN_TIMEOUT.as_millis() as u64)
+            .wait_run(&run.id, (limit + WORKER_STOP_GRACE).as_millis() as u64)
             .await?
             .unwrap_or(run);
         if run.status == milim_agents::WorkerRunStatus::Running {
             run = self
                 .supervisor
-                .stop_run(&run.id, "worker run exceeded the five-minute deadline")?
+                .stop_run(&run.id, &worker_time_limit_message(limit))?
                 .unwrap_or(run);
         }
-        let workers = self.supervisor.workers_for_run(&run.id)?;
-        Ok(
-            json!({ "ok": true, "run": run, "workers": workers, "worker_run_notice": worker_run_notice(&run, &workers) }),
-        )
+        worker_run_result(&self.supervisor, run, false)
+    }
+}
+
+/// `wait_workers`: collect the reports of a Worker Run this chat started with
+/// `delegate_workers` and `wait: false`.
+pub(super) struct WaitWorkersTool {
+    pub(super) supervisor: Arc<ThreadSupervisor>,
+    pub(super) context: AgentMemoryContext,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitWorkersArgs {
+    run_id: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+fn wait_workers_timeout(timeout_secs: Option<u64>) -> Duration {
+    Duration::from_secs(
+        timeout_secs
+            .unwrap_or(DEFAULT_WAIT_WORKERS_SECS)
+            .clamp(1, MAX_WAIT_WORKERS_SECS),
+    )
+}
+
+#[async_trait]
+impl Tool for WaitWorkersTool {
+    fn name(&self) -> &str {
+        "wait_workers"
+    }
+    fn effect(&self) -> ToolEffect {
+        ToolEffect::ReadOnly
+    }
+    fn deadline_for_call(&self, args: &Value) -> Option<Duration> {
+        let timeout_secs = args.get("timeout_secs").and_then(Value::as_u64);
+        Some(wait_workers_timeout(timeout_secs) + TOOL_WAIT_GRACE)
+    }
+    fn waits_on_other_runs(&self) -> bool {
+        true
+    }
+    fn description(&self) -> &str {
+        "Wait for a Worker Run started with delegate_workers and `wait: false`, and return its Workers' final reports. If the Workers are still running after `timeout_secs`, returns their current status instead; call again to keep waiting."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": { "type": "string", "description": "Worker Run id returned by delegate_workers." },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_WAIT_WORKERS_SECS,
+                    "default": DEFAULT_WAIT_WORKERS_SECS,
+                    "description": "Longest time to wait for the Workers to finish."
+                }
+            },
+            "required": ["run_id"],
+            "additionalProperties": false
+        })
+    }
+    async fn invoke(&self, args: Value) -> milim_core::Result<Value> {
+        let args: WaitWorkersArgs = serde_json::from_value(args).map_err(|error| {
+            Error::InvalidRequest(format!("invalid wait_workers arguments: {error}"))
+        })?;
+        let timeout = wait_workers_timeout(args.timeout_secs);
+        let parent_id = child_thread_parent_id(&self.context)?;
+        let run_id = trim_required_tool_arg(args.run_id, "run_id")?;
+        let run = self
+            .supervisor
+            .worker_run(&run_id)?
+            .filter(|run| run.parent_thread_id == parent_id)
+            .ok_or_else(|| Error::ModelNotFound(format!("worker run {run_id} in this chat")))?;
+        let run = self
+            .supervisor
+            .wait_run(&run.id, timeout.as_millis() as u64)
+            .await?
+            .unwrap_or(run);
+        worker_run_result(&self.supervisor, run, false)
     }
 }
 
@@ -874,6 +1066,61 @@ mod worker_model_tests {
                 .to_string()
                 .contains("not available")
         );
+    }
+
+    #[test]
+    fn worker_budget_comes_from_saved_settings_within_bounds() {
+        assert_eq!(worker_budget_from_settings(None), WorkerBudget::default());
+        let budget = worker_budget_from_settings(Some(&json!({
+            "maxSteps": 120,
+            "maxMinutes": 90,
+            "maxTokens": 2_000_000,
+        })));
+        assert_eq!(
+            budget,
+            WorkerBudget {
+                max_steps: 120,
+                max_tokens: 2_000_000,
+                max_duration: Duration::from_secs(90 * 60),
+            }
+        );
+        // Unset, invalid, or out-of-range fields keep their defaults.
+        let budget = worker_budget_from_settings(Some(&json!({
+            "maxSteps": 0,
+            "maxMinutes": null,
+            "maxTokens": 5,
+        })));
+        assert_eq!(budget, WorkerBudget::default());
+        let config = budget.run_config(None);
+        assert_eq!(
+            config.max_iterations,
+            crate::threads::DEFAULT_WORKER_MAX_STEPS
+        );
+        assert_eq!(
+            config.limits.max_tokens,
+            Some(crate::threads::DEFAULT_WORKER_MAX_TOKENS)
+        );
+        assert_eq!(
+            config.limits.max_duration,
+            Some(crate::threads::DEFAULT_WORKER_MAX_DURATION)
+        );
+
+        let store = Arc::new(
+            milim_storage::UserDataStore::new(milim_storage::Database::open_in_memory().unwrap())
+                .unwrap(),
+        );
+        store
+            .set_json(
+                crate::control::MODEL_FAVORITES_SETTINGS_KEY,
+                &json!({ "state": { "workerLimits": { "maxSteps": 7 } } }).to_string(),
+            )
+            .unwrap();
+        let state = AppState::new(
+            Arc::new(milim_inference::test_backend::TestBackend::new()),
+            milim_core::config::ServerConfiguration::default(),
+        )
+        .with_control(crate::control::RunManager::new(store, "Budget fixture").unwrap());
+        assert_eq!(worker_budget(&state).max_steps, 7);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "id": "typescript-exhaustive-refund",
+  "title": "Finish a new union member so tsc and the tests pass",
+  "category": "typescript",
+  "prompt": "We added a `refund` ledger event (`Refund` in src/events.ts), and now both `npm run typecheck` and `npm test` fail. Finish supporting refunds so both pass. Don't weaken the types to get there: no `any`, no type assertions (`as`) or non-null `!`, no `@ts-` comments, keep the `assertNever` exhaustiveness check, and don't change the tests or tsconfig.json.",
+  "timeout_s": 300,
+  "requires": ["typescript"],
+  "check": "node check.mjs"
+}

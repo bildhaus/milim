@@ -1,0 +1,8 @@
+{
+  "id": "test-writing-mutants",
+  "title": "Write tests that catch seeded bugs",
+  "category": "test-writing",
+  "prompt": "src/intervals.js has no tests yet. Write a thorough `node:test` suite for it under test/ (it runs with `npm test`) that pins down every behavior its doc comments describe, including the edge cases, so that a future regression in any of them fails the suite. Don't change src/.",
+  "timeout_s": 360,
+  "check": "node check.mjs"
+}

@@ -137,7 +137,22 @@ impl ModelService for ToolListingBackend {
                 .text_content()
                 .contains("No working folder is selected")
         });
-        let reply = format!("tools={tools};workspace_notice={has_workspace_notice}");
+        // Deferred tools are named in the base prompt, not in `tools`.
+        let deferred = req
+            .messages
+            .iter()
+            .find_map(|message| {
+                let text = message.text_content();
+                let (_, rest) = text.split_once("Deferred tools: ")?;
+                Some(
+                    rest.split_once('.')
+                        .map_or(rest, |(names, _)| names)
+                        .to_string(),
+                )
+            })
+            .unwrap_or_default();
+        let reply =
+            format!("tools={tools};deferred={deferred};workspace_notice={has_workspace_notice}");
         let stream = async_stream::stream! {
             yield Ok(StreamEvent::Delta(DeltaEvent::text(reply.clone())));
             yield Ok(StreamEvent::Done {
@@ -350,7 +365,51 @@ impl ModelService for ChildThreadToolBackend {
             .tools
             .iter()
             .any(|tool| tool.function.name == "delegate_workers");
+        let tool_replies: Vec<String> = req
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| message.text_content())
+            .collect();
+        // A background delegation collects its reports with `wait_workers`.
+        let wait_call = (last_user.contains("in the background") && tool_replies.len() == 1)
+            .then(|| serde_json::from_str::<Value>(&tool_replies[0]).ok())
+            .flatten()
+            .and_then(|reply| reply["run"]["id"].as_str().map(str::to_string))
+            .map(|run_id| json!({ "run_id": run_id, "timeout_secs": 30 }).to_string());
+        let collected = last_user.contains("in the background") && tool_replies.len() == 2;
         let stream = async_stream::stream! {
+            if let Some(arguments) = wait_call {
+                yield Ok(StreamEvent::Delta(DeltaEvent {
+                    tool_calls: vec![DeltaToolCall {
+                        index: 0,
+                        id: Some("call_wait".to_string()),
+                        kind: Some("function".to_string()),
+                        function: DeltaFunction {
+                            name: Some("wait_workers".to_string()),
+                            arguments: Some(arguments),
+                        },
+                    }],
+                    ..Default::default()
+                }));
+                yield Ok(StreamEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: Usage::new(1, 1),
+                });
+                return;
+            }
+            if collected {
+                let reply = format!(
+                    "parent collected report={}",
+                    tool_replies[1].contains("child report")
+                );
+                yield Ok(StreamEvent::Delta(DeltaEvent::text(reply)));
+                yield Ok(StreamEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: Usage::new(1, 1),
+                });
+                return;
+            }
             if has_tool_reply {
                 yield Ok(StreamEvent::Delta(DeltaEvent::text("parent saw child")));
                 yield Ok(StreamEvent::Done {
@@ -381,6 +440,8 @@ impl ModelService for ChildThreadToolBackend {
             if has_child_spawn {
                 let arguments = if last_user.contains("missing child model") {
                     "{\"tasks\":[{\"prompt\":\"child task\",\"title\":\"Child worker\",\"model\":\"missing-child-model\"}]}"
+                } else if last_user.contains("in the background") {
+                    "{\"tasks\":[{\"prompt\":\"child task\",\"title\":\"Child worker\"}],\"wait\":false}"
                 } else if last_user.contains("list child tools") {
                     "{\"tasks\":[{\"prompt\":\"child task list child tools\",\"title\":\"Child worker\"}]}"
                 } else {
@@ -6968,6 +7029,50 @@ async fn agent_run_can_spawn_waiting_child_thread() {
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].model, "child-thread-tool");
     assert_eq!(children[0].summary.as_deref(), Some("child report"));
+}
+
+#[tokio::test]
+async fn background_workers_report_through_wait_workers() {
+    use milim_server::threads::ThreadSupervisor;
+    use milim_storage::Database;
+
+    let supervisor = ThreadSupervisor::new(
+        milim_agents::ThreadStore::new(Database::open_in_memory().unwrap()).unwrap(),
+    );
+    let state = AppState::new(
+        Arc::new(ChildThreadToolBackend),
+        ServerConfiguration::default(),
+    )
+    .with_tools(milim_tools::ToolRegistry::with_builtins())
+    .with_threads(supervisor);
+    let base = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let text = client
+        .post(format!("{base}/agents/run"))
+        .json(&json!({
+            "model":"child-thread-tool",
+            "messages":[{"role":"user","content":"delegate this in the background"}],
+            "thread_id":"parent-background",
+            "delegation_policy":"auto",
+            "stream":true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(
+        text.contains("\"type\":\"worker_run_started\""),
+        "missing start event: {text}"
+    );
+    assert!(
+        text.contains("\"type\":\"worker_run_done\""),
+        "missing done event: {text}"
+    );
+    assert!(text.contains("parent collected report=true"), "{text}");
 }
 
 #[tokio::test]

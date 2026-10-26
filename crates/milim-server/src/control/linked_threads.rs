@@ -321,6 +321,8 @@ impl RunManager {
             mailbox_origin: Some(mailbox_origin.clone()),
             mailbox_context: Vec::new(),
             preview_runtime: None,
+            answers_decision: None,
+            unattended: false,
         };
         // Deliver under the target's thread lock, like a send or steer, so
         // its run cannot finish between the check below and the delivery.

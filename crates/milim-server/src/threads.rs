@@ -26,12 +26,62 @@ pub type ChildAgentStream = std::pin::Pin<Box<dyn Stream<Item = AgentEvent> + Se
 pub type ChildStreamFactory =
     Arc<dyn Fn(ChildRunSpec) -> Result<ChildAgentStream> + Send + Sync + 'static>;
 
+/// How far a native Worker runs before it stops and reports. Workers are
+/// bounded by their work (model steps and tokens), with a long wall-clock
+/// limit as a safety net rather than the usual stop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerBudget {
+    /// Model steps each Worker may take.
+    pub max_steps: usize,
+    /// Prompt plus completion tokens each Worker may use across its steps.
+    pub max_tokens: u64,
+    /// Wall-clock limit for a Worker Run, measured from when its Workers
+    /// start. A Worker checks it between steps; the run is stopped outright
+    /// shortly after.
+    pub max_duration: Duration,
+}
+
+pub const DEFAULT_WORKER_MAX_STEPS: usize = 60;
+pub const DEFAULT_WORKER_MAX_TOKENS: u64 = 4_000_000;
+pub const DEFAULT_WORKER_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
+
+impl Default for WorkerBudget {
+    fn default() -> Self {
+        Self {
+            max_steps: DEFAULT_WORKER_MAX_STEPS,
+            max_tokens: DEFAULT_WORKER_MAX_TOKENS,
+            max_duration: DEFAULT_WORKER_MAX_DURATION,
+        }
+    }
+}
+
+impl WorkerBudget {
+    /// Loop configuration for one native Worker.
+    pub fn run_config(
+        &self,
+        interceptor: Option<Arc<dyn ToolInterceptor>>,
+    ) -> milim_agents::AgentRunConfig {
+        milim_agents::AgentRunConfig {
+            max_iterations: self.max_steps,
+            limits: milim_agents::AgentRunLimits {
+                max_duration: Some(self.max_duration),
+                max_tokens: Some(self.max_tokens),
+                ..Default::default()
+            },
+            interceptor,
+            wrap_up_on_limit: true,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ChildRunSource {
     Agent {
         service: SharedService,
         tools: Arc<ToolRegistry>,
         interceptor: Option<Arc<dyn ToolInterceptor>>,
+        budget: WorkerBudget,
     },
     Stream(ChildStreamFactory),
 }
@@ -133,16 +183,17 @@ impl ThreadSupervisor {
         tools: ToolRegistry,
         spec: ChildRunSpec,
     ) -> Result<AgentThread> {
-        self.spawn_with_hooks(service, tools, None, spec)
+        self.spawn_with_hooks(service, tools, None, WorkerBudget::default(), spec)
     }
 
     /// Spawn one native child run whose tool calls and turn pass through the
-    /// user's hooks.
+    /// user's hooks, bounded by `budget`.
     pub fn spawn_with_hooks(
         &self,
         service: SharedService,
         tools: ToolRegistry,
         interceptor: Option<Arc<dyn ToolInterceptor>>,
+        budget: WorkerBudget,
         spec: ChildRunSpec,
     ) -> Result<AgentThread> {
         self.spawn_batch_from(
@@ -150,6 +201,7 @@ impl ThreadSupervisor {
                 service,
                 tools: Arc::new(tools),
                 interceptor,
+                budget,
             },
             vec![spec],
         )?
@@ -168,6 +220,7 @@ impl ThreadSupervisor {
                 service,
                 tools: Arc::new(tools),
                 interceptor: None,
+                budget: WorkerBudget::default(),
             },
             specs,
         )
@@ -265,10 +318,11 @@ impl ThreadSupervisor {
                         service,
                         tools,
                         interceptor,
+                        budget,
                     } => agent_child_stream(
                         service.clone(),
                         tools.clone(),
-                        interceptor.clone(),
+                        budget.run_config(interceptor.clone()),
                         spec.clone(),
                     ),
                     ChildRunSource::Stream(factory) => match factory(spec.clone()) {
@@ -519,20 +573,12 @@ fn flush_token_event(
 fn agent_child_stream(
     service: SharedService,
     tools: Arc<ToolRegistry>,
-    interceptor: Option<Arc<dyn ToolInterceptor>>,
+    config: milim_agents::AgentRunConfig,
     spec: ChildRunSpec,
 ) -> ChildAgentStream {
     let messages = worker_messages(&spec);
     Box::pin(milim_agents::run_agent_stream_with_config(
-        service,
-        tools,
-        spec.model,
-        messages,
-        None,
-        milim_agents::AgentRunConfig {
-            interceptor,
-            ..Default::default()
-        },
+        service, tools, spec.model, messages, None, config,
     ))
 }
 
@@ -733,7 +779,8 @@ async fn run_child_stream(
             | AgentEvent::WorkerRunProposed { .. }
             | AgentEvent::WorkerRunStarted { .. }
             | AgentEvent::WorkerRunDone { .. }
-            | AgentEvent::WorkerRunError { .. } => {}
+            | AgentEvent::WorkerRunError { .. }
+            | AgentEvent::UserDecisionRequested { .. } => {}
         }
     }
 

@@ -1,0 +1,17 @@
+--- a/src/report.js
++++ b/src/report.js
+@@ -1,12 +1,10 @@
+ // Sales report helpers. Order timestamps are ISO 8601 strings in UTC, and
+ // reports are bucketed by UTC calendar day ("YYYY-MM-DD").
+
+-const pad = (value) => String(value).padStart(2, "0");
+-
+ /** The UTC calendar day of an ISO timestamp, as "YYYY-MM-DD". */
+ export function dayKey(timestamp) {
+   const date = new Date(timestamp);
+   if (Number.isNaN(date.getTime())) throw new RangeError(`invalid timestamp: ${timestamp}`);
+-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
++  return date.toISOString().slice(0, 10);
+ }
+
+ /** Revenue in cents per day, days in ascending order. Refunded orders are skipped. */

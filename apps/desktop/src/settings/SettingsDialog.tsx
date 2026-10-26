@@ -1,6 +1,6 @@
 import { Fragment, type CSSProperties, type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import "../settings.css";
-import { RunLimitsSettings } from "./RunLimitsSettings";
+import { RunLimitsSettings, WorkerLimitsSettings } from "./RunLimitsSettings";
 import {
   listModelsDetailed,
   listWorkspaceLaunchers,
@@ -1484,6 +1484,7 @@ export function SettingsPage({
         <section className="settings-section" id="settings-panel-models" role="tabpanel" aria-labelledby="settings-tab-models" tabIndex={-1}>
           <SettingsPanel>
             <RunLimitsSettings />
+            <WorkerLimitsSettings />
             <SettingsBlock data-setting-id="models-defaults" className={settingHighlightClass("models-defaults").trim()}>
               <div className="setting-stack">
                 <div className="setting-field">

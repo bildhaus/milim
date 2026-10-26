@@ -1,0 +1,9 @@
+{
+  "name": "ledger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test test/*.test.ts"
+  }
+}

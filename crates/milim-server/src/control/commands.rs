@@ -99,6 +99,15 @@ impl RunManager {
         state: AppState,
         command: ControlCommandV1,
     ) -> ControlCommandResultV1 {
+        let folder_before = (command.kind == ControlCommandKindV1::ThreadSetExecutionSettings)
+            .then(|| {
+                command
+                    .thread_id
+                    .as_deref()
+                    .map(|id| self.thread_folder(id))
+            })
+            .flatten();
+        let tools = state.tools.clone();
         let result = match command.kind {
             ControlCommandKindV1::ThreadCreate => self.create_thread(&command),
             ControlCommandKindV1::ThreadRename => self.patch_thread(&command, ThreadPatch::Rename),
@@ -136,6 +145,36 @@ impl RunManager {
                 self.worker_continue_solo(state, &command).await
             }
         };
+        if let (
+            Ok(
+                applied @ ControlCommandResultV1 {
+                    status: ControlCommandStatusV1::Applied,
+                    ..
+                },
+            ),
+            Some(tools),
+        ) = (&result, tools.as_deref())
+        {
+            let thread_id = applied.thread_id.as_deref().unwrap_or_default();
+            let released = match command.kind {
+                ControlCommandKindV1::ThreadDelete => true,
+                ControlCommandKindV1::ThreadArchive => command
+                    .payload
+                    .get("archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                ControlCommandKindV1::ThreadSetExecutionSettings => {
+                    folder_before.is_some_and(|before| before != self.thread_folder(thread_id))
+                }
+                _ => false,
+            };
+            // Host tools keep a thread's read records, shell directory, and
+            // background processes across its turns; a deleted, archived, or
+            // moved thread lets them go.
+            if released && !thread_id.is_empty() {
+                tools.release_thread(thread_id);
+            }
+        }
         match result {
             Ok(result) => result,
             Err(error) => ControlCommandResultV1 {
@@ -154,6 +193,23 @@ impl RunManager {
                 data: Value::Null,
             },
         }
+    }
+
+    /// The folder a thread's turns run in, empty without one.
+    fn thread_folder(&self, thread_id: &str) -> String {
+        self.store
+            .control_thread(thread_id)
+            .ok()
+            .flatten()
+            .and_then(|thread| serde_json::from_str::<Value>(&thread.session_json).ok())
+            .and_then(|session| {
+                session
+                    .get("settings")?
+                    .get("folder")?
+                    .as_str()
+                    .map(|folder| folder.trim().to_string())
+            })
+            .unwrap_or_default()
     }
 
     async fn worker_start(

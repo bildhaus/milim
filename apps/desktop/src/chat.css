@@ -1217,6 +1217,116 @@
   opacity: 0.55;
 }
 
+.user-decision-card {
+  display: grid;
+  gap: 10px;
+  width: min(640px, 100%);
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--chat-block-bg);
+}
+.user-decision-card.answered {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--border-primary));
+}
+.user-decision-title {
+  color: var(--primary-text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.user-decision-question {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.user-decision-question legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 0;
+  color: var(--primary-text);
+  font-size: 13px;
+}
+.user-decision-header {
+  padding: 1px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  color: var(--secondary-text);
+  font-size: 11px;
+}
+.user-decision-options {
+  display: grid;
+  gap: 6px;
+}
+.user-decision-option {
+  display: grid;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--primary-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.user-decision-option:hover:not(:disabled) {
+  background: var(--chip-hover);
+}
+.user-decision-option.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-primary));
+  background: var(--chip-hover);
+}
+.user-decision-option:disabled {
+  cursor: default;
+}
+.user-decision-option-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.user-decision-option-description {
+  color: var(--tertiary-text);
+  font-size: 12px;
+}
+.user-decision-other {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--primary-text);
+  font: inherit;
+  font-size: 12.5px;
+  resize: vertical;
+}
+.user-decision-plan {
+  max-height: 420px;
+  overflow: auto;
+  padding: 2px 4px;
+}
+.user-decision-feedback {
+  display: grid;
+  gap: 8px;
+}
+.user-decision-actions {
+  justify-content: flex-end;
+}
+.user-decision-status {
+  color: var(--tertiary-text);
+  font-size: 12px;
+}
+
 .mcp-app-card {
   width: min(720px, 100%);
   overflow: hidden;

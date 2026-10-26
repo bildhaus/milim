@@ -4,12 +4,14 @@ mod agent_tools;
 mod linked_thread_tools;
 mod run_builder;
 mod schedule_tools;
+mod user_decision_tools;
 mod workers;
 
 pub(crate) use agent_tools::*;
 use linked_thread_tools::*;
 use run_builder::*;
 pub(crate) use schedule_tools::*;
+use user_decision_tools::*;
 pub(crate) use workers::*;
 
 // ----- Agents -----
@@ -132,10 +134,9 @@ pub(crate) fn account_runtime_tool_endpoint(
         preview_tools_enabled: context.tool_context.preview_tools_enabled,
         experimental_hashline_patch: context.tool_context.experimental_hashline_patch,
         plan_mode: context.tool_context.plan_mode,
-        // An account runtime keeps its own history, so this turn's prompt
-        // cannot tell whether an earlier turn asked for these tools.
-        schedule_tools: true,
-        mcp_server_tools: true,
+        // An account runtime calls milim's tools through its own harness,
+        // which has no `call_tool`, so every tool is listed directly.
+        defer_tools: false,
     };
     let memory = AgentMemoryContext {
         enabled: context.memory_context.memory_enabled,
@@ -370,8 +371,11 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "diagnostics",
+    "code_navigation",
     "write_file",
     "edit_file",
+    "apply_patch",
+    "notebook_edit",
     "patch_file",
     "shell",
     "process_output",
@@ -379,6 +383,36 @@ const DESKTOP_WORKSPACE_TOOL_NAMES: &[&str] = &[
 ];
 const RUN_WORKSPACE_TOOL_NAMES: &[&str] = &["google_drive_transfer"];
 pub(crate) const HASHLINE_TOOL_NAMES: &[&str] = &["read_file_anchors", "patch_file"];
+/// Tools offered only to [`model_uses_apply_patch`] models.
+const APPLY_PATCH_TOOL_NAMES: &[&str] = &["apply_patch"];
+
+/// Whether `model` is an OpenAI GPT, o-series, or Codex model. Those are
+/// trained on the `*** Begin Patch` format that `apply_patch` takes, so they
+/// get it alongside `edit_file`; other models get `edit_file` only. Only the
+/// id's last `/` segment counts, so routed ids such as `openai/gpt-5` match.
+pub(crate) fn model_uses_apply_patch(model: &str) -> bool {
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+    let o_series = id
+        .strip_prefix('o')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit());
+    id.starts_with("gpt-") || o_series || id.contains("codex")
+}
+
+/// `reg` without the tools `model` is not offered (see
+/// [`model_uses_apply_patch`]).
+pub(crate) fn registry_for_model(reg: ToolRegistry, model: &str) -> ToolRegistry {
+    if model_uses_apply_patch(model) {
+        reg
+    } else {
+        reg.without(APPLY_PATCH_TOOL_NAMES)
+    }
+}
 const SANDBOX_TOOL_NAMES: &[&str] = &["run_command"];
 const COMPUTER_TOOL_NAMES: &[&str] = &[
     "screenshot",
@@ -410,6 +444,7 @@ const MCP_SERVER_TOOL_NAMES: &[&str] = &[
 ];
 const CHILD_THREAD_TOOL_NAMES: &[&str] = &[
     "delegate_workers",
+    "wait_workers",
     "child_thread_spawn",
     "child_thread_list",
     "child_thread_read",
@@ -422,6 +457,7 @@ const CHILD_THREAD_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "diagnostics",
+    "code_navigation",
     "http_fetch",
     "web_search",
     "current_time",
@@ -433,24 +469,41 @@ const PLAN_MODE_READ_ONLY_TOOL_NAMES: &[&str] = &[
     "glob",
     "grep",
     "diagnostics",
+    "code_navigation",
     "list_agents",
     "linked_thread_list",
     "linked_thread_read",
 ];
-/// How long a Worker Run may execute. It is measured from when its Workers
-/// start, so plan resolution and review-worktree setup do not count, and
-/// each Worker schedules its tools on its own, so no Worker waits in another
+/// Time past a Worker Run's time limit (see [`WorkerBudget`]) before it is
+/// stopped outright, so a Worker that reached the limit mid-step can finish
+/// the step and report. The limit is measured from when its Workers start,
+/// so plan resolution and review-worktree setup do not count, and each
+/// Worker schedules its tools on its own, so no Worker waits in another
 /// run's tool queue.
-const WORKER_RUN_TIMEOUT: Duration = Duration::from_secs(300);
+const WORKER_STOP_GRACE: Duration = Duration::from_secs(120);
 /// Time `delegate_workers` may spend resolving its plan and creating review
 /// worktrees before the Workers start.
 const WORKER_SETUP_ALLOWANCE: Duration = Duration::from_secs(120);
+/// `wait_workers` waits this long by default, and at most `MAX_…`.
+const DEFAULT_WAIT_WORKERS_SECS: u64 = 300;
+const MAX_WAIT_WORKERS_SECS: u64 = 600;
+/// Bounds for the Worker budget saved in settings (`workerLimits`).
+const MAX_WORKER_STEPS: u64 = 1_000;
+const MAX_WORKER_MINUTES: u64 = 24 * 60;
+const MIN_WORKER_TOKENS: u64 = 10_000;
+const MAX_WORKER_TOKENS: u64 = 100_000_000;
 /// Extra time past a tool's own wait so its timeout handling and cleanup run
 /// before the pipeline deadline cancels the call.
 const TOOL_WAIT_GRACE: Duration = Duration::from_secs(30);
 /// Read-only workspace tools that need a selected working folder.
-const WORKSPACE_READ_TOOL_NAMES: &[&str] =
-    &["read_file", "list_dir", "glob", "grep", "diagnostics"];
+const WORKSPACE_READ_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "diagnostics",
+    "code_navigation",
+];
 const DEFAULT_LINKED_THREAD_WAIT_MS: u64 = 60_000;
 const WORKSPACE_UNAVAILABLE_SYSTEM_PROMPT: &str = concat!(
     "No working folder is selected in Milim. Host filesystem and host shell tools are unavailable. ",
@@ -492,12 +545,10 @@ struct ToolRunPolicy {
     preview_tools_enabled: bool,
     experimental_hashline_patch: bool,
     plan_mode: bool,
-    /// The conversation asked for scheduled automations, so the default tool
-    /// mode includes the `schedule_*` tools.
-    schedule_tools: bool,
-    /// The conversation asked about MCP servers, so the default tool mode
-    /// includes the `mcp_server_*` management tools.
-    mcp_server_tools: bool,
+    /// The run goes through milim's agent loop, which reaches deferred tools
+    /// through `tool_search` and `call_tool`, so the default tool mode defers
+    /// the management groups and a large MCP catalog instead of listing them.
+    defer_tools: bool,
 }
 
 impl Default for ToolRunPolicy {
@@ -511,68 +562,82 @@ impl Default for ToolRunPolicy {
             preview_tools_enabled: false,
             experimental_hashline_patch: false,
             plan_mode: false,
-            schedule_tools: false,
-            mcp_server_tools: false,
+            defer_tools: false,
         }
     }
 }
 
 impl ToolRunPolicy {
-    /// Expose the management tool groups the conversation asks for. Every
-    /// user message counts, so a group stays exposed for the rest of the
-    /// thread instead of changing the tool list (and invalidating the
-    /// provider's prompt cache) from turn to turn.
-    fn with_management_tools_for<'a>(
-        mut self,
-        requests: impl IntoIterator<Item = &'a str>,
-    ) -> Self {
-        for request in requests {
-            self.schedule_tools |= requests_schedule_tools(request);
-            self.mcp_server_tools |= requests_mcp_server_tools(request);
-        }
-        self
+    /// Tools the default tool mode leaves out: `current_time` duplicates the
+    /// date each turn carries. A custom Agent that names it still gets it.
+    fn hidden_default_tools(&self) -> Vec<&'static str> {
+        vec!["current_time"]
     }
 
-    /// Tools the default tool mode leaves out. `current_time` duplicates the
-    /// date each turn carries; the schedule and MCP-server groups are large
-    /// and only useful when asked for; `list_agents` only helps choose an
-    /// `agent_id` for delegation or a schedule, or while planning. A custom
-    /// Agent that names one of these tools still gets it.
-    fn hidden_default_tools(&self, delegation_available: bool) -> Vec<&'static str> {
-        let mut hidden = vec!["current_time"];
-        if !self.schedule_tools {
-            hidden.extend(SCHEDULE_TOOL_NAMES);
+    /// Tools the default tool mode defers when the run supports it: the
+    /// schedule and MCP-server groups, which are large and rarely needed;
+    /// `list_agents`, unless delegation or planning uses it; and every MCP
+    /// server tool once the catalog is too large to list (see
+    /// [`mcp_catalog_is_large`]). They stay discoverable through
+    /// `tool_search` for the whole thread, so the request's tool list (and
+    /// the provider's prompt cache) does not change with what a message
+    /// mentions. A custom Agent that names one of these tools lists it.
+    fn deferred_default_tools(
+        &self,
+        reg: &ToolRegistry,
+        mcp_tools: &[String],
+        delegation_available: bool,
+    ) -> Vec<String> {
+        if !self.defer_tools {
+            return Vec::new();
         }
-        if !self.mcp_server_tools {
-            hidden.extend(MCP_SERVER_TOOL_NAMES);
+        let mut deferred: Vec<String> = SCHEDULE_TOOL_NAMES
+            .iter()
+            .chain(MCP_SERVER_TOOL_NAMES)
+            .map(|name| (*name).to_string())
+            .collect();
+        if !self.plan_mode && !delegation_available {
+            deferred.push("list_agents".to_string());
         }
-        if !self.plan_mode && !delegation_available && !self.schedule_tools {
-            hidden.push("list_agents");
+        if mcp_catalog_is_large(reg, mcp_tools) {
+            deferred.extend(mcp_tools.iter().cloned());
         }
-        hidden
+        deferred
     }
 }
 
-fn requests_schedule_tools(text: &str) -> bool {
-    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
-    PATTERN
-        .get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)\b(?:schedul\w*|automat(?:e|es|ion|ions)|cron\w*|recurring|periodic(?:ally)?|hourly|daily|nightly|weekly|monthly|every\s+(?:\d+\s+)?(?:second|minute|hour|day|weekday|week|month|morning|evening|night)s?)\b",
-            )
-            .expect("valid schedule request pattern")
-        })
-        .is_match(text)
+/// A run lists at most this many MCP server tools directly.
+const MCP_EAGER_TOOL_LIMIT: usize = 15;
+/// A run lists MCP server tools directly only while their names,
+/// descriptions, and schemas come to at most this many estimated tokens.
+const MCP_EAGER_TOKEN_LIMIT: usize = 8_000;
+
+/// Whether the run's MCP server tools are too many or too large to list in
+/// every request, so they are deferred instead.
+fn mcp_catalog_is_large(reg: &ToolRegistry, mcp_tools: &[String]) -> bool {
+    let specs: Vec<milim_tools::ToolSpec> = reg
+        .list()
+        .into_iter()
+        .filter(|spec| mcp_tools.contains(&spec.name))
+        .collect();
+    let bytes: usize = specs
+        .iter()
+        .map(|spec| spec.name.len() + spec.description.len() + spec.input_schema.to_string().len())
+        .sum();
+    specs.len() > MCP_EAGER_TOOL_LIMIT || bytes.div_ceil(4) > MCP_EAGER_TOKEN_LIMIT
 }
 
-fn requests_mcp_server_tools(text: &str) -> bool {
-    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
-    PATTERN
-        .get_or_init(|| {
-            regex::Regex::new(r"(?i)\bmcp\b|model context protocol")
-                .expect("valid MCP request pattern")
+/// Names of the tools connected MCP servers expose.
+fn mcp_tool_names(st: &AppState) -> Vec<String> {
+    st.mcp
+        .as_ref()
+        .map(|hub| {
+            hub.tools()
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect()
         })
-        .is_match(text)
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1753,9 +1818,33 @@ mod native_run_context_tests {
                 privacy_mode: crate::privacy::PrivacyMode::Off,
             },
         };
+        // Waiting outlasts the Worker Run's own time limit and stop grace;
+        // a non-blocking call only covers setup.
         let deadline = delegate.deadline_for_call(&json!({})).unwrap();
-        assert!(deadline > WORKER_RUN_TIMEOUT + WORKER_SETUP_ALLOWANCE);
-        assert_eq!(deadline, Duration::from_secs(450));
+        assert!(
+            deadline
+                > crate::threads::DEFAULT_WORKER_MAX_DURATION
+                    + WORKER_STOP_GRACE
+                    + WORKER_SETUP_ALLOWANCE
+        );
+        assert_eq!(deadline, Duration::from_secs(30 * 60 + 270));
+        assert_eq!(
+            delegate.deadline_for_call(&json!({ "wait": false })),
+            Some(WORKER_SETUP_ALLOWANCE + TOOL_WAIT_GRACE)
+        );
+        let wait_workers = WaitWorkersTool {
+            supervisor: delegate.supervisor.clone(),
+            context: AgentMemoryContext::default(),
+        };
+        assert!(wait_workers.waits_on_other_runs());
+        assert_eq!(
+            wait_workers.deadline_for_call(&json!({ "run_id": "r" })),
+            Some(Duration::from_secs(DEFAULT_WAIT_WORKERS_SECS) + TOOL_WAIT_GRACE)
+        );
+        assert_eq!(
+            wait_workers.deadline_for_call(&json!({ "run_id": "r", "timeout_secs": 5_000 })),
+            Some(Duration::from_secs(MAX_WAIT_WORKERS_SECS) + TOOL_WAIT_GRACE)
+        );
 
         let store = Arc::new(
             milim_storage::UserDataStore::new(Database::open_in_memory().unwrap()).unwrap(),
@@ -1784,6 +1873,39 @@ mod native_run_context_tests {
         assert!(block.starts_with("<parent_context>\n"));
         assert!(block.contains("do not carry out the parent's request yourself"));
         assert!(block.ends_with("Implement slugify.\n</parent_context>"));
+    }
+
+    #[test]
+    fn apply_patch_is_offered_only_to_openai_patch_models() {
+        for model in [
+            "gpt-5",
+            "GPT-4.1-mini",
+            "openai/gpt-5.1-codex",
+            "o3",
+            "o4-mini-2025-04-16",
+            "codex-mini-latest",
+            "gpt-oss:20b",
+        ] {
+            assert!(model_uses_apply_patch(model), "{model}");
+        }
+        for model in [
+            "claude-sonnet-4-5",
+            "anthropic/claude-opus-4",
+            "llama3.1:8b",
+            "qwen3-coder",
+            "gemini-2.5-pro",
+            "openrouter/openai",
+            "omni-model",
+        ] {
+            assert!(!model_uses_apply_patch(model), "{model}");
+        }
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ReadOnlyProbe("edit_file")));
+        registry.register(Arc::new(ReadOnlyProbe("apply_patch")));
+        assert!(registry_for_model(registry.clone(), "gpt-5").contains("apply_patch"));
+        let other = registry_for_model(registry, "claude-sonnet-4-5");
+        assert!(!other.contains("apply_patch"));
+        assert!(other.contains("edit_file"));
     }
 
     #[test]
@@ -1866,6 +1988,7 @@ mod native_run_context_tests {
             memory: AgentMemoryContext::default(),
             messages,
             turn_context: Vec::new(),
+            user_decisions: false,
         }
     }
 
@@ -2098,7 +2221,7 @@ mod native_run_context_tests {
     }
 
     #[test]
-    fn default_tools_hide_management_groups_until_the_conversation_asks() {
+    fn default_tools_defer_management_groups_for_the_whole_thread() {
         let root = temp_dir("milim-default-tools");
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(ReadOnlyProbe("current_time")));
@@ -2119,60 +2242,95 @@ mod native_run_context_tests {
         };
         let open = ToolRunPolicy {
             approval: ToolApprovalPolicy::Open,
+            defer_tools: true,
             ..Default::default()
         };
-        let names = |policy: ToolRunPolicy, mode: &str, enabled: &[String]| {
+        let registry = |policy: ToolRunPolicy, mode: &str, enabled: &[String]| {
             agent_registry_for_mode_with_context(&state, mode, enabled, None, &policy, &run_context)
-                .list()
-                .into_iter()
-                .map(|tool| tool.name)
-                .collect::<Vec<_>>()
+        };
+        let names = |specs: Vec<milim_tools::ToolSpec>| {
+            specs.into_iter().map(|tool| tool.name).collect::<Vec<_>>()
         };
 
-        let plain = names(
-            open.with_management_tools_for(["fix the parser"]),
-            "all",
-            &[],
+        // Whatever the conversation says, the request lists the same tools
+        // and the management groups wait behind `tool_search`.
+        let plain = registry(open, "all", &[]);
+        assert_eq!(
+            names(plain.model_list()),
+            ["call_tool", "read_file", "tool_search"]
         );
-        assert_eq!(plain, ["read_file"]);
-
-        let scheduled = names(
-            open.with_management_tools_for(["fix the parser", "Run this every 5 minutes"]),
-            "all",
-            &[],
-        );
-        for name in SCHEDULE_TOOL_NAMES.iter().chain(&["list_agents"]) {
-            assert!(scheduled.iter().any(|tool| tool == name), "{scheduled:?}");
+        let deferred = plain.deferred_names();
+        for name in SCHEDULE_TOOL_NAMES
+            .iter()
+            .chain(MCP_SERVER_TOOL_NAMES)
+            .chain(&["list_agents"])
+        {
+            assert!(deferred.iter().any(|tool| tool == name), "{deferred:?}");
         }
-        assert!(!scheduled.iter().any(|tool| tool.starts_with("mcp_server_")));
+        assert!(!plain.contains("current_time"));
 
-        let mcp = names(
-            open.with_management_tools_for(["Add the GitHub MCP server"]),
+        // Guarded runs defer only what they may call.
+        let guarded = registry(
+            ToolRunPolicy {
+                defer_tools: true,
+                ..Default::default()
+            },
             "all",
             &[],
         );
-        for name in MCP_SERVER_TOOL_NAMES {
-            assert!(mcp.iter().any(|tool| tool == name), "{mcp:?}");
-        }
-        assert!(!mcp.iter().any(|tool| tool.starts_with("schedule_")));
+        assert!(guarded.is_deferred("schedule_list") && guarded.is_deferred("mcp_server_list"));
+        assert!(!guarded.contains("schedule_create") && !guarded.contains("mcp_server_save"));
 
-        let custom = names(
+        // Account runtimes have no `call_tool`, so they list everything.
+        let account = registry(
+            ToolRunPolicy {
+                defer_tools: false,
+                ..open
+            },
+            "all",
+            &[],
+        );
+        assert!(account.deferred_names().is_empty());
+        assert!(account.contains("schedule_create") && account.contains("list_agents"));
+        assert!(!account.contains("tool_search") && !account.contains("current_time"));
+
+        // A custom Agent that names a tool lists it.
+        let custom = registry(
             open,
             "custom",
             &["current_time".to_string(), "schedule_list".to_string()],
         );
-        assert_eq!(custom, ["current_time", "schedule_list"]);
-
-        assert!(requests_schedule_tools("set up a cron job"));
-        assert!(requests_schedule_tools("what automations do I have?"));
-        assert!(!requests_schedule_tools(
-            "add automated tests for the parser"
-        ));
-        assert!(requests_mcp_server_tools(
-            "connect a Model Context Protocol server"
-        ));
-        assert!(!requests_mcp_server_tools("the mcpx binary"));
+        assert_eq!(
+            names(custom.model_list()),
+            ["current_time", "schedule_list"]
+        );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_mcp_catalogs_are_deferred() {
+        let mut reg = ToolRegistry::new();
+        let mcp: Vec<String> = (0..=MCP_EAGER_TOOL_LIMIT)
+            .map(|index| format!("server_ab12__tool_{index:02}"))
+            .collect();
+        for name in &mcp {
+            reg.register(Arc::new(ReadOnlyProbe(Box::leak(
+                name.clone().into_boxed_str(),
+            ))));
+        }
+        assert!(mcp_catalog_is_large(&reg, &mcp));
+        assert!(!mcp_catalog_is_large(&reg, &mcp[..MCP_EAGER_TOOL_LIMIT]));
+        let policy = ToolRunPolicy {
+            defer_tools: true,
+            ..Default::default()
+        };
+        let deferred = policy.deferred_default_tools(&reg, &mcp, false);
+        assert!(mcp.iter().all(|name| deferred.contains(name)));
+        let small = policy.deferred_default_tools(&reg, &mcp[..3], false);
+        assert!(!small.iter().any(|name| name.starts_with("server_")));
+        assert!(ToolRunPolicy::default()
+            .deferred_default_tools(&reg, &mcp, false)
+            .is_empty());
     }
 
     #[tokio::test]
@@ -2671,7 +2829,13 @@ fn agent_registry_for_mode_with_context(
         "none" => ToolRegistry::new(),
         "custom" if enabled_tools.is_empty() => ToolRegistry::new(),
         "custom" => all.filtered(enabled_tools),
-        _ => all.without(&policy.hidden_default_tools(delegation.is_some())),
+        _ => {
+            let mut reg = all.without(&policy.hidden_default_tools());
+            let deferred =
+                policy.deferred_default_tools(&reg, &mcp_tool_names(st), delegation.is_some());
+            reg.defer(deferred);
+            reg
+        }
     };
     let mut reg = inherited.clone();
     if let Some((memory, supervisor)) = delegation {
@@ -2738,6 +2902,10 @@ fn register_child_thread_tools_with_context(
     run_context: RunContext,
 ) {
     if context.delegation_policy != milim_agents::DelegationPolicy::Off {
+        reg.register(Arc::new(WaitWorkersTool {
+            supervisor: supervisor.clone(),
+            context: context.clone(),
+        }));
         reg.register(Arc::new(DelegateWorkersTool {
             state,
             supervisor,
@@ -2851,6 +3019,7 @@ async fn http_native_run(
         memory: memory_context_from_request(&req, model.clone()),
         messages: req.messages,
         turn_context: Vec::new(),
+        user_decisions: false,
     };
     let run = build_native_run(st, spec, config);
 
@@ -2926,6 +3095,7 @@ pub(crate) fn control_agent_stream(
     pricing: Option<milim_core::api::openai::ModelPricing>,
     context_window_tokens: Option<u32>,
     step_hook: Arc<dyn milim_agents::AgentStepHook>,
+    user_decisions: bool,
 ) -> milim_core::Result<(ControlAgentStream, Option<String>)> {
     let run_context = RunContext::from_control(st, workspace, privacy)?;
     let service = service_for_run(st, &run_context);
@@ -2954,6 +3124,7 @@ pub(crate) fn control_agent_stream(
                 .map(|seconds| std::time::Duration::from_secs(u64::from(seconds))),
             max_cost_usd: limits.max_cost_usd,
             pricing,
+            max_tokens: None,
         };
     }
     let memory = AgentMemoryContext {
@@ -2993,6 +3164,7 @@ pub(crate) fn control_agent_stream(
         memory,
         messages,
         turn_context,
+        user_decisions,
     };
     let run = build_native_run(st, spec, config);
     let stream: ControlAgentStream = Box::pin(milim_agents::run_agent_stream_with_config(
@@ -3506,7 +3678,6 @@ pub(crate) async fn worker_run_create(
         )
         .await
         .map_err(ApiError)?;
-        schedule_worker_run_deadline(supervisor.clone(), run.id.clone());
     }
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
 }
@@ -3575,7 +3746,6 @@ pub(crate) async fn worker_run_start(
     )
     .await
     .map_err(ApiError)?;
-    schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
 }
 
@@ -3596,7 +3766,6 @@ pub(crate) async fn control_worker_run_start(st: &AppState, id: &str) -> milim_c
         worker_review_registry(st, &run_context),
     )
     .await?;
-    schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(json!({ "run": run, "workers": workers }))
 }
 
@@ -3689,7 +3858,6 @@ pub(crate) async fn worker_run_task_retry(
     )
     .await
     .map_err(ApiError)?;
-    schedule_worker_run_deadline(supervisor, run.id.clone());
     Ok(Json(json!({ "run": run, "workers": workers })).into_response())
 }
 

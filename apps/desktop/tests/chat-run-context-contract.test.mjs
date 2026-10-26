@@ -133,7 +133,11 @@ for (const [name, body] of [
   ],
   [
     "Plan execution",
-    section(chatView, "function executePlan(", "/** Re-run the last user turn"),
+    section(chatView, "function executePlan(", "function answerUserDecision("),
+  ],
+  [
+    "decision answer",
+    section(chatView, "function answerUserDecision(", "/** Re-run the last user turn"),
   ],
   [
     "regenerate",

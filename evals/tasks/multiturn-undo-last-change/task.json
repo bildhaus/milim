@@ -1,0 +1,21 @@
+{
+  "id": "multiturn-undo-last-change",
+  "title": "Undo only the last of several changes to the same file",
+  "category": "multi-turn",
+  "turns": [
+    {
+      "prompt": "Rename the `timeoutMs` setting to `requestTimeoutMs` everywhere it appears: code, tests, and docs.",
+      "timeout_s": 300
+    },
+    {
+      "prompt": "Bump the default retry count in src/config.js to 5, and update docs/config.md to match.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Actually, undo the last change you made to src/config.js. Leave the docs as they are; I'll update them separately.",
+      "timeout_s": 240
+    }
+  ],
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}
