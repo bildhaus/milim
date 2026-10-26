@@ -54,7 +54,14 @@ jobs:
           # make setup-node look for pnpm to cache its store.
           package-manager-cache: false
       - name: Syntax
-        run: for file in evals/*.mjs evals/lib/*.mjs evals/fixtures-gen/*.mjs; do node --check "$file"; done
+        run: |
+          for file in evals/*.mjs evals/lib/*.mjs evals/fixtures-gen/*.mjs; do node --check "$file"; done
+          for file in evals/ci/*.sh; do bash -n "$file"; done
+      # --strict fails on a task skipped for a missing requirement: the
+      # Rust task uses the runner's cargo, and the TypeScript task needs tsc
+      # (the version the desktop and site lockfiles pin; no repo dependency).
+      - name: TypeScript compiler for the TypeScript task
+        run: npm install --global --no-audit --no-fund typescript@5.9.3
       - name: Fixtures match their generators
         run: node evals/fixtures-gen/generate.mjs --check
       - name: Validate graders against reference solutions

@@ -19,7 +19,7 @@ use super::super::delta::{
     render_work_log, DeltaBuffer, WorkLog, STOPPED_BY_USER_MARKER, WORK_LOG_EARLIER_CHARS,
     WORK_LOG_LATEST_CHARS,
 };
-use super::super::provider::control_chat_messages;
+use super::super::provider::{control_chat_messages, ReplayTarget};
 use super::super::run_config::resolve_frozen_config;
 use super::super::{AcceptedTurnV1, RunManager};
 use super::{scrub_credential_text, RunJournal};
@@ -29,6 +29,13 @@ use crate::AppState;
 /// A real-looking OpenAI project key; nothing may persist it.
 // A fake project key, split so secret scanners do not flag the fixture.
 const PROJECT_KEY: &str = concat!("sk-", "proj-Q7pX2mV9kL4sT8wR1yN6bC3dF5gH0jZaW2eR");
+
+/// The next turn of a fixture thread: the same model, with tools.
+const AGENT_TARGET: ReplayTarget<'static> = ReplayTarget {
+    model: "test-echo",
+    privacy: PrivacyMode::Off,
+    tools: true,
+};
 
 fn journal(store: &Arc<UserDataStore>) -> RunJournal {
     RunJournal::new(
@@ -410,6 +417,8 @@ async fn steering_input_carries_its_image_attachments_to_the_model() {
                 mailbox_origin: None,
                 mailbox_context: Vec::new(),
                 preview_runtime: None,
+                answers_decision: None,
+                unattended: false,
             })
             .unwrap(),
             created_at_ms: 1,
@@ -545,6 +554,25 @@ fn work_log_records_calls_outcomes_and_changed_files() {
 }
 
 #[test]
+fn work_log_counts_every_file_a_patch_or_notebook_edit_changes() {
+    let mut log = WorkLog::default();
+    let patch = "*** Begin Patch\n*** Update File: src/a.rs\n*** Move to: src/b.rs\n-x\n+y\n*** Add File: src/c.rs\n+z\n*** Delete File: src/a.rs\n*** End Patch";
+    log.record_call(
+        Some("p1"),
+        "apply_patch",
+        &json!({ "input": patch }).to_string(),
+    );
+    log.record_result(Some("p1"), "apply_patch", &json!({"files": []}));
+    log.record_call(Some("n1"), "notebook_edit", r#"{"path":"nb.ipynb"}"#);
+    log.record_result(Some("n1"), "notebook_edit", &json!({"cells": 2}));
+    let stored = log.to_value().unwrap();
+    assert_eq!(
+        stored["filesChanged"],
+        json!(["src/a.rs", "src/b.rs", "src/c.rs", "nb.ipynb"])
+    );
+}
+
+#[test]
 fn long_work_logs_keep_their_first_and_last_calls_within_budget() {
     let mut log = WorkLog::default();
     for index in 0..200 {
@@ -653,7 +681,7 @@ async fn history_replays_work_logs_and_hides_notices_from_the_model() {
         json!({"id": "user-3", "role": "user", "content": "Thanks", "runId": "run-3"}),
     );
 
-    let messages = control_chat_messages(&manager.store, "thread-fixture").unwrap();
+    let messages = control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET).unwrap();
     let texts = messages
         .iter()
         .map(|message| (message.role.as_str(), message.text_content()))
@@ -763,7 +791,7 @@ async fn interrupted_runs_keep_partial_output_and_mark_silent_gaps() {
     assert_eq!(stored[0]["content"], "I updated");
     assert_eq!(stored[0]["interruption"], STOPPED_BY_USER_MARKER);
 
-    let messages = control_chat_messages(&manager.store, "thread-fixture").unwrap();
+    let messages = control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET).unwrap();
     let texts = messages
         .iter()
         .map(|message| (message.role.clone(), message.text_content()))
@@ -814,7 +842,7 @@ async fn history_replay_honors_the_latest_compaction_checkpoint() {
             .unwrap();
     }
     assert_eq!(
-        control_chat_messages(&manager.store, "thread-fixture")
+        control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET)
             .unwrap()
             .len(),
         4
@@ -844,7 +872,7 @@ async fn history_replay_honors_the_latest_compaction_checkpoint() {
             .unwrap();
     }
 
-    let messages = control_chat_messages(&manager.store, "thread-fixture").unwrap();
+    let messages = control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET).unwrap();
     let texts = messages
         .iter()
         .map(|message| (message.role.as_str(), message.text_content()))
@@ -862,19 +890,23 @@ async fn history_replay_honors_the_latest_compaction_checkpoint() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agent_runs_store_a_work_log_the_next_turn_replays() {
-    let (manager, state) = manager_with_thread("test-echo").await;
+/// Send one turn to the fixture thread and wait for its run to end.
+async fn send_turn(
+    manager: &Arc<RunManager>,
+    state: &AppState,
+    command_id: &str,
+    text: &str,
+) -> String {
     let sent = manager
         .command(
             state.clone(),
             None,
             ControlCommandV1 {
-                command_id: "send-tool".into(),
+                command_id: command_id.into(),
                 kind: ControlCommandKindV1::TurnSend,
                 thread_id: Some("thread-fixture".into()),
                 expected_revision: None,
-                payload: json!({ "text": "please call tool", "attachments": [] }),
+                payload: json!({ "text": text, "attachments": [] }),
                 confirmation_token: None,
             },
         )
@@ -887,12 +919,33 @@ async fn agent_runs_store_a_work_log_the_next_turn_replays() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let run = manager
-        .store
-        .control_run(sent.run_id.as_deref().unwrap())
-        .unwrap()
-        .unwrap();
+    let run_id = sent.run_id.unwrap();
+    let run = manager.store.control_run(&run_id).unwrap().unwrap();
     assert_eq!(run.status, "completed", "{:?}", run.error_json);
+    run_id
+}
+
+/// The messages of each model request a run committed, in step order.
+fn committed_requests(store: &UserDataStore, run_id: &str) -> Vec<Value> {
+    store
+        .control_run_events_by_types(run_id, &["model_request_resolved"])
+        .unwrap()
+        .iter()
+        .map(|event| {
+            let data: Value = serde_json::from_str(&event.data_json).unwrap();
+            let artifact = store
+                .control_run_artifact(run_id, data["artifact_digest"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            serde_json::from_str::<Value>(&artifact.data_json).unwrap()["messages"].clone()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_runs_replay_their_own_messages_on_later_turns() {
+    let (manager, state) = manager_with_thread("test-echo").await;
+    let first = send_turn(&manager, &state, "send-tool", "please call tool").await;
     let assistant = manager
         .store
         .control_projected_messages("thread-fixture")
@@ -901,46 +954,647 @@ async fn agent_runs_store_a_work_log_the_next_turn_replays() {
         .map(|raw| serde_json::from_str::<Value>(&raw).unwrap())
         .find(|message| message["role"] == "assistant")
         .unwrap();
+    // The work log stays for clients and account runtimes.
     assert_eq!(
         assistant["workLog"]["entries"],
         json!([{"tool": "echo", "arguments": "", "outcome": "ok"}]),
         "{assistant}"
     );
-    let replayed = control_chat_messages(&manager.store, "thread-fixture").unwrap();
-    assert!(replayed[1]
-        .text_content()
-        .contains("<work_log>\nTool calls from this turn, recorded by milim (not part of the visible reply):\n- echo -> ok\n</work_log>"));
 
-    // The turn's context message is kept with its reply and, once a later
-    // turn exists, replays verbatim before the user message it was sent with.
-    let turn_context = assistant["turnContext"].as_str().unwrap().to_string();
-    assert!(
-        turn_context.starts_with("Context for this turn"),
-        "{turn_context}"
-    );
-    assert_eq!(
-        replayed.len(),
-        2,
-        "the latest turn gets fresh context instead"
-    );
-    put_run(
-        &manager.store,
-        "thread-fixture",
-        "run-next",
-        "running",
-        None,
-    );
-    project(
-        &manager,
-        "run-next",
-        json!({"id": "user-next", "role": "user", "content": "and now?", "runId": "run-next"}),
-    );
-    let replayed = control_chat_messages(&manager.store, "thread-fixture").unwrap();
+    // The run replays as its model saw it: the call, the model-visible
+    // result, and the answer.
+    let replayed = control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET).unwrap();
     let roles = replayed
         .iter()
         .map(|message| message.role.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(roles, ["system", "user", "assistant", "user"]);
-    assert_eq!(replayed[0].text_content(), turn_context);
-    assert_eq!(replayed[1].text_content(), "please call tool");
+    assert_eq!(
+        roles,
+        ["user", "assistant", "tool", "assistant"],
+        "the latest turn gets fresh context instead"
+    );
+    let call = &replayed[1].tool_calls.as_ref().unwrap()[0];
+    assert_eq!(call.function.name, "echo");
+    assert_eq!(replayed[2].tool_call_id, call.id);
+    assert!(
+        replayed[2].text_content().contains("test"),
+        "{:?}",
+        replayed[2]
+    );
+    assert_eq!(replayed[3].text_content(), "Echo: please call tool");
+    assert!(!replayed[3].text_content().contains("<work_log>"));
+
+    // A plain-chat request has no tools, so the same run replays as text and
+    // its work log.
+    let chat = control_chat_messages(
+        &manager.store,
+        "thread-fixture",
+        &ReplayTarget {
+            tools: false,
+            ..AGENT_TARGET
+        },
+    )
+    .unwrap();
+    assert_eq!(chat.len(), 2);
+    assert!(chat[1].text_content().contains("<work_log>"));
+
+    // The next turn's first request opens with the previous turn's last
+    // request byte for byte, so the provider's cached prefix still matches;
+    // the turn's context replays before its user message.
+    let turn_context = assistant["turnContext"].as_str().unwrap().to_string();
+    let second = send_turn(&manager, &state, "send-next", "and now?").await;
+    let earlier = committed_requests(&manager.store, &first);
+    let earlier = earlier.last().unwrap().as_array().unwrap();
+    let next = committed_requests(&manager.store, &second);
+    let next = next[0].as_array().unwrap();
+    assert!(earlier.iter().any(|message| message["role"] == "tool"));
+    assert_eq!(&next[..earlier.len()], earlier.as_slice());
+    let roles = next[earlier.len()..]
+        .iter()
+        .map(|message| message["role"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, ["assistant", "system", "user"]);
+    assert_eq!(next[earlier.len()]["content"], "Echo: please call tool");
+    assert!(earlier
+        .iter()
+        .any(|message| message["content"].as_str() == Some(turn_context.as_str())));
+}
+
+/// A run's committed step 1 for the journal fixtures: a request whose last
+/// user message started the run.
+async fn commit_first_step(journal: &RunJournal, history: Vec<ChatMessage>) {
+    let mut messages = history;
+    journal.prepare_model_step(1, &mut messages).await.unwrap();
+    journal
+        .commit_model_request(1, &request(messages))
+        .await
+        .unwrap();
+}
+
+fn call(id: &str, name: &str) -> ToolCall {
+    serde_json::from_value(json!({
+        "id": id,
+        "type": "function",
+        "function": {"name": name, "arguments": "{}"}
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn turn_messages_answer_every_call_and_keep_the_cut_off_step() {
+    let store = journal_store();
+    let run = journal(&store);
+    commit_first_step(
+        &run,
+        vec![
+            ChatMessage::text("system", "base prompt"),
+            ChatMessage::text("user", "earlier turn"),
+            ChatMessage::text("assistant", "earlier answer"),
+            ChatMessage::text("user", "Read both files"),
+        ],
+    )
+    .await;
+    let calls = vec![call("call-a", "read_file"), call("call-b", "read_file")];
+    run.commit_model_response(
+        1,
+        "Reading them.",
+        "",
+        &calls,
+        "tool_calls",
+        Usage::default(),
+        None,
+    )
+    .await
+    .unwrap();
+    run.commit_tool_result(
+        1,
+        Some("call-a"),
+        "read_file",
+        &json!({}),
+        "    1\tfn a() {}",
+    )
+    .await
+    .unwrap();
+    // The run stopped before `call-b` returned.
+    run.commit_turn_messages("").unwrap();
+    let turn = super::turn_messages(&store, "run-1").unwrap().unwrap();
+    assert_eq!(turn.model, "fixture-model");
+    assert_eq!(turn.privacy, "off");
+    let shape = turn
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.role.as_str(),
+                message.tool_call_id.as_deref(),
+                message.text_content(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            ("assistant", None, "Reading them.".to_string()),
+            ("tool", Some("call-a"), "    1\tfn a() {}".to_string()),
+            (
+                "tool",
+                Some("call-b"),
+                super::UNANSWERED_TOOL_CALL.to_string()
+            ),
+        ]
+    );
+
+    // A step cut off before its response keeps the text it streamed.
+    let store = journal_store();
+    let run = journal(&store);
+    commit_first_step(&run, vec![ChatMessage::text("user", "Explain")]).await;
+    run.commit_turn_messages("The answer is that").unwrap();
+    let turn = super::turn_messages(&store, "run-1").unwrap().unwrap();
+    assert_eq!(turn.messages.len(), 1);
+    assert_eq!(turn.messages[0].role, "assistant");
+    assert_eq!(turn.messages[0].text_content(), "The answer is that");
+}
+
+#[tokio::test]
+async fn turn_messages_follow_the_request_through_steering_and_summaries() {
+    let (manager, state) = manager_with_thread("mock-echo").await;
+    let thread = manager
+        .store
+        .control_thread("thread-fixture")
+        .unwrap()
+        .unwrap();
+    let config = resolve_frozen_config(&state, &manager.store, &thread, Vec::new()).unwrap();
+    put_run(&manager.store, "thread-fixture", "run-1", "running", None);
+    manager
+        .store
+        .control_put_inbox(&ControlInboxRecord {
+            id: "inbox-1".into(),
+            thread_id: "thread-fixture".into(),
+            target_run_id: Some("run-1".into()),
+            command_id: None,
+            kind: "steer".into(),
+            state: "pending".into(),
+            payload_json: serde_json::to_string(&AcceptedTurnV1 {
+                text: "also check tests".into(),
+                client_message_id: None,
+                display_text: None,
+                config,
+                append_user: true,
+                mailbox_origin: None,
+                mailbox_context: Vec::new(),
+                preview_runtime: None,
+                answers_decision: None,
+                unattended: false,
+            })
+            .unwrap(),
+            created_at_ms: 1,
+            claimed_at_ms: None,
+            resolved_at_ms: None,
+        })
+        .unwrap();
+    let journal = RunJournal::new(
+        manager.store.clone(),
+        state.privacy.clone(),
+        PrivacyMode::Off,
+        "thread-fixture",
+        "run-1",
+    );
+    project(
+        &manager,
+        "run-1",
+        json!({"id": "user-1", "role": "user", "content": "Fix the bug", "runId": "run-1"}),
+    );
+    // Steering claimed before step 1 lands after the request, which still
+    // anchors the run.
+    commit_first_step(
+        &journal,
+        vec![
+            ChatMessage::text("user", "old question"),
+            ChatMessage::text("assistant", "old answer"),
+            ChatMessage::text("user", "Fix the bug"),
+        ],
+    )
+    .await;
+    let first_step = manager
+        .store
+        .control_run_events_by_types("run-1", &["model_request_resolved"])
+        .unwrap();
+    let first_step: Value = serde_json::from_str(&first_step[0].data_json).unwrap();
+    assert_eq!(first_step["request_index"], 2);
+    // An in-run summary folded the history and moved the request up.
+    journal
+        .commit_context_compaction(
+            2,
+            &milim_agents::ContextCompaction {
+                elided_tool_results: 0,
+                summarized_messages: 2,
+                estimated_tokens_before: 100,
+                estimated_tokens_after: 10,
+                context_window_tokens: 120,
+                summary_error: None,
+                request_index: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    journal
+        .commit_model_request(
+            2,
+            &request(vec![
+                ChatMessage::text("user", "Fix the bug"),
+                ChatMessage::text(
+                    "system",
+                    "Summary of the earlier conversation: - asked a question",
+                ),
+                ChatMessage::text("user", "also check tests"),
+            ]),
+        )
+        .await
+        .unwrap();
+    journal
+        .commit_model_response(
+            2,
+            "Fixed and tested.",
+            "",
+            &[],
+            "stop",
+            Usage::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    journal.commit_turn_messages("").unwrap();
+    let turn = super::turn_messages(&manager.store, "run-1")
+        .unwrap()
+        .unwrap();
+    let texts = turn
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.text_content()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        [
+            (
+                "system",
+                "Summary of the earlier conversation: - asked a question".to_string()
+            ),
+            ("user", "also check tests".to_string()),
+            ("assistant", "Fixed and tested.".to_string()),
+        ]
+    );
+
+    // Steering the run consumed replays once, inside its messages; steering
+    // that arrived too late replays after them.
+    project(
+        &manager,
+        "run-1",
+        json!({"id": "steer-late", "role": "user", "content": "and the docs", "runId": "run-1", "steering": true}),
+    );
+    project(
+        &manager,
+        "run-1",
+        json!({"id": "assistant-1", "role": "assistant", "content": "Fixed and tested.", "runId": "run-1"}),
+    );
+    let replayed = control_chat_messages(
+        &manager.store,
+        "thread-fixture",
+        &ReplayTarget {
+            model: "fixture-model",
+            ..AGENT_TARGET
+        },
+    )
+    .unwrap();
+    let texts = replayed
+        .iter()
+        .map(|message| (message.role.as_str(), message.text_content()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        [
+            ("user", "Fix the bug".to_string()),
+            (
+                "system",
+                "Summary of the earlier conversation: - asked a question".to_string()
+            ),
+            ("user", "also check tests".to_string()),
+            ("assistant", "Fixed and tested.".to_string()),
+            ("user", "and the docs".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn recorded_turns_adapt_to_the_next_model_and_privacy_mode() {
+    let (manager, _state) = manager_with_thread("mock-echo").await;
+    put_run(&manager.store, "thread-fixture", "run-1", "cancelled", None);
+    put_run(&manager.store, "thread-fixture", "run-2", "running", None);
+    let journal = RunJournal::new(
+        manager.store.clone(),
+        Arc::new(PrivacyGate::default()),
+        PrivacyMode::Off,
+        "thread-fixture",
+        "run-1",
+    );
+    commit_first_step(
+        &journal,
+        vec![ChatMessage::text("user", "Look at the screenshot")],
+    )
+    .await;
+    let calls = vec![call("functions.screenshot:0", "screenshot")];
+    let state = json!({"anthropic": {"model": "fixture-model", "blocks": []}});
+    journal
+        .commit_model_response(
+            1,
+            "",
+            "thinking",
+            &calls,
+            "tool_calls",
+            Usage::default(),
+            Some(&state),
+        )
+        .await
+        .unwrap();
+    journal
+        .commit_tool_result(
+            1,
+            Some("functions.screenshot:0"),
+            "screenshot",
+            &json!({}),
+            "Captured the screen.",
+        )
+        .await
+        .unwrap();
+    let mut image = ChatMessage::text("user", "");
+    image.content = Some(Content::Parts(vec![
+        ContentPart::Text {
+            text: "Image from screenshot:".into(),
+        },
+        serde_json::from_value(json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AAAA"}
+        }))
+        .unwrap(),
+    ]));
+    let mut step_two = vec![ChatMessage::text("user", "Look at the screenshot")];
+    journal.prepare_model_step(2, &mut step_two).await.unwrap();
+    step_two.push(image);
+    journal
+        .commit_model_request(2, &request(step_two))
+        .await
+        .unwrap();
+    journal
+        .commit_model_response(
+            2,
+            "The build is red. Contact ops@example.com.",
+            "",
+            &[],
+            "stop",
+            Usage::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    journal.commit_turn_messages("").unwrap();
+    for (id, role, content, run) in [
+        ("user-1", "user", "Look at the screenshot", "run-1"),
+        ("user-2", "user", "What next?", "run-2"),
+    ] {
+        project(
+            &manager,
+            run,
+            json!({"id": id, "role": role, "content": content, "runId": run}),
+        );
+        if run == "run-1" {
+            project(
+                &manager,
+                run,
+                json!({
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "The build is red. Contact ops@example.com.",
+                    "interruption": STOPPED_BY_USER_MARKER,
+                    "runId": run,
+                }),
+            );
+        }
+    }
+
+    let same = ReplayTarget {
+        model: "fixture-model",
+        ..AGENT_TARGET
+    };
+    let replayed = control_chat_messages(&manager.store, "thread-fixture", &same).unwrap();
+    let roles = replayed
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        ["user", "assistant", "tool", "user", "assistant", "user"]
+    );
+    assert_eq!(replayed[1].provider_state.as_ref(), Some(&state));
+    assert_eq!(replayed[1].reasoning_content.as_deref(), Some("thinking"));
+    assert_eq!(
+        replayed[2].tool_call_id.as_deref(),
+        Some("functions.screenshot:0")
+    );
+    assert!(matches!(
+        &replayed[3].content,
+        Some(Content::Parts(parts)) if matches!(parts[1], ContentPart::ImageUrl { .. })
+    ));
+    assert_eq!(
+        replayed[4].text_content(),
+        format!("The build is red. Contact ops@example.com.\n\n{STOPPED_BY_USER_MARKER}")
+    );
+
+    // Another model gets no foreign continuation data and portable ids.
+    let other = control_chat_messages(
+        &manager.store,
+        "thread-fixture",
+        &ReplayTarget {
+            model: "other-model",
+            ..AGENT_TARGET
+        },
+    )
+    .unwrap();
+    assert!(other[1].provider_state.is_none() && other[1].reasoning_content.is_none());
+    let id = other[1].tool_calls.as_ref().unwrap()[0].id.clone();
+    assert_eq!(id.as_deref(), Some("functions_screenshot_0"));
+    assert_eq!(other[2].tool_call_id, id);
+
+    // Redact keeps the messages but never sends image data.
+    let redact = control_chat_messages(
+        &manager.store,
+        "thread-fixture",
+        &ReplayTarget {
+            privacy: PrivacyMode::Redact,
+            ..same
+        },
+    )
+    .unwrap();
+    assert_eq!(redact.len(), 6);
+    assert!(redact[3].text_content().contains("not replayed"));
+    assert!(!serde_json::to_string(&redact)
+        .unwrap()
+        .contains("data:image"));
+
+    // Block would refuse the e-mail address, so the run replays as text.
+    let block = control_chat_messages(
+        &manager.store,
+        "thread-fixture",
+        &ReplayTarget {
+            privacy: PrivacyMode::Block,
+            ..same
+        },
+    )
+    .unwrap();
+    let roles = block
+        .iter()
+        .map(|message| message.role.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(roles, ["user", "assistant", "user"]);
+}
+
+#[tokio::test]
+async fn runs_recorded_under_redact_replay_their_work_log() {
+    let (manager, _state) = manager_with_thread("mock-echo").await;
+    put_run(&manager.store, "thread-fixture", "run-1", "completed", None);
+    let journal = RunJournal::new(
+        manager.store.clone(),
+        Arc::new(PrivacyGate::default()),
+        PrivacyMode::Redact,
+        "thread-fixture",
+        "run-1",
+    );
+    commit_first_step(&journal, vec![ChatMessage::text("user", "Mail a@b.com")]).await;
+    journal
+        .commit_model_response(1, "Done.", "", &[], "stop", Usage::default(), None)
+        .await
+        .unwrap();
+    journal.commit_turn_messages("").unwrap();
+    assert_eq!(
+        super::turn_messages(&manager.store, "run-1")
+            .unwrap()
+            .unwrap()
+            .privacy,
+        "redact"
+    );
+    project(
+        &manager,
+        "run-1",
+        json!({"id": "user-1", "role": "user", "content": "Mail a@b.com", "runId": "run-1"}),
+    );
+    project(
+        &manager,
+        "run-1",
+        json!({"id": "assistant-1", "role": "assistant", "content": "Done.", "runId": "run-1"}),
+    );
+    let replayed = control_chat_messages(&manager.store, "thread-fixture", &AGENT_TARGET).unwrap();
+    assert_eq!(replayed.len(), 2);
+    assert_eq!(replayed[1].text_content(), "Done.");
+}
+
+/// Records which threads the tool registry was asked to let go of.
+#[derive(Default)]
+struct ReleaseProbe(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl milim_tools::Tool for ReleaseProbe {
+    fn name(&self) -> &str {
+        "release_probe"
+    }
+    fn description(&self) -> &str {
+        "Records thread releases."
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    fn effect(&self) -> milim_tools::ToolEffect {
+        milim_tools::ToolEffect::ReadOnly
+    }
+    fn release_thread(&self, thread_id: &str) {
+        self.0.lock().unwrap().push(thread_id.to_string());
+    }
+    async fn invoke(&self, _args: Value) -> milim_core::Result<Value> {
+        Ok(json!({}))
+    }
+}
+
+#[tokio::test]
+async fn deleted_archived_and_moved_threads_release_their_tool_state() {
+    let store = Arc::new(UserDataStore::new(Database::open_in_memory().unwrap()).unwrap());
+    let manager = RunManager::new(store, "Fixture desktop").unwrap();
+    let probe = Arc::new(ReleaseProbe::default());
+    let mut tools = milim_tools::ToolRegistry::new();
+    tools.register(probe.clone());
+    let state = AppState::new(Arc::new(TestBackend::new()), ServerConfiguration::default())
+        .with_tools(tools)
+        .with_control(manager.clone());
+    let command = |id: &str, kind: ControlCommandKindV1, payload: Value| {
+        let (manager, state) = (manager.clone(), state.clone());
+        let id = id.to_string();
+        let thread_id = (!matches!(kind, ControlCommandKindV1::ThreadCreate))
+            .then(|| "thread-probe".to_string());
+        async move {
+            let mut command = ControlCommandV1 {
+                command_id: id,
+                kind,
+                thread_id,
+                expected_revision: None,
+                payload,
+                confirmation_token: None,
+            };
+            let mut result = manager
+                .command(state.clone(), None, command.clone())
+                .await
+                .unwrap();
+            if result.status == ControlCommandStatusV1::NeedsConfirmation {
+                command.confirmation_token = result.confirmation_token;
+                result = manager.command(state, None, command).await.unwrap();
+            }
+            assert_eq!(result.status, ControlCommandStatusV1::Applied, "{result:?}");
+        }
+    };
+    let released = || probe.0.lock().unwrap().clone();
+    command(
+        "create",
+        ControlCommandKindV1::ThreadCreate,
+        json!({"id": "thread-probe", "title": "Probe", "settings": {"model": "mock-echo"}}),
+    )
+    .await;
+    for (id, payload) in [
+        ("folder", json!({"workspace": "/tmp/first"})),
+        ("same-folder", json!({"workspace": "/tmp/first"})),
+        ("memory", json!({"memory": false})),
+    ] {
+        command(
+            id,
+            ControlCommandKindV1::ThreadSetExecutionSettings,
+            payload,
+        )
+        .await;
+    }
+    assert_eq!(released(), ["thread-probe"], "only a real move releases");
+    command(
+        "rename",
+        ControlCommandKindV1::ThreadRename,
+        json!({"title": "Renamed"}),
+    )
+    .await;
+    command(
+        "unarchive",
+        ControlCommandKindV1::ThreadArchive,
+        json!({"archived": false}),
+    )
+    .await;
+    assert_eq!(released().len(), 1);
+    command(
+        "archive",
+        ControlCommandKindV1::ThreadArchive,
+        json!({"archived": true}),
+    )
+    .await;
+    command("delete", ControlCommandKindV1::ThreadDelete, json!({})).await;
+    assert_eq!(released(), ["thread-probe"; 3]);
 }

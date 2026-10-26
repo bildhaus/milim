@@ -18,6 +18,11 @@ import {
 import { contextCompactedPart, providerRetryPart } from "./turnEvents.js";
 import { hookEventPart } from "./hookEvents.js";
 import { providerErrorFromValue, type ProviderErrorInfo } from "./providerErrors.js";
+import {
+  hasUserDecisionResolution,
+  stripUserDecisionFallback,
+  userDecisionForRun,
+} from "./userDecisions.js";
 import type { QueuedMessage } from "../sessions/store.js";
 
 type CanonicalMessage = ChatMessage;
@@ -473,6 +478,7 @@ export function projectControlRunMessages(
   let workspaceCheckpoint: WorkspaceCheckpoint | undefined;
   const streamParts: ChatStreamPart[] = [];
   let pendingRetry: { index: number; data: Record<string, unknown> } | null = null;
+  const userDecision = userDecisionForRun(items, runId);
   for (const item of items) {
     if (item.run_id !== runId) continue;
     const data = item.data;
@@ -528,6 +534,19 @@ export function projectControlRunMessages(
           ? data.mailboxOrigin as CanonicalMessage["mailboxOrigin"]
           : undefined,
       };
+      const answersDecision = data.answersDecision as Record<string, unknown> | undefined;
+      if (
+        answersDecision
+        && typeof answersDecision.decision_id === "string"
+        && (answersDecision.response === "answer"
+          || answersDecision.response === "approve_plan"
+          || answersDecision.response === "revise_plan")
+      ) {
+        message.answersDecision = {
+          decision_id: answersDecision.decision_id,
+          response: answersDecision.response,
+        };
+      }
       if (Array.isArray(data.attachments)) {
         message.attachments = data.attachments.map((raw) => {
           const attachment = raw as Record<string, unknown>;
@@ -544,6 +563,15 @@ export function projectControlRunMessages(
       }
       if (message.role === "user") users.push(message);
       if (message.role === "assistant") {
+        if (userDecision) {
+          // The card shows the decision; the text fallback is for clients
+          // without one.
+          message.content = stripUserDecisionFallback(
+            message.content,
+            userDecision.fallback_text,
+          );
+          message.userDecision = userDecision;
+        }
         message.metrics = projectedResponseMetrics(data.metrics);
         workspaceCheckpoint = projectedWorkspaceCheckpoint(data.workspaceCheckpoint)
           ?? workspaceCheckpoint;
@@ -579,6 +607,7 @@ export function projectControlRunMessages(
       runId,
       controlSeq: firstStreamSeq,
       streamParts,
+      ...(userDecision ? { userDecision } : {}),
     };
   }
   if (assistant) {
@@ -617,6 +646,8 @@ export function shouldReconcileControlRunProjection(
 ): boolean {
   if (attachedRunId === runId) return false;
   if (!hasCurrentProjection) return true;
+  // Another client may have answered this run's decision.
+  if (hasUserDecisionResolution(items, runId)) return true;
   return items.some(
     (item) =>
       item.run_id === runId &&

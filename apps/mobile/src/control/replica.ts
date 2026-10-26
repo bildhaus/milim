@@ -6,6 +6,15 @@ import type {
   TimelineItemV1,
   TimelinePageV1,
 } from './types';
+import type {UserDecisionResponseV1, UserDecisionV1} from './generated-v1';
+import {
+  parseUserDecision,
+  parseUserDecisionResolution,
+  stripDecisionFallback,
+  USER_DECISION_REQUESTED,
+  USER_DECISION_RESOLVED,
+  type UserDecisionState,
+} from './userDecisions';
 
 export interface TimelineReplica {
   threadId: string;
@@ -230,11 +239,25 @@ export interface ProjectedModelChange {
   model: string;
 }
 
+export interface ProjectedUserDecision {
+  kind: 'user-decision';
+  id: string;
+  threadId: string;
+  runId: string | null;
+  // Placed after the deciding run's final message.
+  seq: number;
+  requestSeq: number;
+  decision: UserDecisionV1;
+  state: UserDecisionState;
+  response?: UserDecisionResponseV1;
+}
+
 export type ProjectedTranscriptItem =
   | ProjectedMessage
   | ProjectedActivityGroup
   | ProjectedApprovalItem
-  | ProjectedModelChange;
+  | ProjectedModelChange
+  | ProjectedUserDecision;
 
 type MutableActivityGroup = {
   runId: string;
@@ -626,6 +649,7 @@ export function projectTranscript(
   const pendingById = new Map(pendingApprovals.map(approval => [approval.id, approval]));
   const latestAtByRun = new Map<string, number>();
   const endedRuns = new Set<string>();
+  const decisions = new Map<string, ProjectedUserDecision>();
 
   const groupFor = (item: TimelineItemV1) => {
     if (!item.run_id) return null;
@@ -648,6 +672,13 @@ export function projectTranscript(
     if (item.run_id) latestAtByRun.set(item.run_id, item.created_at_ms);
     const data = asRecord(item.data) ?? {};
     if (item.type === 'message' && data.role === 'user') {
+      // A later turn closes any decision still open, even before its
+      // resolution item syncs.
+      if (data.steering !== true) {
+        for (const decision of decisions.values()) {
+          if (decision.state === 'pending') decision.state = 'superseded';
+        }
+      }
       if (
         modelChangeState.pending &&
         modelChangeState.pending.previousModel !== modelChangeState.pending.model
@@ -658,6 +689,31 @@ export function projectTranscript(
     }
     if (item.type === 'message_deleted' && typeof data.message_id === 'string') {
       deleted.add(data.message_id);
+      continue;
+    }
+    if (item.type === USER_DECISION_REQUESTED) {
+      const decision = parseUserDecision(data);
+      if (decision && !decisions.has(decision.id)) {
+        decisions.set(decision.id, {
+          kind: 'user-decision',
+          id: `decision-${decision.id}`,
+          threadId: item.thread_id,
+          runId: item.run_id,
+          seq: item.seq,
+          requestSeq: item.seq,
+          decision,
+          state: 'pending',
+        });
+      }
+      continue;
+    }
+    if (item.type === USER_DECISION_RESOLVED) {
+      const resolution = parseUserDecisionResolution(data);
+      const decision = resolution ? decisions.get(resolution.decisionId) : null;
+      if (decision && resolution) {
+        decision.state = resolution.status;
+        decision.response = resolution.response;
+      }
       continue;
     }
     if (item.type === 'model_changed') {
@@ -919,10 +975,26 @@ export function projectTranscript(
     projected.approval = null;
   }
 
-  const visibleMessages = [
+  const shownMessages = [
     ...messages.filter(message => !deleted.has(message.id)),
     ...streaming.values(),
   ];
+  const hiddenMessages = new Set<ProjectedMessage>();
+  for (const decision of decisions.values()) {
+    let final: ProjectedMessage | undefined;
+    for (const message of shownMessages) {
+      if (message.role === 'assistant' && decision.runId && message.runId === decision.runId) {
+        final = message;
+      }
+    }
+    if (!final) continue;
+    final.content = stripDecisionFallback(final.content, decision.decision.fallback_text);
+    if (!final.content.trim() && !final.reasoning.trim()) hiddenMessages.add(final);
+    decision.seq = Math.max(decision.seq, final.seq);
+  }
+  const visibleMessages = hiddenMessages.size
+    ? shownMessages.filter(message => !hiddenMessages.has(message))
+    : shownMessages;
   const answeredRuns = new Set(
     visibleMessages
       .filter(message => message.role === 'assistant' && message.runId)
@@ -968,7 +1040,13 @@ export function projectTranscript(
     });
   }
 
-  return [...visibleMessages, ...modelChanges, ...projectedGroups, ...approvals.values()].sort(
+  return [
+    ...visibleMessages,
+    ...modelChanges,
+    ...projectedGroups,
+    ...approvals.values(),
+    ...decisions.values(),
+  ].sort(
     (a, b) => a.seq - b.seq,
   );
 }
@@ -1024,6 +1102,13 @@ function sameProjectionItem(
       previous.status === next.status && previous.label === next.label &&
       previous.detail === next.detail && previous.approval?.id === next.approval?.id &&
       previous.approval?.status === next.approval?.status;
+  }
+  if (previous.kind === 'user-decision' && next.kind === 'user-decision') {
+    return previous.runId === next.runId && previous.seq === next.seq &&
+      previous.requestSeq === next.requestSeq && previous.state === next.state &&
+      previous.response === next.response && previous.threadId === next.threadId &&
+      (previous.decision === next.decision ||
+        JSON.stringify(previous.decision) === JSON.stringify(next.decision));
   }
   if (previous.kind === 'activity' && next.kind === 'activity') {
     if (previous.runId !== next.runId || previous.seq !== next.seq ||
@@ -1126,6 +1211,22 @@ export function projectTranscriptIncrementally(
       const id = approvalId(data ?? {});
       const existing = previous.projected.find(candidate => candidate.id === `approval-${id}`);
       if (existing) boundarySeq = Math.min(boundarySeq, existing.seq);
+    }
+    // A resolution or a later turn changes an earlier decision card: replay
+    // from the deciding run so its request and final message re-project.
+    const resolution = item.type === USER_DECISION_RESOLVED
+      ? parseUserDecisionResolution(data)
+      : null;
+    const supersedes = item.type === 'message' && data?.role === 'user' && data.steering !== true;
+    if (resolution || supersedes) {
+      for (const candidate of previous.projected) {
+        if (candidate.kind !== 'user-decision') continue;
+        if (resolution ? candidate.decision.id !== resolution.decisionId : candidate.state !== 'pending') {
+          continue;
+        }
+        const firstSeq = candidate.runId ? runFirstSeq.get(candidate.runId) : undefined;
+        boundarySeq = Math.min(boundarySeq, firstSeq ?? candidate.requestSeq);
+      }
     }
   }
 

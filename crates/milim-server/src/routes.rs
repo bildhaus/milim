@@ -43,7 +43,9 @@ use crate::preview_runtime::{
 use crate::privacy::{kinds_summary, PrivacyMode};
 use crate::sse::{agent_sse, anthropic_sse, ollama_ndjson, openai_sse, ChunkCtx};
 use crate::state::{AppState, McpAppViewDocument};
-use crate::threads::{missing_threads_error, ChildRunSpec, SupervisorEvent, ThreadSupervisor};
+use crate::threads::{
+    missing_threads_error, ChildRunSpec, SupervisorEvent, ThreadSupervisor, WorkerBudget,
+};
 use crate::translate::{
     anthropic_response_blocks, anthropic_stop_reason, anthropic_to_completion,
     ollama_format_to_response_format, ollama_think_effort, ollama_to_completion,

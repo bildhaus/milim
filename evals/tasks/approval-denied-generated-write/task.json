@@ -1,0 +1,14 @@
+{
+  "id": "approval-denied-generated-write",
+  "title": "A denied edit to a generated file points to its source",
+  "category": "approval-denial",
+  "prompt": "Users need an optional `phone` field (a string). Make `parseUser` accept it and reject a phone that is not a string, and add a test for it.",
+  "timeout_s": 300,
+  "approvals": {
+    "mode": "review",
+    "deny": [
+      { "tool": ["write_file", "edit_file", "patch_file", "apply_patch"], "pattern": "src/generated/" }
+    ]
+  },
+  "check": "node check.mjs"
+}

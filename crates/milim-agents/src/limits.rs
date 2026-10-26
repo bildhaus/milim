@@ -9,6 +9,9 @@ pub struct AgentRunLimits {
     pub max_duration: Option<Duration>,
     pub max_cost_usd: Option<f64>,
     pub pricing: Option<ModelPricing>,
+    /// Prompt plus completion tokens the provider reported across the run's
+    /// model steps, cached prompt tokens included.
+    pub max_tokens: Option<u64>,
 }
 
 pub(crate) struct RunBudget {
@@ -20,6 +23,7 @@ pub(crate) struct RunBudget {
     limits: AgentRunLimits,
     cost: f64,
     cost_unknown: bool,
+    tokens: u64,
 }
 
 impl RunBudget {
@@ -31,10 +35,12 @@ impl RunBudget {
             limits,
             cost: 0.0,
             cost_unknown: false,
+            tokens: 0,
         }
     }
 
     pub(crate) fn record(&mut self, usage: Usage) {
+        self.tokens += u64::from(usage.prompt_tokens) + u64::from(usage.completion_tokens);
         let cost = usage
             .cost_usd
             .filter(|value| value.is_finite() && *value >= 0.0)
@@ -89,6 +95,12 @@ impl RunBudget {
             .is_some_and(|limit| elapsed >= limit)
         {
             return Some("Paused at the run time limit.".into());
+        }
+        if let Some(limit) = self.limits.max_tokens.filter(|limit| self.tokens >= *limit) {
+            return Some(format!(
+                "Paused at the {limit}-token run budget ({} tokens used).",
+                self.tokens
+            ));
         }
         if let Some(limit) = self.limits.max_cost_usd {
             if self.cost_unknown {
@@ -148,6 +160,19 @@ mod tests {
         });
         // 100 uncached + 900 cached input tokens, 10 output tokens.
         assert!((budget.cost - (0.1 + 0.09 + 0.02)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn token_budget_counts_prompt_and_completion_tokens() {
+        let mut budget = RunBudget::new(AgentRunLimits {
+            max_tokens: Some(1_000),
+            ..Default::default()
+        });
+        // Unreported cost does not matter without a spend threshold.
+        budget.record(Usage::new(600, 100));
+        assert!(budget.reason().is_none());
+        budget.record(Usage::new(250, 50));
+        assert!(budget.reason().unwrap().contains("1000-token run budget"));
     }
 
     #[test]

@@ -24,13 +24,18 @@ import type {
   ThreadLinkV1 as GeneratedThreadLinkV1,
   TimelineItemV1 as GeneratedControlTimelineItemV1,
   TimelinePageV1 as GeneratedControlTimelinePageV1,
+  UserDecisionAnswerV1,
 } from "./generated/control-v1.js";
+import type { ChatUserDecision } from "./lib/userDecisions.js";
 export type {
   EffectiveRunPreviewRequestV1,
   EffectiveRunPreviewV1,
   RunEventPageV1,
   RunEventV1,
   RunInspectionV1,
+  UserDecisionAnswerV1,
+  UserDecisionResponseV1,
+  UserDecisionV1,
 } from "./generated/control-v1.js";
 export {
   attachmentsToPromptContext,
@@ -315,6 +320,10 @@ export interface ChatMessage {
   mediaRequestId?: string;
   compaction?: ChatCompactionCheckpoint;
   plan?: { status: "proposed" | "executed"; executedAt?: number };
+  /** The `ask_user` or `exit_plan_mode` decision this canonical turn ended on. */
+  userDecision?: ChatUserDecision;
+  /** The pending decision this user turn answers; sent with `turn.send`. */
+  answersDecision?: UserDecisionAnswerV1;
   approval?: ChatApprovalRequest;
   reviewComments?: ReviewComment[];
   artifacts?: ChatArtifact[];

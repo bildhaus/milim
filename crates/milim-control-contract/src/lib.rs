@@ -65,6 +65,12 @@ pub struct ControlCapabilitiesV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub thread_origins: Option<bool>,
+    /// The host records `ask_user` and `exit_plan_mode` decisions in the
+    /// timeline and accepts `turn.send` answers to them.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user_decisions: Option<bool>,
 }
 
 impl Default for ControlCapabilitiesV1 {
@@ -90,6 +96,7 @@ impl Default for ControlCapabilitiesV1 {
             model_favorites: Some(true),
             thread_links: Some(true),
             thread_origins: Some(true),
+            user_decisions: Some(true),
         }
     }
 }
@@ -367,6 +374,245 @@ pub struct PendingInputV1 {
     #[ts(optional)]
     pub attachments: Option<Vec<ControlAttachmentV1>>,
     pub created_at_ms: i64,
+}
+
+/// Timeline item type of a decision a run handed to the user. Its data is
+/// `{ "type": "user_decision_requested", "call_id": ..., "decision": UserDecisionV1 }`.
+pub const USER_DECISION_REQUESTED_ITEM: &str = "user_decision_requested";
+/// Timeline item type that closes a decision; its data is a
+/// [`UserDecisionResolvedV1`] and its `run_id` is the deciding run's.
+pub const USER_DECISION_RESOLVED_ITEM: &str = "user_decision_resolved";
+pub const USER_DECISION_MAX_QUESTIONS: usize = 4;
+pub const USER_DECISION_MIN_OPTIONS: usize = 2;
+pub const USER_DECISION_MAX_OPTIONS: usize = 4;
+pub const USER_DECISION_MAX_HEADER_CHARS: usize = 12;
+pub const USER_DECISION_MAX_QUESTION_CHARS: usize = 1_000;
+pub const USER_DECISION_MAX_LABEL_CHARS: usize = 80;
+pub const USER_DECISION_MAX_DESCRIPTION_CHARS: usize = 400;
+pub const USER_DECISION_MAX_PLAN_CHARS: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum UserDecisionKindV1 {
+    AskUser,
+    ExitPlanMode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct UserQuestionOptionV1 {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct UserQuestionV1 {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<UserQuestionOptionV1>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// A structured decision a run ended on: questions for the user, or a plan
+/// to approve. The answer arrives as the thread's next `turn.send`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct UserDecisionV1 {
+    pub id: String,
+    pub kind: UserDecisionKindV1,
+    #[serde(default)]
+    pub questions: Vec<UserQuestionV1>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub plan: Option<String>,
+    /// The decision as Markdown. It ends the run's assistant message so
+    /// clients without decision cards (and later model turns) still see it.
+    #[serde(default)]
+    pub fallback_text: String,
+}
+
+impl UserDecisionV1 {
+    pub fn ask_user(id: String, questions: Vec<UserQuestionV1>) -> Result<Self, String> {
+        if questions.is_empty() || questions.len() > USER_DECISION_MAX_QUESTIONS {
+            return Err(format!(
+                "questions must contain 1 to {USER_DECISION_MAX_QUESTIONS} items"
+            ));
+        }
+        let mut questions = questions;
+        for (index, question) in questions.iter_mut().enumerate() {
+            let at = format!("questions[{index}]");
+            question.question = bounded(
+                &question.question,
+                &format!("{at}.question"),
+                USER_DECISION_MAX_QUESTION_CHARS,
+            )?;
+            question.header = bounded(
+                &question.header,
+                &format!("{at}.header"),
+                USER_DECISION_MAX_HEADER_CHARS,
+            )?;
+            if question.options.len() < USER_DECISION_MIN_OPTIONS
+                || question.options.len() > USER_DECISION_MAX_OPTIONS
+            {
+                return Err(format!(
+                    "{at}.options must contain {USER_DECISION_MIN_OPTIONS} to {USER_DECISION_MAX_OPTIONS} items"
+                ));
+            }
+            let mut labels = Vec::with_capacity(question.options.len());
+            for (option_index, option) in question.options.iter_mut().enumerate() {
+                let at = format!("{at}.options[{option_index}]");
+                option.label = bounded(
+                    &option.label,
+                    &format!("{at}.label"),
+                    USER_DECISION_MAX_LABEL_CHARS,
+                )?;
+                option.description = option.description.trim().to_string();
+                if option.description.chars().count() > USER_DECISION_MAX_DESCRIPTION_CHARS {
+                    return Err(format!(
+                        "{at}.description must be at most {USER_DECISION_MAX_DESCRIPTION_CHARS} characters"
+                    ));
+                }
+                if labels.contains(&option.label.to_lowercase()) {
+                    return Err(format!("{at}.label repeats another option's label"));
+                }
+                labels.push(option.label.to_lowercase());
+            }
+        }
+        let mut decision = Self {
+            id,
+            kind: UserDecisionKindV1::AskUser,
+            questions,
+            plan: None,
+            fallback_text: String::new(),
+        };
+        decision.fallback_text = decision.render_fallback();
+        Ok(decision)
+    }
+
+    pub fn exit_plan_mode(id: String, plan: &str) -> Result<Self, String> {
+        let plan = plan.trim();
+        if plan.is_empty() {
+            return Err("plan must not be empty".into());
+        }
+        if plan.chars().count() > USER_DECISION_MAX_PLAN_CHARS {
+            return Err(format!(
+                "plan must be at most {USER_DECISION_MAX_PLAN_CHARS} characters"
+            ));
+        }
+        let mut decision = Self {
+            id,
+            kind: UserDecisionKindV1::ExitPlanMode,
+            questions: Vec::new(),
+            plan: Some(plan.to_string()),
+            fallback_text: String::new(),
+        };
+        decision.fallback_text = decision.render_fallback();
+        Ok(decision)
+    }
+
+    fn render_fallback(&self) -> String {
+        match self.kind {
+            UserDecisionKindV1::AskUser => {
+                let mut text = String::from("**Questions for you**\n");
+                for (index, question) in self.questions.iter().enumerate() {
+                    text.push_str(&format!(
+                        "\n{}. **{}**: {}{}\n",
+                        index + 1,
+                        question.header,
+                        question.question,
+                        if question.multi_select {
+                            " (choose any)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    for option in &question.options {
+                        if option.description.is_empty() {
+                            text.push_str(&format!("   - {}\n", option.label));
+                        } else {
+                            text.push_str(&format!(
+                                "   - {}: {}\n",
+                                option.label, option.description
+                            ));
+                        }
+                    }
+                }
+                text.push_str("\nReply with your answers, or in your own words.");
+                text
+            }
+            UserDecisionKindV1::ExitPlanMode => format!(
+                "**Proposed plan**\n\n{}\n\nReply to approve this plan, or say what to change.",
+                self.plan.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+fn bounded(value: &str, field: &str, max_chars: usize) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!("{field} must be at most {max_chars} characters"));
+    }
+    Ok(value.to_string())
+}
+
+/// How a `turn.send` answers a pending decision.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum UserDecisionResponseV1 {
+    /// Answers to an `ask_user` decision.
+    Answer,
+    /// Approves an `exit_plan_mode` plan; the host turns plan mode off for
+    /// the thread before the answering turn runs.
+    ApprovePlan,
+    /// Feedback on an `exit_plan_mode` plan; plan mode stays on.
+    RevisePlan,
+}
+
+impl UserDecisionResponseV1 {
+    pub fn fits(self, kind: UserDecisionKindV1) -> bool {
+        match self {
+            Self::Answer => kind == UserDecisionKindV1::AskUser,
+            Self::ApprovePlan | Self::RevisePlan => kind == UserDecisionKindV1::ExitPlanMode,
+        }
+    }
+}
+
+/// `turn.send` `payload.answers_decision`: the pending decision the turn's
+/// text answers. A stale or second answer is rejected with `conflict`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct UserDecisionAnswerV1 {
+    pub decision_id: String,
+    pub response: UserDecisionResponseV1,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum UserDecisionStatusV1 {
+    Answered,
+    /// Another turn started before the decision was answered.
+    Superseded,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct UserDecisionResolvedV1 {
+    pub decision_id: String,
+    pub status: UserDecisionStatusV1,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub response: Option<UserDecisionResponseV1>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub command_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
@@ -833,4 +1079,83 @@ pub struct RunEventPageV1 {
 pub struct RunInspectionV1 {
     pub run: RunSnapshotV1,
     pub composition: Option<ResolvedRunCompositionV1>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn option(label: &str) -> UserQuestionOptionV1 {
+        UserQuestionOptionV1 {
+            label: label.into(),
+            description: format!("{label} description"),
+        }
+    }
+
+    fn question(header: &str, options: Vec<UserQuestionOptionV1>) -> UserQuestionV1 {
+        UserQuestionV1 {
+            question: "Which database?".into(),
+            header: header.into(),
+            options,
+            multi_select: false,
+        }
+    }
+
+    #[test]
+    fn ask_user_validates_bounds_and_renders_a_readable_fallback() {
+        let decision = UserDecisionV1::ask_user(
+            "d1".into(),
+            vec![question(
+                " Storage ",
+                vec![option("SQLite"), option("Postgres")],
+            )],
+        )
+        .unwrap();
+        assert_eq!(decision.questions[0].header, "Storage");
+        assert!(decision
+            .fallback_text
+            .contains("1. **Storage**: Which database?"));
+        assert!(decision
+            .fallback_text
+            .contains("   - SQLite: SQLite description"));
+
+        for (questions, needle) in [
+            (Vec::new(), "1 to 4"),
+            (vec![question("Storage", vec![option("One")])], "2 to 4"),
+            (
+                vec![question(
+                    "A header too long",
+                    vec![option("A"), option("B")],
+                )],
+                "at most 12",
+            ),
+            (
+                vec![question("Dup", vec![option("A"), option("a")])],
+                "repeats",
+            ),
+            (
+                vec![question(" ", vec![option("A"), option("B")])],
+                "must not be empty",
+            ),
+        ] {
+            let error = UserDecisionV1::ask_user("d".into(), questions).unwrap_err();
+            assert!(error.contains(needle), "{error}");
+        }
+    }
+
+    #[test]
+    fn exit_plan_mode_keeps_the_plan_and_responses_fit_their_kind() {
+        let decision = UserDecisionV1::exit_plan_mode("p1".into(), "\n1. Edit a.rs\n").unwrap();
+        assert_eq!(decision.plan.as_deref(), Some("1. Edit a.rs"));
+        assert!(decision
+            .fallback_text
+            .starts_with("**Proposed plan**\n\n1. Edit a.rs"));
+        assert!(UserDecisionV1::exit_plan_mode("p2".into(), "  ").is_err());
+        assert!(UserDecisionResponseV1::ApprovePlan.fits(UserDecisionKindV1::ExitPlanMode));
+        assert!(!UserDecisionResponseV1::Answer.fits(UserDecisionKindV1::ExitPlanMode));
+        assert!(!UserDecisionResponseV1::RevisePlan.fits(UserDecisionKindV1::AskUser));
+        let wire = serde_json::to_value(&decision).unwrap();
+        assert_eq!(wire["kind"], "exit_plan_mode");
+        assert!(wire.get("questions").is_some());
+    }
 }

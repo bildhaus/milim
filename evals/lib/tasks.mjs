@@ -2,7 +2,7 @@
 // (model runs) and validate.mjs (grader validation without a model).
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,31 @@ function normalizeTurns(task, name) {
   });
 }
 
+/**
+ * A task's optional approval policy, normalized. `deny` rules answer
+ * matching approval requests with deny; every other request is approved.
+ * A rule has `tool` (a tool name or a list of names; omitted matches any
+ * tool) and `pattern`, a regular expression tested against the call's
+ * command for shell tools, its path for file tools, and its JSON arguments
+ * otherwise; `first_only` denies only the first matching request. A task
+ * with a policy runs with approval mode `mode` (default `review`), so the
+ * host emits approval requests at all.
+ */
+function normalizeApprovals(task, name) {
+  if (task.approvals === undefined) return null;
+  const { mode = "review", deny = [] } = task.approvals ?? {};
+  if (!["review", "guarded", "open"].includes(mode)) throw new Error(`${name}/task.json approvals.mode must be review, guarded, or open`);
+  if (!Array.isArray(deny)) throw new Error(`${name}/task.json approvals.deny must be an array`);
+  return {
+    mode,
+    deny: deny.map((rule, index) => {
+      if (typeof rule?.pattern !== "string") throw new Error(`${name}/task.json approvals.deny[${index}] needs a pattern`);
+      new RegExp(rule.pattern); // throws on an invalid pattern
+      return { tool: rule.tool === undefined ? null : [rule.tool].flat(), pattern: rule.pattern, first_only: rule.first_only === true };
+    }),
+  };
+}
+
 /** Tasks whose id equals or contains one of the comma-separated filters. */
 export function loadTasks(filter) {
   const wanted = (filter ?? "")
@@ -44,7 +69,14 @@ export function loadTasks(filter) {
         if (task[key] === undefined) throw new Error(`${entry.name}/task.json is missing ${key}`);
       }
       if (!existsSync(join(dir, "repo"))) throw new Error(`${entry.name} has no repo/ fixture`);
-      return { ...task, turns: normalizeTurns(task, entry.name), requires: task.requires ?? [], dir };
+      if (task.setup !== undefined && typeof task.setup !== "string") throw new Error(`${entry.name}/task.json setup must be a command string`);
+      return {
+        ...task,
+        turns: normalizeTurns(task, entry.name),
+        requires: task.requires ?? [],
+        approvals: normalizeApprovals(task, entry.name),
+        dir,
+      };
     })
     .filter((task) => wanted.length === 0 || wanted.some((value) => task.id === value || task.id.includes(value)))
     .sort((a, b) => a.id.localeCompare(b.id));
@@ -53,24 +85,66 @@ export function loadTasks(filter) {
 /** Total time budget for all of a task's turns, in seconds. */
 export const taskTimeout = (task) => task.turns.reduce((sum, turn) => sum + turn.timeout_s, 0);
 
-export function git(cwd, gitArgs) {
+export function git(cwd, gitArgs, { env } = {}) {
   const result = spawnSync(
     "git",
     ["-c", "user.name=milim-eval", "-c", "user.email=eval@milim.invalid", "-c", "commit.gpgsign=false", ...gitArgs],
-    { cwd, encoding: "utf8" },
+    { cwd, encoding: "utf8", ...(env ? { env: { ...process.env, ...env } } : {}) },
   );
   if (result.status !== 0) throw new Error(`git ${gitArgs[0]} failed: ${result.stderr.trim()}`);
   return result.stdout;
 }
 
-/** Copy the fixture to a fresh temp dir and commit it as the baseline. */
+/**
+ * Copy the fixture to a fresh temp dir and commit it as the baseline. A
+ * task's optional `setup` command (for example `node setup.mjs`, resolved
+ * against the task directory like `check`) runs after `git init` and may
+ * build commit history; whatever it leaves uncommitted becomes the final
+ * baseline commit, so `HEAD` is always the state the agent starts from.
+ */
 export function prepareRepo(task) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), `milim-eval-${task.id}-`)));
   cpSync(join(task.dir, "repo"), root, { recursive: true });
   git(root, ["init", "-q", "-b", "main"]);
-  git(root, ["add", "-A"]);
-  git(root, ["commit", "-q", "-m", "eval fixture"]);
+  if (task.setup) {
+    const result = runTaskCommand(task, task.setup, root, 60_000);
+    if (result.status !== 0) {
+      throw new Error(`setup exited ${result.status}: ${`${result.stdout ?? ""}${result.stderr ?? ""}`.trim().slice(0, 400)}`);
+    }
+  }
+  const hasHead = spawnSync("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root }).status === 0;
+  if (!hasHead || git(root, ["status", "--porcelain", "--untracked-files=all"]).trim()) {
+    git(root, ["add", "-A"]);
+    git(root, ["commit", "-q", "-m", "eval fixture"]);
+  }
   return root;
+}
+
+/** Tracked and untracked paths that differ from the committed baseline. */
+export function changedPaths(repo) {
+  return git(repo, ["status", "--porcelain", "--untracked-files=all"])
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(3).replace(/^"|"$/g, ""))
+    .map((path) => (path.includes(" -> ") ? path.split(" -> ")[1] : path))
+    .filter((path) => !path.split("/").some((part) => part === "node_modules" || part === "__pycache__"));
+}
+
+/**
+ * Record the workspace as a git tree object without touching the
+ * repository's own index or history (a throwaway index file is used). The
+ * tree honors `.gitignore`. Checks read files from it with `git show
+ * <tree>:<path>`, so a multi-turn grader can see what each turn left.
+ */
+export function snapshotTree(repo) {
+  const dir = mkdtempSync(join(tmpdir(), "milim-eval-index-"));
+  try {
+    const env = { GIT_INDEX_FILE: join(dir, "index") };
+    git(repo, ["add", "-A"], { env });
+    return git(repo, ["write-tree"], { env }).trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /** The first Python 3 interpreter on PATH, or null. */
@@ -82,8 +156,35 @@ export function findPython() {
   return null;
 }
 
+/**
+ * The TypeScript compiler as `[executable, ...args]`, or null: `tsc` on
+ * PATH, else the `typescript` devDependency of the desktop or site app when
+ * its node_modules are installed. The suite adds no npm dependency of its own.
+ */
+export function findTsc() {
+  if (spawnSync("tsc", ["--version"], { encoding: "utf8" }).status === 0) return ["tsc"];
+  const root = dirname(EVALS);
+  for (const app of ["apps/desktop", "apps/site"]) {
+    const bin = join(root, app, "node_modules", "typescript", "bin", "tsc");
+    if (existsSync(bin)) return [process.execPath, bin];
+  }
+  return null;
+}
+
+/** Whether `cargo` runs on this machine. */
+export const hasCargo = () => spawnSync("cargo", ["--version"], { encoding: "utf8" }).status === 0;
+
 const REQUIREMENTS = {
   python3: () => (findPython() ? null : "python3 is not installed"),
+  cargo: () => (hasCargo() ? null : "cargo is not installed"),
+  // The fixture's tests run as .ts through Node's built-in type stripping
+  // (on by default since Node 22.18 and 23.6).
+  typescript: () =>
+    !process.features?.typescript
+      ? `Node ${process.version} does not strip TypeScript types by default`
+      : findTsc()
+        ? null
+        : "the TypeScript compiler (tsc) is not installed",
 };
 
 /** Why the task cannot run on this machine, or null when it can. */
@@ -110,18 +211,27 @@ export function scrubbedEnv(extra = {}) {
   return { ...env, ...extra };
 }
 
-/** Run the task check with cwd = repo; script args resolve against the task dir. */
-export function runCheck(task, repo) {
-  const [command, ...rest] = task.check.split(/\s+/).filter(Boolean);
+/** Run a task command (check or setup) with cwd = repo; script args resolve against the task dir. */
+function runTaskCommand(task, commandLine, repo, timeout, extraEnv = {}) {
+  const [command, ...rest] = commandLine.split(/\s+/).filter(Boolean);
   const argv = rest.map((arg) => (existsSync(join(task.dir, arg)) ? join(task.dir, arg) : arg));
   const executable = command === "node" ? process.execPath : command;
-  const started = Date.now();
-  const result = spawnSync(executable, argv, {
+  return spawnSync(executable, argv, {
     cwd: repo,
     encoding: "utf8",
-    timeout: CHECK_TIMEOUT_MS,
-    env: scrubbedEnv({ EVAL_REPO: repo, EVAL_TASK_DIR: task.dir }),
+    timeout,
+    env: scrubbedEnv({ EVAL_REPO: repo, EVAL_TASK_DIR: task.dir, ...extraEnv }),
   });
+}
+
+/**
+ * Run the task check with cwd = repo. `trajectory` is the path of the
+ * sample's trajectory file (turn answers, per-turn workspace snapshots,
+ * tool calls, approvals; see lib/trajectory.mjs), passed as EVAL_TRAJECTORY.
+ */
+export function runCheck(task, repo, { trajectory } = {}) {
+  const started = Date.now();
+  const result = runTaskCommand(task, task.check, repo, CHECK_TIMEOUT_MS, trajectory ? { EVAL_TRAJECTORY: trajectory } : {});
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   return {
     exit_code: result.status,

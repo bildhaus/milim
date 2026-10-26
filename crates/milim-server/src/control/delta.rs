@@ -36,6 +36,8 @@ pub(super) struct DeltaBuffer<'a> {
     emitted_first_delta: bool,
     last_flush: Option<Instant>,
     step_boundary: bool,
+    /// Where the current model step's text starts in `model_content`.
+    step_start: usize,
 }
 
 impl<'a> DeltaBuffer<'a> {
@@ -53,6 +55,7 @@ impl<'a> DeltaBuffer<'a> {
             emitted_first_delta: false,
             last_flush: None,
             step_boundary: false,
+            step_start: 0,
         }
     }
 
@@ -90,6 +93,7 @@ impl<'a> DeltaBuffer<'a> {
     /// from the previous step's last sentence.
     pub(super) fn mark_step_boundary(&mut self) {
         self.step_boundary = true;
+        self.step_start = self.model_content.len();
     }
 
     pub(super) fn push_reasoning(&mut self, text: &str) {
@@ -156,6 +160,7 @@ impl<'a> DeltaBuffer<'a> {
                 .len()
                 .saturating_sub(discarded_content_bytes),
         );
+        self.step_start = self.step_start.min(self.model_content.len());
         self.reasoning.truncate(
             self.reasoning
                 .len()
@@ -175,6 +180,14 @@ impl<'a> DeltaBuffer<'a> {
     /// turn replays to the model.
     pub(super) fn model_content(&self) -> &str {
         &self.model_content
+    }
+
+    /// The model text of the current step, since the last step boundary.
+    pub(super) fn step_text(&self) -> &str {
+        self.model_content
+            .get(self.step_start..)
+            .unwrap_or_default()
+            .trim_start()
     }
 
     /// The accumulated assistant text and reasoning.
@@ -206,7 +219,42 @@ const WORK_LOG_OUTCOME_CHARS: usize = 160;
 pub(super) const WORK_LOG_LATEST_CHARS: usize = 3_500;
 pub(super) const WORK_LOG_EARLIER_CHARS: usize = 1_000;
 /// Tools that change the file named by their `path` argument.
-const FILE_CHANGING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
+const FILE_CHANGING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file", "notebook_edit"];
+
+/// The files a call changes: its `path` argument for [`FILE_CHANGING_TOOLS`],
+/// or every file an `apply_patch` patch adds, updates, deletes, or moves to.
+fn changed_paths(tool: &str, arguments: &Value) -> Vec<String> {
+    if tool == "apply_patch" {
+        let patch = ["input", "patch"]
+            .iter()
+            .find_map(|key| arguments.get(*key).and_then(Value::as_str))
+            .unwrap_or_default();
+        let mut paths = Vec::new();
+        for line in patch.lines() {
+            let path = [
+                "*** Add File:",
+                "*** Update File:",
+                "*** Delete File:",
+                "*** Move to:",
+            ]
+            .iter()
+            .find_map(|marker| line.trim().strip_prefix(marker))
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+            if let Some(path) = path.filter(|path| !paths.iter().any(|known| known == path)) {
+                paths.push(path.to_string());
+            }
+        }
+        return paths;
+    }
+    FILE_CHANGING_TOOLS
+        .contains(&tool)
+        .then(|| arguments.get("path").and_then(Value::as_str))
+        .flatten()
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
 /// Arguments that identify what a call acted on, in preference order.
 const WORK_LOG_KEY_ARGUMENTS: &[&str] = &[
     "path",
@@ -237,7 +285,7 @@ struct WorkLogCall {
     call_id: Option<String>,
     tool: String,
     arguments: String,
-    changes_path: Option<String>,
+    changes_paths: Vec<String>,
     outcome: Option<String>,
 }
 
@@ -248,11 +296,7 @@ impl WorkLog {
             call_id: call_id.map(str::to_string),
             tool: tool.to_string(),
             arguments: key_arguments(&arguments),
-            changes_path: FILE_CHANGING_TOOLS
-                .contains(&tool)
-                .then(|| arguments.get("path").and_then(Value::as_str))
-                .flatten()
-                .map(str::to_string),
+            changes_paths: changed_paths(tool, &arguments),
             outcome: None,
         });
     }
@@ -273,14 +317,14 @@ impl WorkLog {
                     call_id: call_id.map(str::to_string),
                     tool: tool.to_string(),
                     arguments: String::new(),
-                    changes_path: None,
+                    changes_paths: Vec::new(),
                     outcome: None,
                 });
                 self.calls.last_mut().expect("just pushed")
             }
         };
         call.outcome = Some(outcome);
-        if let Some(path) = call.changes_path.as_ref().filter(|_| succeeded) {
+        for path in call.changes_paths.iter().filter(|_| succeeded) {
             if !self.files_changed.contains(path) {
                 self.files_changed.push(path.clone());
             }

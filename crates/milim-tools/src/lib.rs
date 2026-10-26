@@ -6,13 +6,16 @@
 //!   - to the agent loop for autonomous tool use.
 
 mod builtins;
+mod deferred;
+mod file_errors;
 mod fs;
 mod html;
+pub mod notebook;
 pub mod shell_command;
 mod todo;
 mod web_search;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -26,6 +29,8 @@ use serde_json::Value;
 use milim_core::{Error, Result};
 
 pub use builtins::{CurrentTimeTool, EchoTool, HttpFetchTool, RenderChartTool};
+pub use deferred::{CALL_TOOL_TOOL, TOOL_SEARCH_TOOL};
+pub use file_errors::{explain_file_error, name_distance, similar_in_directory, MAX_SIMILAR_PATHS};
 pub use fs::{
     atomic_write, fs_tools, read_file_result, read_text_range, resolve_workspace_path, ListDirTool,
     ReadFileTool, WriteFileTool, PATH_DESCRIPTION,
@@ -116,6 +121,14 @@ pub trait Tool: Send + Sync {
     fn scoped_for_run(&self) -> Option<Arc<dyn Tool>> {
         None
     }
+    /// A short note for the model at the start of a turn about state this
+    /// tool kept from earlier turns, such as processes still running.
+    fn turn_context(&self) -> Option<String> {
+        None
+    }
+    /// Drop any state this tool keeps for `thread_id` across runs (the
+    /// thread was deleted, archived, or moved to another workspace).
+    fn release_thread(&self, _thread_id: &str) {}
     /// Execute with the given arguments.
     async fn invoke(&self, args: Value) -> Result<Value>;
 }
@@ -187,6 +200,10 @@ pub struct ToolExecutionSpec {
     pub effect: ToolEffect,
     pub concurrency: ToolConcurrency,
     pub environment_policy: ProcessEnvironmentPolicy,
+    /// Left out of the model request's tool list; reached through
+    /// `tool_search` and `call_tool`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub deferred: bool,
 }
 
 pub struct ToolExecutionPipeline;
@@ -469,11 +486,20 @@ pub struct ToolSpec {
 }
 
 /// A name-indexed set of tools.
+///
+/// Some tools can be deferred: they stay callable by name but are left out
+/// of [`ToolRegistry::model_list`], the tool list a model request carries.
+/// While any tool is deferred the registry also holds `tool_search` and
+/// `call_tool`, which find and run them; every derived registry (scoped,
+/// filtered, read-only) keeps only the deferred tools it still contains.
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, Arc<dyn Tool>>,
     aliases: BTreeMap<String, String>,
     run_permits: Arc<tokio::sync::Semaphore>,
+    deferred: BTreeSet<String>,
+    /// Whether `tool_search` and `call_tool` are this registry's proxies.
+    proxied: bool,
 }
 
 impl Default for ToolRegistry {
@@ -482,6 +508,8 @@ impl Default for ToolRegistry {
             tools: BTreeMap::new(),
             aliases: BTreeMap::new(),
             run_permits: Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize)),
+            deferred: BTreeSet::new(),
+            proxied: false,
         }
     }
 }
@@ -567,6 +595,8 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
@@ -587,6 +617,8 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
@@ -606,6 +638,8 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: Arc::new(tokio::sync::Semaphore::new(RUN_TOOL_LIMIT as usize)),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
@@ -627,9 +661,29 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
+    }
+
+    /// Every tool's [`Tool::turn_context`] note, once each, in tool order.
+    pub fn turn_context(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        for note in self.tools.values().filter_map(|tool| tool.turn_context()) {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+        notes
+    }
+
+    /// Let every tool drop the state it keeps for `thread_id` across runs.
+    pub fn release_thread(&self, thread_id: &str) {
+        for tool in self.tools.values() {
+            tool.release_thread(thread_id);
+        }
     }
 
     /// Number of registered tools.
@@ -663,6 +717,8 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
@@ -683,6 +739,8 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
@@ -699,12 +757,14 @@ impl ToolRegistry {
                 .collect(),
             aliases: self.aliases.clone(),
             run_permits: self.run_permits.clone(),
+            deferred: self.deferred.clone(),
+            proxied: self.proxied,
         };
         registry.retain_valid_aliases();
         registry
     }
 
-    /// Specs for all tools, ordered by name.
+    /// Specs for all callable tools, deferred ones included, ordered by name.
     pub fn list(&self) -> Vec<ToolSpec> {
         self.tools
             .values()
@@ -715,6 +775,50 @@ impl ToolRegistry {
                 effect: t.effect(),
             })
             .collect()
+    }
+
+    /// Specs for the tools a model request lists: every tool except the
+    /// deferred ones, ordered by name.
+    pub fn model_list(&self) -> Vec<ToolSpec> {
+        self.list()
+            .into_iter()
+            .filter(|spec| !self.deferred.contains(&spec.name))
+            .collect()
+    }
+
+    /// Defer the named tools (aliases resolve to their tools; unknown names
+    /// are ignored) and add `tool_search` and `call_tool` to reach them.
+    pub fn defer<S: AsRef<str>>(&mut self, names: impl IntoIterator<Item = S>) -> &mut Self {
+        for name in names {
+            if let Some(canonical) = self.canonical_name(name.as_ref()) {
+                if !(self.proxied && is_proxy_name(&canonical)) {
+                    self.deferred.insert(canonical);
+                }
+            }
+        }
+        self.refresh_proxies();
+        self
+    }
+
+    /// Canonical names of the deferred tools, ordered by name.
+    pub fn deferred_names(&self) -> Vec<String> {
+        self.deferred.iter().cloned().collect()
+    }
+
+    /// Whether the tool `name` resolves to is deferred.
+    pub fn is_deferred(&self, name: &str) -> bool {
+        self.canonical_name(name)
+            .is_some_and(|canonical| self.deferred.contains(&canonical))
+    }
+
+    /// The tool a `call_tool` call runs, as `(name, encoded arguments)`.
+    /// `None` for any other call, or when this registry has no deferred
+    /// tools. The name is not checked: an unknown one fails like any other
+    /// unknown tool call.
+    pub fn resolve_proxy_call(&self, name: &str, arguments: &str) -> Option<(String, String)> {
+        (self.proxied && name == CALL_TOOL_TOOL)
+            .then(|| deferred::proxy_target(arguments))
+            .flatten()
     }
 
     /// Complete model and execution metadata for run-ledger composition.
@@ -735,6 +839,7 @@ impl ToolRegistry {
                         _ => ToolConcurrency::Exclusive,
                     },
                     environment_policy: tool.environment_policy(),
+                    deferred: self.deferred.contains(tool.name()),
                 }
             })
             .collect()
@@ -843,7 +948,38 @@ impl ToolRegistry {
     fn retain_valid_aliases(&mut self) {
         self.aliases
             .retain(|_, canonical| self.tools.contains_key(canonical));
+        self.refresh_proxies();
     }
+
+    /// Keep only deferred tools still registered, and rebuild the proxies
+    /// for them (or drop the proxies once nothing is deferred).
+    fn refresh_proxies(&mut self) {
+        self.deferred.retain(|name| self.tools.contains_key(name));
+        if self.proxied {
+            self.tools.remove(TOOL_SEARCH_TOOL);
+            self.tools.remove(CALL_TOOL_TOOL);
+            self.proxied = false;
+        }
+        if self.deferred.is_empty() {
+            return;
+        }
+        let tools = self
+            .deferred
+            .iter()
+            .filter_map(|name| self.tools.get(name).cloned())
+            .collect();
+        self.tools.insert(
+            TOOL_SEARCH_TOOL.to_string(),
+            Arc::new(deferred::ToolSearchTool { tools }),
+        );
+        self.tools
+            .insert(CALL_TOOL_TOOL.to_string(), Arc::new(deferred::CallToolTool));
+        self.proxied = true;
+    }
+}
+
+fn is_proxy_name(name: &str) -> bool {
+    name == TOOL_SEARCH_TOOL || name == CALL_TOOL_TOOL
 }
 
 #[cfg(test)]
@@ -1300,6 +1436,209 @@ mod tests {
             .await
             .map(|result| result.raw)
         }
+    }
+
+    struct DescribedTool {
+        name: &'static str,
+        description: &'static str,
+        effect: ToolEffect,
+    }
+
+    #[async_trait]
+    impl Tool for DescribedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            self.description
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object", "properties": {"id": {"type": "string"}}})
+        }
+        fn effect(&self) -> ToolEffect {
+            self.effect
+        }
+        async fn invoke(&self, _args: Value) -> Result<Value> {
+            Ok(json!({"ok": self.name}))
+        }
+    }
+
+    fn deferral_fixture() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for (name, description, effect) in [
+            ("read_file", "Read a file.", ToolEffect::ReadOnly),
+            (
+                "github__create_issue",
+                "Open a new issue in a repository.",
+                ToolEffect::Mutating,
+            ),
+            (
+                "github__list_issues",
+                "List open issues in a repository.",
+                ToolEffect::ReadOnly,
+            ),
+            (
+                "schedule_list",
+                "List scheduled automations.",
+                ToolEffect::ReadOnly,
+            ),
+        ] {
+            reg.register(Arc::new(DescribedTool {
+                name,
+                description,
+                effect,
+            }));
+        }
+        reg
+    }
+
+    fn names(specs: Vec<ToolSpec>) -> Vec<String> {
+        specs.into_iter().map(|spec| spec.name).collect()
+    }
+
+    #[test]
+    fn deferred_tools_stay_callable_but_leave_the_model_tool_list() {
+        let mut reg = deferral_fixture();
+        assert_eq!(names(reg.model_list()), names(reg.list()));
+        assert!(!reg.contains(TOOL_SEARCH_TOOL));
+
+        reg.defer([
+            "github__create_issue",
+            "github__list_issues",
+            "schedule_list",
+            "missing",
+        ]);
+        assert_eq!(
+            names(reg.model_list()),
+            ["call_tool", "read_file", "tool_search"]
+        );
+        assert_eq!(
+            reg.deferred_names(),
+            [
+                "github__create_issue",
+                "github__list_issues",
+                "schedule_list"
+            ]
+        );
+        assert!(reg.contains("schedule_list") && reg.is_deferred("schedule_list"));
+        assert!(!reg.is_deferred("read_file"));
+        let specs = reg.execution_specs();
+        let deferred = |name: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap()
+                .deferred
+        };
+        assert!(deferred("schedule_list") && !deferred("read_file") && !deferred("tool_search"));
+
+        // Derived registries keep deferral and rebuild the proxies for what
+        // they still contain; a read-only run cannot reach a mutating tool.
+        let read_only = reg.scoped_for_run().read_only();
+        assert_eq!(
+            read_only.deferred_names(),
+            ["github__list_issues", "schedule_list"]
+        );
+        assert!(read_only.contains(CALL_TOOL_TOOL));
+        assert!(!read_only.contains("github__create_issue"));
+        let none = reg.without(&[
+            "github__create_issue",
+            "github__list_issues",
+            "schedule_list",
+        ]);
+        assert!(none.deferred_names().is_empty());
+        assert_eq!(names(none.list()), ["read_file"]);
+    }
+
+    #[tokio::test]
+    async fn tool_search_ranks_deferred_tools_and_selects_exact_names() {
+        let mut reg = deferral_fixture();
+        reg.defer([
+            "github__create_issue",
+            "github__list_issues",
+            "schedule_list",
+        ]);
+
+        let found = reg
+            .call(TOOL_SEARCH_TOOL, json!({"query": "create github issue"}))
+            .await
+            .unwrap();
+        let found: Vec<&str> = found["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(found, ["github__create_issue", "github__list_issues"]);
+
+        let limited = reg
+            .call(TOOL_SEARCH_TOOL, json!({"query": "list", "max_results": 1}))
+            .await
+            .unwrap();
+        assert_eq!(limited["tools"].as_array().unwrap().len(), 1);
+
+        let selected = reg
+            .call(
+                TOOL_SEARCH_TOOL,
+                json!({"query": "select:schedule_list, read_file"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected["tools"][0]["name"], "schedule_list");
+        assert_eq!(selected["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(selected["not_found"], json!(["read_file"]));
+
+        let nothing = reg
+            .call(TOOL_SEARCH_TOOL, json!({"query": "kubernetes"}))
+            .await
+            .unwrap();
+        assert!(nothing["tools"].as_array().unwrap().is_empty());
+        assert!(nothing["hint"].is_string());
+
+        // The search follows the registry it belongs to.
+        let read_only = reg.read_only();
+        let found = read_only
+            .call(
+                TOOL_SEARCH_TOOL,
+                json!({"query": "select:github__create_issue"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found["not_found"], json!(["github__create_issue"]));
+    }
+
+    #[test]
+    fn call_tool_resolves_to_the_tool_it_names() {
+        let mut reg = deferral_fixture();
+        let call = r#"{"name":"schedule_list","arguments":{"id":"a"}}"#;
+        assert_eq!(reg.resolve_proxy_call(CALL_TOOL_TOOL, call), None);
+
+        reg.defer(["schedule_list"]);
+        assert_eq!(
+            reg.resolve_proxy_call(CALL_TOOL_TOOL, call),
+            Some(("schedule_list".into(), r#"{"id":"a"}"#.into()))
+        );
+        assert_eq!(
+            reg.resolve_proxy_call(
+                CALL_TOOL_TOOL,
+                r#"{"name":"schedule_list","arguments":"{\"id\":\"b\"}"}"#
+            ),
+            Some(("schedule_list".into(), r#"{"id":"b"}"#.into()))
+        );
+        assert_eq!(
+            reg.resolve_proxy_call(CALL_TOOL_TOOL, r#"{"name":"schedule_list"}"#),
+            Some(("schedule_list".into(), "{}".into()))
+        );
+        assert_eq!(reg.resolve_proxy_call("schedule_list", call), None);
+        assert_eq!(
+            reg.resolve_proxy_call(CALL_TOOL_TOOL, r#"{"arguments":{}}"#),
+            None
+        );
+        assert_eq!(
+            reg.resolve_proxy_call(CALL_TOOL_TOOL, r#"{"name":"call_tool"}"#),
+            None
+        );
+        assert_eq!(reg.resolve_proxy_call(CALL_TOOL_TOOL, "{not json"), None);
     }
 
     #[tokio::test]

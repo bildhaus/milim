@@ -939,9 +939,14 @@ fn sanitize_gemini_schema(schema: &mut Value) {
     }
 }
 
+/// Map an OpenAI-style `tool_choice`, in its string (`"auto"`, `"none"`,
+/// `"required"`) or object form, onto Gemini's `functionCallingConfig`.
 fn gemini_tool_config(choice: Option<&Value>) -> Option<Value> {
     let choice = choice?;
-    let function_config = match choice.get("type").and_then(Value::as_str) {
+    let mode = choice
+        .as_str()
+        .or_else(|| choice.get("type").and_then(Value::as_str));
+    let function_config = match mode {
         Some("function") => choice
             .get("function")
             .and_then(|f| f.get("name"))
@@ -952,7 +957,7 @@ fn gemini_tool_config(choice: Option<&Value>) -> Option<Value> {
                     "allowedFunctionNames": [name]
                 })
             })?,
-        Some("required") => json!({ "mode": "ANY" }),
+        Some("required" | "any") => json!({ "mode": "ANY" }),
         Some("none") => json!({ "mode": "NONE" }),
         Some("auto") | None => json!({ "mode": "AUTO" }),
         Some(other) => json!({ "mode": other.to_ascii_uppercase() }),
@@ -1019,6 +1024,30 @@ mod image_tests {
             value["file_data"]["file_uri"],
             "https://generativelanguage.googleapis.com/v1beta/files/abc123"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_config_tests {
+    use super::*;
+
+    #[test]
+    fn maps_string_and_object_tool_choices() {
+        let mode = |choice: Value| {
+            gemini_tool_config(Some(&choice)).map(|config| config["functionCallingConfig"].clone())
+        };
+        assert_eq!(mode(json!("none")), Some(json!({ "mode": "NONE" })));
+        assert_eq!(mode(json!("auto")), Some(json!({ "mode": "AUTO" })));
+        assert_eq!(mode(json!("required")), Some(json!({ "mode": "ANY" })));
+        assert_eq!(
+            mode(json!({ "type": "none" })),
+            Some(json!({ "mode": "NONE" }))
+        );
+        assert_eq!(
+            mode(json!({ "type": "function", "function": { "name": "read" } })),
+            Some(json!({ "mode": "ANY", "allowedFunctionNames": ["read"] }))
+        );
+        assert_eq!(gemini_tool_config(None), None);
     }
 }
 

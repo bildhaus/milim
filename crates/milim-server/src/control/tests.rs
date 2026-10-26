@@ -1179,6 +1179,7 @@ fn journal_fixture(mode: crate::privacy::PrivacyMode) -> (Arc<UserDataStore>, Ru
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
         sent_step: Default::default(),
+        request_index: Default::default(),
     };
     (store, journal)
 }
@@ -1417,6 +1418,7 @@ async fn run_ledger_scrubs_credentials_before_any_artifact_is_persisted() {
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
         sent_step: Default::default(),
+        request_index: Default::default(),
     };
     let sentinel = "sentinel-device-credential-9381";
     let request = CompletionRequest {
@@ -1685,6 +1687,7 @@ async fn privacy_block_rejection_leaves_no_request_ledger_rows() {
         thread_id: "thread-1".into(),
         run_id: "run-1".into(),
         sent_step: Default::default(),
+        request_index: Default::default(),
     };
     let request = CompletionRequest {
         model: "fixture".into(),
@@ -2920,6 +2923,8 @@ async fn inbox_steering_requires_the_exact_active_steer_capable_run() {
                 mailbox_origin: None,
                 mailbox_context: Vec::new(),
                 preview_runtime: None,
+                answers_decision: None,
+                unattended: false,
             })
             .unwrap(),
             agent_snapshot_json: None,
@@ -2997,6 +3002,7 @@ async fn inbox_steering_requires_the_exact_active_steer_capable_run() {
         thread_id: "thread-fixture".into(),
         run_id: "run-active".into(),
         sent_step: Default::default(),
+        request_index: Default::default(),
     };
     let mut messages = vec![ChatMessage::text("user", "active")];
     journal.prepare_model_step(1, &mut messages).await.unwrap();
@@ -3141,6 +3147,8 @@ async fn linked_threads_freeze_reads_and_support_durable_mailbox_waits() {
                 mailbox_origin: None,
                 mailbox_context: Vec::new(),
                 preview_runtime: None,
+                answers_decision: None,
+                unattended: false,
             },
             json!({
                 "name": "linked_thread_send",

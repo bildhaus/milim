@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use milim_core::{Error, Result};
 
+use crate::file_errors::{explain_file_error, similar_in_directory};
 use crate::{Tool, ToolConcurrency, ToolEffect};
 
 /// Lines `read_file` returns when the caller gives no `limit`, and at most.
@@ -187,10 +188,36 @@ const MAX_IMAGE_BYTES: u64 = 3 * 1024 * 1024;
 /// (which the agent loop attaches as an image message for vision models), or
 /// otherwise a text line range from [`read_text_range`].
 pub fn read_file_result(path: &Path, offset: u64, limit: usize) -> Result<Value> {
-    match read_image(path)? {
-        Some(image) => Ok(image),
-        None => read_text_range(path, offset, limit),
+    if let Some(image) = read_image(path)? {
+        return Ok(image);
     }
+    if crate::notebook::is_notebook(path) {
+        if let Some(notebook) = read_notebook(path, offset, limit)? {
+            return Ok(notebook);
+        }
+    }
+    read_text_range(path, offset, limit)
+}
+
+/// Largest notebook `read_file` renders cell by cell; larger ones are read
+/// as plain text.
+const MAX_NOTEBOOK_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A line range of a notebook's rendered cells, or `None` when the file is
+/// too large or not notebook JSON.
+fn read_notebook(path: &Path, offset: u64, limit: usize) -> Result<Option<Value>> {
+    if std::fs::metadata(path)?.len() > MAX_NOTEBOOK_BYTES {
+        return Ok(None);
+    }
+    let Ok(notebook) = serde_json::from_slice::<Value>(&std::fs::read(path)?) else {
+        return Ok(None);
+    };
+    let Some((text, cells)) = crate::notebook::render_notebook(&notebook) else {
+        return Ok(None);
+    };
+    let mut result = line_range(text.as_bytes(), offset, limit)?;
+    result["notebook_cells"] = json!(cells);
+    Ok(Some(result))
 }
 
 fn read_image(path: &Path) -> Result<Option<Value>> {
@@ -265,10 +292,13 @@ pub fn read_text_range(path: &Path, offset: u64, limit: usize) -> Result<Value> 
         )));
     }
     file.seek(SeekFrom::Start(0))?;
+    line_range(BufReader::new(file), offset, limit)
+}
 
+/// The `read_file` result for a line range of `reader`'s text.
+fn line_range(mut reader: impl BufRead, offset: u64, limit: usize) -> Result<Value> {
     let start = offset.max(1);
     let limit = limit.clamp(1, MAX_READ_LINES);
-    let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     let mut content = String::new();
     let mut rendered = 0_usize;
@@ -354,6 +384,23 @@ fn image_kind(head: &[u8]) -> Option<&'static str> {
 
 fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     resolve_workspace_path(root, rel)
+}
+
+/// [`explain_file_error`] suggesting similar names from the same directory,
+/// shown relative to `root`.
+fn explain(error: Error, root: &Path, path: &Path, shown: &str, tool: &str) -> Error {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let similar = similar_in_directory(path)
+        .iter()
+        .map(|similar| {
+            similar
+                .strip_prefix(&canonical)
+                .unwrap_or(similar)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>();
+    explain_file_error(error, path, shown, tool, &similar)
 }
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -460,6 +507,12 @@ impl ReadFileTool {
                 next - 1
             );
         }
+        if result.get("notebook_cells").is_some() {
+            let _ = writeln!(
+                out,
+                "(Rendered view of a Jupyter notebook: line numbers count this view, not the file's JSON.)"
+            );
+        }
         let cut = result.get("cut_lines").and_then(Value::as_u64).unwrap_or(0);
         if cut > 0 {
             let _ = writeln!(
@@ -477,7 +530,7 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read a UTF-8 text file from the workspace. Returns numbered lines, up to 1000 lines or about 40 KB per call; page through larger files with offset/limit. PNG, JPEG, GIF, and WebP files are returned as images."
+        "Read a UTF-8 text file from the workspace. Returns numbered lines, up to 1000 lines or about 40 KB per call; page through larger files with offset/limit. PNG, JPEG, GIF, and WebP files are returned as images, and Jupyter notebooks as their cells."
     }
     fn input_schema(&self) -> Value {
         Self::schema()
@@ -492,9 +545,11 @@ impl Tool for ReadFileTool {
         Self::render_for_model(result)
     }
     async fn invoke(&self, args: Value) -> Result<Value> {
-        let path = Self::resolve_read_path(&self.root, arg_str(&args, "path")?)?;
+        let rel = arg_str(&args, "path")?;
+        let path = Self::resolve_read_path(&self.root, rel)?;
         let (offset, limit) = Self::line_window(&args)?;
         read_file_result(&path, offset, limit)
+            .map_err(|error| explain(error, &self.root, &path, rel, "read_file"))
     }
 }
 
@@ -576,7 +631,8 @@ impl Tool for ListDirTool {
                 .as_str()
                 .ok_or_else(|| Error::InvalidRequest("path must be a string".into()))?,
         };
-        Self::list(&safe_join(&self.root, rel)?)
+        let dir = safe_join(&self.root, rel)?;
+        Self::list(&dir).map_err(|error| explain(error, &self.root, &dir, rel, "list_dir"))
     }
 }
 
@@ -640,12 +696,13 @@ impl Tool for WriteFileTool {
         let rel = arg_str(&args, "path")?;
         let path = safe_join(&self.root, rel)?;
         let content = arg_str(&args, "content")?;
+        let explained = |error| explain(error, &self.root, &path, rel, "write_file");
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|error| explained(error.into()))?;
         }
         let path = safe_join(&self.root, rel)?;
         let created = !path.exists();
-        atomic_write(&path, content.as_bytes())?;
+        atomic_write(&path, content.as_bytes()).map_err(explained)?;
         Ok(Self::result(rel, content, created))
     }
 }
@@ -868,6 +925,53 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("ICO image"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn notebooks_read_as_cells_and_missing_files_suggest_names() {
+        let root = tmp();
+        let notebook = json!({
+            "nbformat": 4, "nbformat_minor": 5, "metadata": {},
+            "cells": [
+                {"cell_type": "code", "id": "a1", "source": ["x = 1\n", "x"],
+                 "outputs": [{"output_type": "execute_result", "data": {"text/plain": "1"}}]}
+            ]
+        });
+        std::fs::write(root.join("nb.ipynb"), notebook.to_string()).unwrap();
+        std::fs::write(root.join("broken.ipynb"), "{ not json").unwrap();
+        let tools = fs_tools(root.clone());
+        let read = tools.iter().find(|t| t.name() == "read_file").unwrap();
+        let result = read.invoke(json!({"path":"nb.ipynb"})).await.unwrap();
+        assert_eq!(result["notebook_cells"], 1);
+        assert_eq!(
+            result["content"],
+            "Jupyter notebook: 1 cell.\n\n=== cell 0 (code, id a1) ===\nx = 1\nx\n--- output ---\n1"
+        );
+        let text = read.model_text(&result).unwrap();
+        assert!(text.ends_with("not the file's JSON.)"), "{text}");
+        let paged = read
+            .invoke(json!({"path":"nb.ipynb","offset":3,"limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(paged["content"], "=== cell 0 (code, id a1) ===");
+        let broken = read.invoke(json!({"path":"broken.ipynb"})).await.unwrap();
+        assert_eq!(broken["content"], "{ not json");
+
+        let missing = read
+            .invoke(json!({"path":"nb.ipnyb"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("nb.ipnyb does not exist"), "{missing}");
+        assert!(missing.contains("Similar paths: nb.ipynb"), "{missing}");
+        let list = tools.iter().find(|t| t.name() == "list_dir").unwrap();
+        let missing_dir = list
+            .invoke(json!({"path":"srcs"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(missing_dir.contains("srcs does not exist"), "{missing_dir}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

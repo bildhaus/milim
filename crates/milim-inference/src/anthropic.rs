@@ -2139,6 +2139,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_choice_none_is_sent_with_tools_on_every_model() {
+        let backend = AnthropicBackend::new("a", "http://tool-choice.test/v1", None);
+        for model in ["claude-opus-5-5", "claude-sonnet-4-6", "unknown-model"] {
+            let mut request = req(model, vec![ChatMessage::text("user", "summarize")]);
+            request.tools = vec![Tool {
+                kind: "function".to_string(),
+                function: ToolFunction {
+                    name: "read".to_string(),
+                    description: None,
+                    parameters: None,
+                },
+            }];
+            request.tool_choice = Some(json!("none"));
+            let body = backend.build_body(&request);
+            assert_eq!(body["tool_choice"], json!({ "type": "none" }), "{model}");
+            assert_eq!(body["tools"][0]["name"], "read");
+        }
+    }
+
+    #[test]
     fn forced_tool_choice_depends_on_model_and_thinking_mode() {
         let tool = Tool {
             kind: "function".to_string(),

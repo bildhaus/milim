@@ -23,6 +23,7 @@ import {
   type RunTrace,
   type SavedArtifactFile,
   type ToolApprovalMode,
+  type UserDecisionResponseV1,
   type WorkspaceCheckpoint,
   type WorkspaceGitActionResult,
 } from "../api";
@@ -58,6 +59,7 @@ import {
   type TurnReviewState,
 } from "./TurnChangesCard";
 import { BatonMenu } from "./HotSwapDialogs";
+import { UserDecisionCard } from "./UserDecisionCard";
 import type { ContextMenuItem } from "./ContextMenu";
 import {
   ArrowRight,
@@ -151,6 +153,12 @@ export type MessageRowActions = {
     artifactIndex: number,
   ) => ArtifactRevisionChoice | undefined;
   executePlan: (messageIndex: number, message: ChatMessage) => void;
+  /** Answer the decision `message` ended on; false when no turn started. */
+  answerUserDecision: (
+    message: ChatMessage,
+    response: UserDecisionResponseV1,
+    text: string,
+  ) => boolean;
   restoreWorkspaceCheckpoint: (
     checkpoint: WorkspaceCheckpoint,
   ) => Promise<void>;
@@ -575,6 +583,15 @@ function MessageRowView({
                       : m.run?.status === "running"
                         ? "unknown"
                         : "completed")
+                }
+              />
+            )}
+            {m.userDecision && (
+              <UserDecisionCard
+                decision={m.userDecision}
+                disabled={busy || activeMediaTargetPresent || assistantStreaming}
+                onAnswer={(response, text) =>
+                  actions?.answerUserDecision(m, response, text) ?? false
                 }
               />
             )}

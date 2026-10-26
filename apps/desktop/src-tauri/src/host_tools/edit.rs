@@ -12,14 +12,14 @@ use milim_core::{Error, Result};
 use milim_tools::{atomic_write, Tool, ToolEffect};
 
 use super::{
-    arg_str, attach_diagnostics, has_mixed_newlines, host_tool_scoping, lock_file, lsp,
-    newline_separator, optional_bool, path_schema, safe_join, HostCtx,
+    arg_str, attach_diagnostics, explain_io, has_mixed_newlines, host_tool_scoping, lock_file, lsp,
+    missing_path, newline_separator, optional_bool, path_schema, safe_join, HostCtx,
 };
 
 /// Unchanged lines shown around each change.
 const CONTEXT_LINES: usize = 3;
 /// Changes rendered in one reply; the rest are counted.
-const MAX_HUNKS: usize = 3;
+pub(super) const MAX_HUNKS: usize = 3;
 /// Average per-line similarity a region needs to be suggested.
 const MIN_SIMILARITY: f64 = 0.5;
 /// Bound on line comparisons spent looking for the closest region.
@@ -41,9 +41,15 @@ impl Tool for EditFileTool {
     }
     fn description(&self) -> &str {
         if self.ctx.full_access() {
-            "Replace text in an existing file anywhere on the host (relative paths use the working folder). Read the file with read_file in this run first. 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing. A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
+            "Replace text in an existing file anywhere on the host (relative paths use the working folder). Read the file with read_file first (a read in an earlier turn of the chat counts while the file is unchanged). 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing.\n\
+             Use it for targeted changes to existing files. Don't use it to create files or rewrite one entirely (use write_file), or for notebooks (use notebook_edit).\n\
+             A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change.\n\
+             Example: {\"path\": \"src/app.ts\", \"old\": \"const retries = 3;\", \"new\": \"const retries = 5;\"}"
         } else {
-            "Replace text in an existing file in the working folder. Read the file with read_file in this run first. 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing. A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change."
+            "Replace text in an existing file in the working folder. Read the file with read_file first (a read in an earlier turn of the chat counts while the file is unchanged). 'old' must match exactly once unless replace_all is set; for several changes to one file pass `edits` instead, applied in order and all-or-nothing.\n\
+             Use it for targeted changes to existing files. Don't use it to create files or rewrite one entirely (use write_file), or for notebooks (use notebook_edit).\n\
+             A match that differs only in trailing whitespace, line endings, or a uniform indentation shift is applied and reported; otherwise the error shows the closest region. Returns a diff of the change.\n\
+             Example: {\"path\": \"src/app.ts\", \"old\": \"const retries = 3;\", \"new\": \"const retries = 5;\"}"
         }
     }
     fn input_schema(&self) -> Value {
@@ -90,13 +96,23 @@ impl Tool for EditFileTool {
         let path = safe_join(&self.ctx.ws, rel)?;
         let edits = requested_edits(&args)?;
         let _lock = lock_file(&path).await;
-        if !path.is_file() {
+        if path.is_dir() {
             return Err(Error::InvalidRequest(format!(
-                "{rel} does not exist; use write_file to create a new file"
+                "{rel} is a directory, not a file"
+            )));
+        }
+        if !path.is_file() {
+            let message = match missing_path(&self.ctx, &path, rel, "edit_file") {
+                Error::InvalidRequest(message) => message,
+                other => other.to_string(),
+            };
+            return Err(Error::InvalidRequest(format!(
+                "{message} To create a new file, use write_file."
             )));
         }
         self.ctx.run.require_read(&path, rel, "edit_file")?;
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| explain_io(&self.ctx, error.into(), &path, rel, "edit_file"))?;
         let mut updated = content.clone();
         let (mut diff, mut added, mut removed, mut replaced) = (String::new(), 0, 0, 0);
         let mut normalized = false;
@@ -134,7 +150,8 @@ impl Tool for EditFileTool {
                 "file changed while edit_file was running; read it again".into(),
             ));
         }
-        atomic_write(&path, updated.as_bytes())?;
+        atomic_write(&path, updated.as_bytes())
+            .map_err(|error| explain_io(&self.ctx, error, &path, rel, "edit_file"))?;
         self.ctx.run.touch(&path);
         let mut notes = Vec::new();
         if normalized {
@@ -213,18 +230,18 @@ fn requested_edits(args: &Value) -> Result<Vec<RequestedEdit<'_>>> {
 
 /// Bytes `start..end` of the original content become `text`.
 #[derive(Debug)]
-struct Replacement {
-    start: usize,
-    end: usize,
-    text: String,
+pub(super) struct Replacement {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) text: String,
 }
 
 #[derive(Debug)]
-struct Plan {
+pub(super) struct Plan {
     /// Ascending and non-overlapping.
-    replacements: Vec<Replacement>,
+    pub(super) replacements: Vec<Replacement>,
     /// Whether the match needed whitespace normalization.
-    normalized: bool,
+    pub(super) normalized: bool,
 }
 
 /// `text` with every line ending rewritten to `newline`.
@@ -237,6 +254,15 @@ fn with_newlines(text: &str, newline: &str) -> String {
     }
 }
 
+/// `text` in `content`'s line-ending style (unchanged for mixed files).
+pub(super) fn in_file_style(content: &str, text: &str) -> String {
+    if has_mixed_newlines(content) {
+        text.to_string()
+    } else {
+        with_newlines(text, newline_separator(content))
+    }
+}
+
 /// Find where `old` applies: verbatim, then in the file's line-ending style,
 /// then line by line ignoring leading and trailing whitespace.
 fn plan_edit(
@@ -245,15 +271,26 @@ fn plan_edit(
     new: &str,
     replace_all: bool,
 ) -> std::result::Result<Plan, String> {
-    let mixed = has_mixed_newlines(content);
-    let newline = newline_separator(content);
-    let in_file_style = |text: &str| {
-        if mixed {
-            text.to_string()
-        } else {
-            with_newlines(text, newline)
-        }
-    };
+    find_plan(content, old, new, replace_all, false)
+}
+
+/// Whether bytes `start..end` of `content` cover whole lines.
+fn at_line_bounds(content: &str, start: usize, end: usize) -> bool {
+    let bytes = content.as_bytes();
+    (start == 0 || bytes[start - 1] == b'\n')
+        && (end == bytes.len() || bytes[end - 1] == b'\n' || matches!(bytes[end], b'\n' | b'\r'))
+}
+
+/// [`plan_edit`], optionally accepting only verbatim matches that cover
+/// whole lines (the whitespace-tolerant match always does).
+fn find_plan(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+    whole_lines: bool,
+) -> std::result::Result<Plan, String> {
+    let in_file_style = |text: &str| in_file_style(content, text);
     let text = in_file_style(new);
     let converted = in_file_style(old);
     let candidates = if converted == old {
@@ -265,6 +302,9 @@ fn plan_edit(
         let starts: Vec<usize> = content
             .match_indices(candidate)
             .map(|(start, _)| start)
+            .filter(|start| {
+                !whole_lines || at_line_bounds(content, *start, *start + candidate.len())
+            })
             .collect();
         if starts.is_empty() {
             continue;
@@ -546,7 +586,40 @@ fn closest_window(
     (best.0 >= MIN_SIMILARITY).then_some((best.1, width))
 }
 
-fn not_found(content: &str, old: &str) -> String {
+/// Where the whole lines `old` apply in `content` at or after byte `from`
+/// (a line start), replaced by `new`: the first match, or the last one when
+/// `last` is set. Matching is `edit_file`'s, so line-ending, trailing
+/// whitespace, and uniform indentation differences are tolerated. Returns
+/// the replacement and whether it needed whitespace normalization; `None`
+/// means no match ([`not_found`] explains the closest region).
+pub(super) fn locate_lines(
+    content: &str,
+    from: usize,
+    old: &str,
+    new: &str,
+    last: bool,
+) -> Option<(Replacement, bool)> {
+    let plan = find_plan(&content[from..], old, new, true, true).ok()?;
+    let normalized = plan.normalized;
+    let mut replacements = plan.replacements;
+    let found = if last {
+        replacements.pop()
+    } else {
+        replacements.into_iter().next()
+    }?;
+    Some((
+        Replacement {
+            start: found.start + from,
+            end: found.end + from,
+            text: found.text,
+        },
+        normalized,
+    ))
+}
+
+/// Why `old` does not apply to `content`: the most similar region with line
+/// numbers, or advice to read the file again.
+pub(super) fn not_found(content: &str, old: &str) -> String {
     let spans = line_spans(content);
     let (old_lines, _) = pattern_lines(old);
     match closest_window(content, &spans, &old_lines) {
@@ -565,7 +638,7 @@ fn not_found(content: &str, old: &str) -> String {
     }
 }
 
-fn apply(content: &str, plan: &Plan) -> String {
+pub(super) fn apply(content: &str, plan: &Plan) -> String {
     let mut out = String::with_capacity(content.len());
     let mut copied = 0;
     for replacement in &plan.replacements {
@@ -590,7 +663,7 @@ fn block_lines(block: &str) -> Vec<&str> {
 
 /// A unified-diff snippet of the first `show` replacements, plus the total
 /// added and removed line counts.
-fn render_diff(content: &str, plan: &Plan, show: usize) -> (String, usize, usize) {
+pub(super) fn render_diff(content: &str, plan: &Plan, show: usize) -> (String, usize, usize) {
     let spans = line_spans(content);
     let line_of = |byte: usize| {
         spans

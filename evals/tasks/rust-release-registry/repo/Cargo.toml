@@ -1,0 +1,10 @@
+[package]
+name = "release-registry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+# A standalone crate, not part of any enclosing workspace.
+[workspace]

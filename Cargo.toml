@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.76"
+version = "0.2.77"
 edition = "2021"
 license = "MIT"
 authors = ["Omer Shatzberg <omershatzberg@gmail.com>"]
@@ -52,7 +52,7 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
 sha2 = "0.10"
-zstd = "0.13"
+zstd = "0.14.3"
 
 # internal crates
 milim-core = { path = "crates/milim-core" }

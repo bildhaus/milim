@@ -8,6 +8,7 @@
 mod context;
 mod intercept;
 mod limits;
+mod repeats;
 mod retry;
 mod store;
 mod threads;
@@ -90,6 +91,11 @@ pub struct AgentRunConfig {
     pub approval_timeout: Option<Duration>,
     /// User hooks around turns, tool calls, and the final answer.
     pub interceptor: Option<Arc<dyn ToolInterceptor>>,
+    /// When a run limit stops the loop between steps, make one more request
+    /// that asks for a final report without tools, and end with it as the
+    /// answer. For delegated runs (Workers), whose report is their answer;
+    /// an interactive run stops with the limit notice instead.
+    pub wrap_up_on_limit: bool,
 }
 
 impl Default for AgentRunConfig {
@@ -106,6 +112,7 @@ impl Default for AgentRunConfig {
             context_window_tokens: None,
             approval_timeout: Some(DEFAULT_APPROVAL_TIMEOUT),
             interceptor: None,
+            wrap_up_on_limit: false,
         }
     }
 }
@@ -139,6 +146,10 @@ pub struct ContextCompaction {
     /// Why summarizing older turns failed; tool results were elided instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary_error: Option<String>,
+    /// Where the user request that started the run sits in the compacted
+    /// messages. Summaries move it; everything after it is the run's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_index: Option<usize>,
 }
 
 #[allow(
@@ -951,6 +962,15 @@ pub enum AgentEvent {
         workers: Vec<Worker>,
         message: String,
     },
+    /// A tool (`ask_user`, `exit_plan_mode`) handed the user a structured
+    /// decision. The run ends once the step's tool results are recorded; the
+    /// answer arrives as the thread's next user turn. Only a step's first
+    /// decision is emitted.
+    UserDecisionRequested {
+        call_id: Option<String>,
+        name: String,
+        decision: Value,
+    },
     /// The final assistant answer.
     Final { content: String },
     /// Terminal event with the turn count and whether the configured iteration
@@ -1090,6 +1110,7 @@ fn agent_loop<'a>(
         let mut pending_notes: Vec<ChatMessage> = Vec::new();
         let mut length_recoveries = 0;
         let mut stop_continuations = 0;
+        let mut repeats = repeats::RepeatTracker::default();
 
         if let Some(hook) = config.step_hook.as_ref() {
             if let Err(e) = hook.commit_tool_catalog(&tools.execution_specs()).await {
@@ -1117,6 +1138,25 @@ fn agent_loop<'a>(
         loop {
             let step = iteration + 1;
             if let Some(reason) = budget.reason() {
+                if config.wrap_up_on_limit {
+                    let req = wrap_up_request(&model, &messages, &core_tools, &config.sampling, reasoning_effort, &reason);
+                    let committed = match config.step_hook.as_ref() {
+                        Some(hook) => hook.commit_model_request(iteration + 1, &req).await.is_ok(),
+                        None => true,
+                    };
+                    if let (true, Ok(out)) = (committed, complete_with_retry(service, req, retry_backoff).await) {
+                        add_usage(&mut total_usage, out.usage);
+                        yield LoopEvent::Event(AgentEvent::UsageDelta { usage: out.usage });
+                        if let Some(report) = summary_text(&out) {
+                            if let Some(hook) = config.step_hook.as_ref() {
+                                let _ = hook.commit_model_response(iteration + 1, &report, "", &[], "stop", out.usage, None).await;
+                            }
+                            yield LoopEvent::Answer(ChatMessage::text("assistant", report));
+                            yield LoopEvent::Event(AgentEvent::Done { iterations: iteration + 1, stopped_at_limit: true, usage: total_usage });
+                            return;
+                        }
+                    }
+                }
                 yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
                 return;
             }
@@ -1168,7 +1208,8 @@ fn agent_loop<'a>(
                         add_usage(&mut total_usage, usage);
                         yield LoopEvent::Event(AgentEvent::UsageDelta { usage });
                     }
-                    let compaction = compacted.record();
+                    let mut compaction = compacted.record();
+                    compaction.request_index = anchor;
                     if let Some(hook) = config.step_hook.as_ref() {
                         if let Err(e) = hook.commit_context_compaction(step, &compaction).await {
                             yield LoopEvent::failed(e);
@@ -1445,6 +1486,27 @@ fn agent_loop<'a>(
                 return;
             }
             if let Some(reason) = budget.reason().or_else(|| (iteration >= max_iterations).then(|| limit_message_text(max_iterations))) {
+                // The step's tool calls never run; the report covers the
+                // work before them.
+                if config.wrap_up_on_limit {
+                    let req = wrap_up_request(&model, &messages, &core_tools, &config.sampling, reasoning_effort, &reason);
+                    let committed = match config.step_hook.as_ref() {
+                        Some(hook) => hook.commit_model_request(iteration + 1, &req).await.is_ok(),
+                        None => true,
+                    };
+                    if let (true, Ok(out)) = (committed, complete_with_retry(service, req, retry_backoff).await) {
+                        add_usage(&mut total_usage, out.usage);
+                        yield LoopEvent::Event(AgentEvent::UsageDelta { usage: out.usage });
+                        if let Some(report) = summary_text(&out) {
+                            if let Some(hook) = config.step_hook.as_ref() {
+                                let _ = hook.commit_model_response(iteration + 1, &report, "", &[], "stop", out.usage, None).await;
+                            }
+                            yield LoopEvent::Answer(ChatMessage::text("assistant", report));
+                            yield LoopEvent::Event(AgentEvent::Done { iterations: iteration + 1, stopped_at_limit: true, usage: total_usage });
+                            return;
+                        }
+                    }
+                }
                 yield LoopEvent::Limited { reason, iterations: iteration, usage: total_usage };
                 return;
             }
@@ -1471,10 +1533,12 @@ fn agent_loop<'a>(
             });
 
             // Announce every call, and every approval the step needs, before
-            // waiting on any of them.
+            // waiting on any of them. A `call_tool` call is announced,
+            // approved, hooked, and run as the deferred tool it names; the
+            // assistant message above keeps the call as the model made it.
             let mut prepared_calls = Vec::new();
             let mut approvals = Vec::new();
-            for call in calls {
+            for call in calls.into_iter().map(|call| resolve_proxy_call(tools, call)) {
                 yield LoopEvent::Event(AgentEvent::ToolCall {
                     call_id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -1489,10 +1553,12 @@ fn agent_loop<'a>(
                     &call.function.arguments,
                     truncated,
                 );
-                let mut denial: Option<String> = None;
+                // An identical call denied earlier in this run is answered
+                // with that denial, without hooks or another approval.
+                let mut denial = repeats.prior_denial(&call).map(str::to_string);
                 let mut hook_approved = false;
-                if let (Some(interceptor), Ok(args), None) =
-                    (config.interceptor.as_ref(), &arguments, budget.reason())
+                if let (Some(interceptor), Ok(args), None, None) =
+                    (config.interceptor.as_ref(), &arguments, budget.reason(), &denial)
                 {
                     let other_names = tools.other_names(&call.function.name);
                     let interception = interceptor
@@ -1622,6 +1688,7 @@ fn agent_loop<'a>(
                 output_scope.as_deref(),
             );
             let mut pending_images: Vec<ChatMessage> = Vec::new();
+            let mut awaiting_user = false;
             for ((call, executed, duration_ms), mut model_content) in executions.into_iter().zip(model_contents) {
                 let visible = executed.visible;
                 if let (Some(interceptor), true) = (config.interceptor.as_ref(), executed.attempted) {
@@ -1634,6 +1701,9 @@ fn agent_loop<'a>(
                         yield LoopEvent::Event(AgentEvent::Hook(activity));
                     }
                     model_content = intercept::with_feedback(model_content, &after.feedback);
+                }
+                if let Some(note) = repeats.observe(tools, &call, &visible) {
+                    model_content = repeats::with_note(model_content, &note);
                 }
                 if let Some(hook) = config.step_hook.as_ref() {
                     if let Err(e) = hook
@@ -1682,6 +1752,14 @@ fn agent_loop<'a>(
                         return;
                     }
                 }
+                if let Some(decision) = executed.user_decision.filter(|_| !awaiting_user) {
+                    awaiting_user = true;
+                    yield LoopEvent::Event(AgentEvent::UserDecisionRequested {
+                        call_id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        decision,
+                    });
+                }
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
                     content: Some(Content::Text(model_content)),
@@ -1698,11 +1776,29 @@ fn agent_loop<'a>(
             // Image results follow the tool replies as user messages (keeps
             // each tool_call_id answered before any other role, per OpenAI).
             messages.extend(pending_images);
+            // A decision for the user ends the run with every result of
+            // its step recorded; the answer is the thread's next turn.
+            if awaiting_user {
+                yield LoopEvent::Event(AgentEvent::Done { iterations: iteration, stopped_at_limit: false, usage: total_usage });
+                return;
+            }
             if recover_length {
                 pending_notes.push(ChatMessage::text("user", LENGTH_RECOVERY_NOTE));
             }
         }
     }
+}
+
+/// The call a `call_tool` call stands for: the deferred tool it names, with
+/// that tool's arguments. Any other call is returned unchanged.
+fn resolve_proxy_call(tools: &ToolRegistry, mut call: ToolCall) -> ToolCall {
+    if let Some((name, arguments)) =
+        tools.resolve_proxy_call(&call.function.name, &call.function.arguments)
+    {
+        call.function.name = name;
+        call.function.arguments = arguments;
+    }
+    call
 }
 
 fn intercepted_call<'a>(
@@ -1732,6 +1828,7 @@ fn denied_tool_call(tools: &ToolRegistry, name: &str, reason: Option<&str>) -> E
         memory_event: None,
         child_event: None,
         worker_event: None,
+        user_decision: None,
         attempted: false,
     }
 }
@@ -1746,9 +1843,19 @@ fn prepare_tool_arguments(
     truncated: bool,
 ) -> std::result::Result<Value, String> {
     if !tools.contains(name) {
-        let available = tools.names();
+        let available: Vec<String> = tools
+            .model_list()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
         return Err(if available.is_empty() {
             format!("Unknown tool `{name}`. No tools are available in this run.")
+        } else if tools.contains(milim_tools::TOOL_SEARCH_TOOL) {
+            format!(
+                "Unknown tool `{name}`. Available tools: {}. Find deferred tools with `{}`.",
+                available.join(", "),
+                milim_tools::TOOL_SEARCH_TOOL
+            )
         } else {
             format!(
                 "Unknown tool `{name}`. Available tools: {}.",
@@ -1805,6 +1912,7 @@ impl Compacted {
                 .window
                 .map_or(0, |tokens| u32::try_from(tokens).unwrap_or(u32::MAX)),
             summary_error: self.summary_error.clone(),
+            request_index: None,
         }
     }
 }
@@ -1842,6 +1950,11 @@ async fn compact_context(
     } else {
         context::RETAIN
     };
+    // Eliding only shrinks, so a summary can follow only when the prompt
+    // was over the summary threshold before it. The messages as last sent
+    // are kept for a summary request that reuses the cached prompt prefix.
+    let sent = (may_summarize && (force || over(before, context::SUMMARIZE_THRESHOLD)))
+        .then(|| messages.clone());
     let mut elided = context::elide_old_tool_results(messages, retain.tool_results);
     let mut after = window.estimate(messages, tools);
     let mut summarized = 0;
@@ -1849,8 +1962,14 @@ async fn compact_context(
     let mut summary_error = None;
     if may_summarize && (force || over(after, context::SUMMARIZE_THRESHOLD)) {
         if let Some(plan) = context::summary_span(messages, *anchor, retain.turns) {
+            let prefix = summary_prefix(sent.as_deref(), messages, &plan, tools, window);
             let transcript = context::summary_transcript(messages, &plan, tokens);
-            match summarize_messages(service, model, &transcript, sampling, backoff).await {
+            let source = SummarySource {
+                prefix,
+                tools,
+                transcript: &transcript,
+            };
+            match summarize_messages(service, model, source, sampling, backoff).await {
                 Ok((summary, summary_usage)) => {
                     usage = Some(summary_usage);
                     summarized = context::apply_summary(messages, &plan, anchor, &summary);
@@ -1874,22 +1993,92 @@ async fn compact_context(
     })
 }
 
-/// Condense a transcript of older conversation with one request to the
-/// run's own backend, under the same retry policy as model steps.
+/// What a summary request can be built from.
+struct SummarySource<'a> {
+    /// The run's own messages up to the end of the summarized span, then
+    /// [`context::summary_request_message`]. `None` when that would not fit
+    /// the context window.
+    prefix: Option<Vec<ChatMessage>>,
+    /// The run's tools, sent with the prefix so the provider's cached prompt
+    /// prefix (tools, system, messages) still matches.
+    tools: &'a [Tool],
+    /// The span rendered as plain text, for a standalone request.
+    transcript: &'a str,
+}
+
+/// The run's message prefix ending at the summarized span, followed by the
+/// summary request. It prefers the messages as last sent, before this
+/// pass elided older tool results, since those match the provider's cached
+/// prefix; then the elided messages. `None` when neither fits under
+/// [`context::SUMMARIZE_THRESHOLD`] of the window, the share normal steps
+/// leave for output.
+fn summary_prefix(
+    sent: Option<&[ChatMessage]>,
+    compacted: &[ChatMessage],
+    plan: &context::SummaryPlan,
+    tools: &[Tool],
+    window: &context::ContextWindow,
+) -> Option<Vec<ChatMessage>> {
+    let limit = window
+        .tokens()
+        .map(|tokens| (tokens as f64 * context::SUMMARIZE_THRESHOLD) as usize);
+    sent.into_iter().chain([compacted]).find_map(|messages| {
+        let mut prefix = messages.get(..plan.end())?.to_vec();
+        prefix.push(context::summary_request_message());
+        limit
+            .is_none_or(|limit| window.estimate(&prefix, tools) <= limit)
+            .then_some(prefix)
+    })
+}
+
+/// Condense older conversation with one request to the run's own backend,
+/// under the same retry policy as model steps. The request reuses the run's
+/// message prefix, tools, and tool choice, so the provider's cached prefix
+/// matches (Anthropic drops cached messages when `tool_choice` changes); the
+/// request message asks for text only, and a reply that calls a tool anyway
+/// counts as no summary. When that prefix does not fit, the reply has no
+/// summary, or the provider rejects it with an error retries cannot fix, a
+/// standalone request with the rendered transcript is sent instead, and the
+/// usage of both requests is reported.
 async fn summarize_messages(
     service: &dyn ModelService,
     model: &str,
-    transcript: &str,
+    source: SummarySource<'_>,
     sampling: &SamplingParams,
     backoff: Duration,
 ) -> Result<(String, Usage)> {
+    let mut spent = Usage::default();
+    if let Some(prefix) = source.prefix {
+        let req = CompletionRequest {
+            model: model.to_string(),
+            messages: prefix,
+            tools: source.tools.to_vec(),
+            tool_choice: None,
+            response_format: None,
+            prompt: None,
+            suffix: None,
+            sampling: summary_sampling(sampling),
+            reasoning_effort: None,
+        };
+        match complete_with_retry(service, req, backoff).await {
+            Ok(out) => match summary_text(&out) {
+                Some(summary) => return Ok((summary, out.usage)),
+                None => spent = out.usage,
+            },
+            Err(error) if retry::retryable(&error.to_string()).is_none() => {}
+            Err(error) => return Err(error),
+        }
+    }
     let req = CompletionRequest {
         model: model.to_string(),
         messages: vec![
             ChatMessage::text("system", context::SUMMARY_INSTRUCTIONS),
             ChatMessage::text(
                 "user",
-                format!("Summarize this earlier part of the session:\n\n{transcript}"),
+                format!(
+                    "Summarize this earlier part of the session:\n\n{}",
+                    source.transcript
+                ),
             ),
         ],
         tools: Vec::new(),
@@ -1901,11 +2090,28 @@ async fn summarize_messages(
         reasoning_effort: None,
     };
     let out = complete_with_retry(service, req, backoff).await?;
-    let summary = out.message.text_content();
-    if summary.trim().is_empty() {
-        return Err(Error::Inference("context summary was empty".into()));
+    let summary =
+        summary_text(&out).ok_or_else(|| Error::Inference("context summary was empty".into()))?;
+    let mut usage = out.usage;
+    if spent != Usage::default() {
+        add_usage(&mut usage, spent);
     }
-    Ok((summary, out.usage))
+    Ok((summary, usage))
+}
+
+/// The reply's text, when it has some and calls no tool (a summary or a
+/// wrap-up report).
+fn summary_text(out: &milim_inference::CompletionOutput) -> Option<String> {
+    if out
+        .message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        return None;
+    }
+    let summary = out.message.text_content();
+    (!summary.trim().is_empty()).then_some(summary)
 }
 
 /// Output floor for the summary request when the run caps output tokens.
@@ -1921,6 +2127,38 @@ fn summary_sampling(run: &SamplingParams) -> SamplingParams {
             .map(|max_tokens| max_tokens.max(SUMMARY_MIN_OUTPUT_TOKENS)),
         prompt_cache_key: run.prompt_cache_key.clone(),
         ..SamplingParams::default()
+    }
+}
+
+/// Asked of a delegated run after a run limit (see
+/// [`AgentRunConfig::wrap_up_on_limit`]); follows the limit's reason.
+const WRAP_UP_NOTE: &str = "Stop working now and write your final report for whoever delegated this task: what you found or changed (with file paths), what you could not finish, and what remains. Reply with the report only; do not call tools.";
+
+/// The wrap-up request: the run's messages, tools, and sampling, so the
+/// provider's cached prefix still matches, then [`WRAP_UP_NOTE`].
+fn wrap_up_request(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[Tool],
+    sampling: &SamplingParams,
+    reasoning_effort: Option<ReasoningEffort>,
+    reason: &str,
+) -> CompletionRequest {
+    let mut messages = messages.to_vec();
+    messages.push(ChatMessage::text(
+        "user",
+        format!("{reason} {WRAP_UP_NOTE}"),
+    ));
+    CompletionRequest {
+        model: model.to_string(),
+        messages,
+        tools: tools.to_vec(),
+        tool_choice: None,
+        response_format: None,
+        prompt: None,
+        suffix: None,
+        sampling: sampling.clone(),
+        reasoning_effort,
     }
 }
 
@@ -2026,6 +2264,16 @@ fn worker_run_event(result: &Value) -> Option<AgentEvent> {
     }
 }
 
+/// Take the decision a tool handed the user out of its visible result, so a
+/// long plan is recorded once, on the decision event.
+fn split_user_decision(mut result: Value) -> (Value, Option<Value>) {
+    let decision = result
+        .as_object_mut()
+        .and_then(|object| object.remove("user_decision_notice"))
+        .filter(Value::is_object);
+    (result, decision)
+}
+
 /// Split a tool result into (visible_json, optional image data-URI).
 ///
 /// A tool may return an `image` object `{ "mime": ..., "data": <base64> }`
@@ -2061,6 +2309,8 @@ struct ExecutedToolResult {
     memory_event: Option<AgentEvent>,
     child_event: Option<AgentEvent>,
     worker_event: Option<AgentEvent>,
+    /// The decision a tool handed the user (`user_decision_notice`).
+    user_decision: Option<Value>,
     /// Whether execution was attempted (false for denied or skipped calls).
     attempted: bool,
 }
@@ -2071,6 +2321,7 @@ async fn execute_tool_call(tools: &ToolRegistry, name: &str, args: Value) -> Exe
         Err(error) => return tool_error_result(tools, name, error.to_string()),
     };
     let (visible, image_uri) = split_tool_image(invoked.result);
+    let (visible, user_decision) = split_user_decision(visible);
     let memory_event = memory_registered_event(&visible);
     let child_event = child_thread_event(&visible);
     let worker_event = worker_run_event(&visible);
@@ -2083,6 +2334,7 @@ async fn execute_tool_call(tools: &ToolRegistry, name: &str, args: Value) -> Exe
         memory_event,
         child_event,
         worker_event,
+        user_decision,
         attempted: true,
     }
 }
@@ -2104,6 +2356,7 @@ fn tool_error_result(tools: &ToolRegistry, name: &str, message: String) -> Execu
         memory_event: None,
         child_event: None,
         worker_event: None,
+        user_decision: None,
         attempted: true,
     }
 }
@@ -2168,9 +2421,11 @@ fn image_user_message(tool: &str, data_uri: String) -> ChatMessage {
 }
 
 /// Map the registry's tools into OpenAI `Tool` definitions for the request.
+/// Deferred tools stay out, so the list (and the provider's prompt cache)
+/// does not grow with them.
 fn tools_to_core(tools: &ToolRegistry) -> Vec<Tool> {
     tools
-        .list()
+        .model_list()
         .into_iter()
         .map(|s| Tool {
             kind: "function".to_string(),
@@ -2946,6 +3201,7 @@ mod tests {
                 AgentEvent::WorkerRunStarted { .. } => "worker_run_started",
                 AgentEvent::WorkerRunDone { .. } => "worker_run_done",
                 AgentEvent::WorkerRunError { .. } => "worker_run_error",
+                AgentEvent::UserDecisionRequested { .. } => "user_decision_requested",
                 AgentEvent::Final { .. } => "final",
                 AgentEvent::Done { .. } => "done",
                 AgentEvent::Error { .. } => "error",
@@ -3407,6 +3663,98 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(WriteTool { runs: runs.clone() }));
         registry
+    }
+
+    struct DecisionTool;
+
+    #[async_trait]
+    impl milim_tools::Tool for DecisionTool {
+        fn name(&self) -> &str {
+            "ask_user"
+        }
+
+        fn description(&self) -> &str {
+            "decision fixture"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+
+        fn effect(&self) -> ToolEffect {
+            ToolEffect::ReadOnly
+        }
+
+        fn model_text(&self, _result: &Value) -> Option<String> {
+            Some("Waiting for the user's answer.".into())
+        }
+
+        async fn invoke(&self, args: Value) -> Result<Value> {
+            Ok(json!({
+                "status": "waiting_for_user",
+                "user_decision_notice": { "id": args["id"], "kind": "ask_user" },
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_user_decision_ends_the_run_after_the_step_records_every_result() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DecisionTool));
+        registry.register(Arc::new(DelayTool {
+            name: "read",
+            delay: Duration::ZERO,
+        }));
+        let backend = ScriptedBackend::new(vec![tool_step(
+            &[
+                ("call-1", "ask_user", r#"{"id":"first"}"#),
+                ("call-2", "ask_user", r#"{"id":"second"}"#),
+                ("call-3", "read", "{}"),
+            ],
+            "tool_calls",
+        )]);
+        let hook = Arc::new(RecordingHook::default());
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "pick one")],
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let decisions = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::UserDecisionRequested {
+                    call_id, decision, ..
+                } => Some((call_id.clone(), decision.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1, "only the step's first decision");
+        assert_eq!(decisions[0].0.as_deref(), Some("call-1"));
+        assert_eq!(decisions[0].1["id"], "first");
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 3, "every call of the step is answered");
+        assert!(results[0].get("user_decision_notice").is_none());
+        assert_eq!(results[0]["status"], "waiting_for_user");
+        assert_eq!(
+            hook.tool_contents.lock().unwrap()[0],
+            "Waiting for the user's answer."
+        );
+        assert_eq!(backend.requests().len(), 1, "no model step after it");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stopped_at_limit: false,
+                ..
+            })
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Final { .. })));
     }
 
     #[tokio::test]
@@ -3949,15 +4297,33 @@ mod tests {
         .await;
         let requests = backend.requests();
         assert_eq!(requests.len(), 2);
-        let summary_request = &requests[0];
-        assert!(summary_request.tools.is_empty());
+        // The summary request is the run's own prefix up to the summarized
+        // span (here with this pass's elisions, since the messages as sent
+        // do not fit), then the request to summarize it.
+        let summary_request = &requests[0].messages;
+        let original = long_conversation(16);
+        assert_eq!(summary_request.len(), 2 + 24 + 1);
+        for (sent, original) in summary_request[..26].iter().zip(&original) {
+            assert_eq!(sent.role, original.role);
+            assert_eq!(
+                serde_json::to_string(&sent.tool_calls).unwrap(),
+                serde_json::to_string(&original.tool_calls).unwrap()
+            );
+        }
         assert_eq!(
-            summary_request.messages[0].text_content(),
-            context::SUMMARY_INSTRUCTIONS
+            summary_request[3].text_content(),
+            context::elided_stub("read")
         );
-        assert!(summary_request.messages[1]
+        assert!(summary_request
+            .last()
+            .unwrap()
             .text_content()
-            .contains("[called read with {}]"));
+            .starts_with(context::SUMMARY_REQUEST_MARKER));
+        assert!(requests[0].tools.is_empty());
+        assert_eq!(
+            requests[0].tool_choice, None,
+            "no tool choice without tools"
+        );
 
         let sent = &requests[1].messages;
         assert_eq!(sent[0].text_content(), "be useful");
@@ -3983,6 +4349,137 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// A thread whose `turns` earlier runs replay with their own messages
+    /// (each: turn context, request, two read steps, answer), then the
+    /// current request.
+    fn replayed_thread(turns: usize) -> Vec<ChatMessage> {
+        let mut messages = vec![ChatMessage::text("system", "be useful")];
+        for turn in 0..turns {
+            messages.push(ChatMessage::text(
+                "system",
+                format!("context of turn {turn}"),
+            ));
+            messages.push(ChatMessage::text("user", format!("request {turn}")));
+            for read in ["a", "b"] {
+                let id = format!("turn-{turn}-{read}");
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: Some(Content::Text(format!("Reading {read}."))),
+                    name: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: Some(id.clone()),
+                        kind: "function".into(),
+                        function: milim_core::api::openai::FunctionCall {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    provider_state: None,
+                });
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: Some(Content::Text(format!("{id}:{}", "x".repeat(600)))),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: Some(id),
+                    reasoning_content: None,
+                    provider_state: None,
+                });
+            }
+            messages.push(ChatMessage::text("assistant", format!("answer {turn}")));
+        }
+        messages.push(ChatMessage::text("system", "context of this turn"));
+        messages.push(ChatMessage::text("user", "current request"));
+        messages
+    }
+
+    #[tokio::test]
+    async fn context_pressure_elides_tool_results_replayed_from_earlier_turns() {
+        // Twelve replayed results, ~2.4k estimated tokens: over 60% of 3.5k,
+        // under 85% once all but the six most recent are elided.
+        let backend = ScriptedBackend::new(vec![text_step("done", "stop")]);
+        let hook = Arc::new(RecordingHook::default());
+        let thread = replayed_thread(6);
+        let request = thread.len() - 1;
+        run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            thread.clone(),
+            AgentRunConfig {
+                context_window_tokens: Some(3_500),
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 1, "no summarization call was needed");
+        let sent = &requests[0].messages;
+        assert_eq!(sent.len(), thread.len(), "elision only edits in place");
+        let tools = tool_messages(&requests[0]);
+        assert_eq!(tools.len(), 12);
+        assert!(tools[..6]
+            .iter()
+            .all(|text| *text == context::elided_stub("read")));
+        assert!(tools[6..].iter().all(|text| text.len() > 600));
+        assert_tool_pairing(sent);
+        for (sent, replayed) in sent.iter().zip(&thread) {
+            assert_eq!(sent.role, replayed.role);
+            if sent.role != "tool" {
+                assert_eq!(sent.text_content(), replayed.text_content());
+            }
+        }
+        let compaction = hook.compactions.lock().unwrap()[0].clone();
+        assert_eq!(compaction.elided_tool_results, 6);
+        assert_eq!(compaction.request_index, Some(request));
+    }
+
+    #[tokio::test]
+    async fn summaries_of_replayed_turns_keep_the_request_and_report_where_it_moved() {
+        let backend = ScriptedBackend::new(vec![
+            text_step("- answered six requests", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let hook = Arc::new(RecordingHook::default());
+        run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            replayed_thread(6),
+            AgentRunConfig {
+                context_window_tokens: Some(1_200),
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2);
+        let sent = &requests[1].messages;
+        assert_tool_pairing(sent);
+        assert_eq!(sent.last().unwrap().text_content(), "current request");
+        assert!(sent.iter().any(|message| message.role == "system"
+            && message.text_content().contains("- answered six requests")));
+        // Earlier turns' context notes are system messages and stay verbatim.
+        assert!(sent
+            .iter()
+            .any(|message| message.text_content() == "context of turn 0"));
+        let compaction = hook.compactions.lock().unwrap()[0].clone();
+        assert!(compaction.summarized_messages > 0);
+        assert_eq!(compaction.request_index, Some(sent.len() - 1));
+        // Everything kept after the summary still opens with a user turn.
+        let summary = sent
+            .iter()
+            .position(|message| message.text_content().contains("- answered six requests"))
+            .unwrap();
+        let first_turn = sent[summary + 1..]
+            .iter()
+            .find(|message| message.role != "system")
+            .unwrap();
+        assert_eq!(first_turn.role, "user");
     }
 
     #[tokio::test]
@@ -4024,6 +4521,104 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 0);
         assert_eq!(tool_results(&events)[0]["error"], APPROVAL_TIMEOUT_MESSAGE);
         assert!(tool_messages(&backend.requests()[1])[0].contains(APPROVAL_TIMEOUT_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn call_tool_runs_a_deferred_tool_as_itself() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("deploy", &runs));
+        registry.register(recording_tool("eager", &runs));
+        registry.defer(["deploy"]);
+        let backend = ScriptedBackend::new(vec![tool_step(
+            &[
+                (
+                    "call-1",
+                    "call_tool",
+                    r#"{"name":"deploy","arguments":{"path":"a"}}"#,
+                ),
+                (
+                    "call-2",
+                    "call_tool",
+                    r#"{"name":"deploy","arguments":{"safe":true}}"#,
+                ),
+                (
+                    "call-3",
+                    "call_tool",
+                    r#"{"name":"deploy","arguments":{"path":5}}"#,
+                ),
+            ],
+            "tool_calls",
+        )]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "go")],
+            AgentRunConfig {
+                approval_broker: Some(Arc::new(ToolApprovalBroker::default())),
+                approval_timeout: Some(Duration::from_millis(20)),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // The request lists the proxies, not the deferred tool.
+        let requests = backend.requests();
+        let offered: Vec<&str> = requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect();
+        assert_eq!(offered, ["call_tool", "eager", "tool_search"]);
+        // Events, approval, and validation see the deferred tool.
+        let calls: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolCall {
+                    name, arguments, ..
+                } => Some((name.as_str(), arguments.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("deploy", r#"{"path":"a"}"#),
+                ("deploy", r#"{"safe":true}"#),
+                ("deploy", r#"{"path":5}"#)
+            ]
+        );
+        let approvals: Vec<(&str, ToolEffect)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolApprovalRequired { name, effect, .. } => {
+                    Some((name.as_str(), *effect))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(approvals, [("deploy", ToolEffect::Mutating)]);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "only the read-only call ran"
+        );
+        let results = tool_results(&events);
+        assert_eq!(results[1], json!({"ok": true}));
+        assert!(results[2]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid arguments for `deploy`"));
+        // The model's own message keeps the call it made.
+        let assistant = requests[1]
+            .messages
+            .iter()
+            .find(|message| message.tool_calls.is_some())
+            .unwrap();
+        assert_eq!(
+            assistant.tool_calls.as_ref().unwrap()[0].function.name,
+            "call_tool"
+        );
     }
 
     #[tokio::test]
@@ -4606,7 +5201,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_summary_falls_back_to_elision_and_is_reported() {
+        // The prefix request and then the standalone transcript request are
+        // both rejected.
         let backend = ScriptedBackend::new(vec![
+            Script::OpenError("x chat/completions -> 400 Bad Request: unsupported".into()),
             Script::OpenError("x chat/completions -> 400 Bad Request: unsupported".into()),
             text_step("done", "stop"),
         ]);
@@ -4623,8 +5221,19 @@ mod tests {
         )
         .await;
         let requests = backend.requests();
-        assert_eq!(requests.len(), 2);
-        let tools = tool_messages(&requests[1]);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .messages
+            .last()
+            .unwrap()
+            .text_content()
+            .starts_with(context::SUMMARY_REQUEST_MARKER));
+        assert_eq!(
+            requests[1].messages[0].text_content(),
+            context::SUMMARY_INSTRUCTIONS,
+            "a rejected prefix request falls back to the transcript"
+        );
+        let tools = tool_messages(&requests[2]);
         assert!(tools[..15]
             .iter()
             .all(|text| *text == context::elided_stub("read")));
@@ -4692,9 +5301,16 @@ mod tests {
         );
         assert_eq!(first_step[1].text_content(), "the original task");
         assert!(is_summary_text(&first_step[2]));
-        assert!(requests[2].messages[1]
+        // The second summary request carries the first summary as it was
+        // sent, to be folded in.
+        let second_summary = &requests[2].messages;
+        assert!(second_summary.iter().any(|message| is_summary_text(message)
+            && message.text_content().contains("- first summary")));
+        assert!(second_summary
+            .last()
+            .unwrap()
             .text_content()
-            .contains("### earlier summary\n- first summary"));
+            .starts_with(context::SUMMARY_REQUEST_MARKER));
         let second_step = &requests[3].messages;
         let summaries = second_step
             .iter()
@@ -4972,5 +5588,497 @@ mod tests {
             assert!(text.contains(&format!("{name} line 0999")));
             assert!(text.contains("omitted"));
         }
+    }
+
+    fn read_turns(messages: &mut Vec<ChatMessage>, prefix: &str, sizes: &[usize]) {
+        for (turn, size) in sizes.iter().enumerate() {
+            let id = format!("{prefix}-{turn}");
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                name: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: Some(id.clone()),
+                    kind: "function".into(),
+                    function: milim_core::api::openai::FunctionCall {
+                        name: "read".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+                reasoning_content: None,
+                provider_state: None,
+            });
+            messages.push(ChatMessage {
+                role: "tool".into(),
+                content: Some(Content::Text(format!("{turn}:{}", "x".repeat(*size)))),
+                name: None,
+                tool_calls: None,
+                tool_call_id: Some(id),
+                reasoning_content: None,
+                provider_state: None,
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn summaries_reuse_the_sent_prefix_tools_and_tool_choice() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("read", &runs));
+        // Eight small older steps, then four large recent ones: the prompt
+        // needs a summary, but the older span as it was sent fits.
+        let mut messages = vec![
+            ChatMessage::text("system", "be useful"),
+            ChatMessage::text("user", "the original task"),
+        ];
+        read_turns(&mut messages, "small", &[100; 8]);
+        read_turns(&mut messages, "large", &[3_000; 4]);
+        let backend = ScriptedBackend::new(vec![
+            text_step("- read eight small files", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let hook = Arc::new(RecordingHook::default());
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            messages.clone(),
+            AgentRunConfig {
+                context_window_tokens: Some(2_000),
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2);
+        let (summary, step) = (&requests[0], &requests[1]);
+        // Byte-exact as last sent: no elision stubs, same tools, so the
+        // provider's cached prefix matches.
+        assert_eq!(summary.messages.len(), 2 + 16 + 1);
+        assert_eq!(
+            serde_json::to_string(&summary.messages[..18]).unwrap(),
+            serde_json::to_string(&messages[..18]).unwrap()
+        );
+        assert!(summary.messages[17].text_content().len() > 100);
+        let request = summary.messages.last().unwrap();
+        assert_eq!(request.role, "user");
+        assert!(request
+            .text_content()
+            .starts_with(context::SUMMARY_REQUEST_MARKER));
+        assert!(request
+            .text_content()
+            .contains(context::SUMMARY_INSTRUCTIONS));
+        assert_eq!(
+            serde_json::to_string(&summary.tools).unwrap(),
+            serde_json::to_string(&step.tools).unwrap()
+        );
+        assert_eq!(summary.tools.len(), 1);
+        // Same tool choice as the steps, so Anthropic keeps cached messages.
+        assert_eq!(summary.tool_choice, None);
+        assert_eq!(step.tool_choice, None);
+
+        assert!(is_summary_text(&step.messages[2]));
+        assert!(step.messages[2]
+            .text_content()
+            .contains("- read eight small files"));
+        assert_eq!(
+            *hook.committed_requests.lock().unwrap(),
+            vec![serde_json::to_string(&step.messages).unwrap()],
+            "only the step request is committed, exactly as sent"
+        );
+        assert_eq!(hook.compactions.lock().unwrap()[0].summarized_messages, 16);
+        // The summary request's usage counts toward the run.
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done { usage, .. }) if usage.prompt_tokens == 2
+        ));
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_run_ends_its_step_limit_with_a_wrap_up_report() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("read", &runs));
+        let backend = ScriptedBackend::new(vec![
+            tool_step(&[("c1", "read", "{}")], "tool_calls"),
+            tool_step(&[("c2", "read", "{}")], "tool_calls"),
+            text_step("Found the bug in src/a.rs; the fix is not applied.", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "investigate")],
+            AgentRunConfig {
+                max_iterations: 2,
+                wrap_up_on_limit: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3);
+        let wrap_up = &requests[2];
+        assert_eq!(
+            wrap_up.tools.len(),
+            1,
+            "same tools, so the cached prefix matches"
+        );
+        let note = wrap_up.messages.last().unwrap();
+        assert_eq!(note.role, "user");
+        assert!(note.text_content().contains(WRAP_UP_NOTE));
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the limited step's call never runs"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Final { content } if content.starts_with("Found the bug")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Notice { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stopped_at_limit: true,
+                iterations: 3,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_wrap_up_reply_that_calls_a_tool_stops_with_the_limit_notice() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("read", &runs));
+        let backend = ScriptedBackend::new(vec![
+            tool_step(&[("c1", "read", "{}")], "tool_calls"),
+            tool_step(&[("c2", "read", "{}")], "tool_calls"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "investigate")],
+            AgentRunConfig {
+                max_iterations: 1,
+                wrap_up_on_limit: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(backend.requests().len(), 2);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Notice { text } if text.contains("iteration limit")
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Done {
+                stopped_at_limit: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_summary_reply_that_calls_a_tool_falls_back_to_a_transcript() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("read", &runs));
+        let mut messages = vec![
+            ChatMessage::text("system", "be useful"),
+            ChatMessage::text("user", "the original task"),
+        ];
+        read_turns(&mut messages, "small", &[100; 8]);
+        read_turns(&mut messages, "large", &[3_000; 4]);
+        let backend = ScriptedBackend::new(vec![
+            tool_step(&[("c1", "read", "{}")], "tool_calls"),
+            text_step("- read eight small files", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            messages,
+            AgentRunConfig {
+                context_window_tokens: Some(2_000),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[0].tools.is_empty());
+        assert!(requests[1].tools.is_empty(), "transcript fallback");
+        assert!(requests[2].messages.iter().any(is_summary_text));
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "the summary's tool call never runs"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn summaries_fall_back_to_a_transcript_when_the_prefix_does_not_fit() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("read", &runs));
+        // A long earlier answer that cannot be elided fills the span.
+        let mut messages = vec![
+            ChatMessage::text("system", "be useful"),
+            ChatMessage::text("user", "an old question"),
+            ChatMessage::text("assistant", "A".repeat(6_000)),
+            ChatMessage::text("user", "the original task"),
+        ];
+        read_turns(&mut messages, "step", &[10; 5]);
+        let backend = ScriptedBackend::new(vec![
+            text_step("- answered an old question", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            messages,
+            AgentRunConfig {
+                context_window_tokens: Some(1_500),
+                ..Default::default()
+            },
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2);
+        let summary = &requests[0];
+        assert_eq!(summary.messages.len(), 2);
+        assert_eq!(
+            summary.messages[0].text_content(),
+            context::SUMMARY_INSTRUCTIONS
+        );
+        assert!(summary.messages[1]
+            .text_content()
+            .contains("### assistant\nAAA"));
+        assert!(summary.tools.is_empty());
+        assert_eq!(summary.tool_choice, None);
+        assert!(requests[1].messages.iter().any(is_summary_text));
+        assert!(matches!(events.last(), Some(AgentEvent::Done { .. })));
+    }
+
+    fn single_tool_registry(runs: &Arc<AtomicUsize>, result: Value) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(RecordingTool {
+            name: "read",
+            runs: runs.clone(),
+            result,
+            model_text: None,
+        }));
+        registry
+    }
+
+    #[tokio::test]
+    async fn a_third_identical_failure_tells_the_model_to_change_approach() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        // Key order and whitespace do not make a call different.
+        let backend = ScriptedBackend::new(vec![
+            tool_step(
+                &[("call-1", "read", r#"{"path": "a", "safe": false}"#)],
+                "tool_calls",
+            ),
+            tool_step(
+                &[("call-2", "read", r#"{"safe":false,"path":"a"}"#)],
+                "tool_calls",
+            ),
+            tool_step(
+                &[("call-3", "read", r#"{ "path" : "a", "safe" : false }"#)],
+                "tool_calls",
+            ),
+        ]);
+        let hook = Arc::new(RecordingHook::default());
+        run_scripted(
+            backend.clone(),
+            single_tool_registry(&runs, json!({ "error": "no such file" })),
+            vec![ChatMessage::text("user", "read a")],
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 3, "the calls still run");
+        let contents = hook.tool_contents.lock().unwrap().clone();
+        assert_eq!(contents.len(), 3);
+        assert!(!contents[0].contains("[milim]") && !contents[1].contains("[milim]"));
+        assert!(contents[2].ends_with(
+            "\n\n[milim] This exact call has now failed 3 times with the same arguments. Stop retrying it unchanged: read the error, inspect the relevant state, and change approach."
+        ));
+        assert_eq!(
+            tool_messages(&backend.requests()[3]).last().unwrap(),
+            &contents[2],
+            "the model sees what the ledger recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_read_only_results_get_a_lighter_note() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let backend = ScriptedBackend::new(
+            ["call-1", "call-2", "call-3"]
+                .into_iter()
+                .map(|id| tool_step(&[(id, "read", r#"{"safe": true}"#)], "tool_calls"))
+                .collect(),
+        );
+        let hook = Arc::new(RecordingHook::default());
+        run_scripted(
+            backend,
+            single_tool_registry(&runs, json!({ "ok": true })),
+            vec![ChatMessage::text("user", "read a")],
+            AgentRunConfig {
+                step_hook: Some(hook.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let contents = hook.tool_contents.lock().unwrap().clone();
+        assert_eq!(contents[..2], [r#"{"ok":true}"#, r#"{"ok":true}"#]);
+        assert!(contents[2].contains(
+            "[milim] This exact read-only call has now returned the same result 3 times"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_call_denied_by_a_hook_is_not_checked_or_run_again() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        // The fake hook only expects `call-1`; it would panic on `call-2`.
+        let backend = ScriptedBackend::new(vec![
+            tool_step(&[("call-1", "write", "{}")], "tool_calls"),
+            tool_step(&[("call-2", "write", "")], "tool_calls"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            registry,
+            vec![ChatMessage::text("user", "go")],
+            AgentRunConfig {
+                approval_broker: Some(Arc::new(ToolApprovalBroker::default())),
+                interceptor: Some(Arc::new(FakeInterceptor {
+                    decision: ToolDecision::Deny("PreToolUse hook denied: no writes".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. })));
+        assert_eq!(
+            hook_events(&events),
+            vec!["UserPromptSubmit", "PreToolUse", "Stop"]
+        );
+        let results = tool_results(&events);
+        assert_eq!(results[1]["error"], "PreToolUse hook denied: no writes");
+        assert_eq!(results[1]["denied"], true);
+        let replayed = tool_messages(&backend.requests()[2]);
+        assert!(!replayed[0].contains("[milim]"));
+        assert!(replayed[1].contains("no writes"));
+        assert!(
+            replayed[1].contains("[milim] This exact call was already denied earlier in this run")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_the_user_denied_is_not_sent_for_approval_again() {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(recording_tool("write", &runs));
+        let broker = Arc::new(ToolApprovalBroker::default());
+        let backend = ScriptedBackend::new(vec![
+            tool_step(&[("call-1", "write", r#"{"path": "a"}"#)], "tool_calls"),
+            tool_step(&[("call-2", "write", r#"{"path": "a"}"#)], "tool_calls"),
+            tool_step(&[("call-3", "write", r#"{"path": "b"}"#)], "tool_calls"),
+        ]);
+        let events = run_agent_stream_with_config(
+            backend.clone(),
+            Arc::new(registry),
+            "scripted".into(),
+            vec![ChatMessage::text("user", "go")],
+            None,
+            AgentRunConfig {
+                approval_broker: Some(broker.clone()),
+                approval_timeout: Some(Duration::from_secs(5)),
+                initial_stream_retry_backoff: Duration::ZERO,
+                ..Default::default()
+            },
+        );
+        futures::pin_mut!(events);
+        let mut asked = Vec::new();
+        while let Some(event) = events.next().await {
+            if let AgentEvent::ToolApprovalRequired {
+                approval_id,
+                call_id,
+                ..
+            } = event
+            {
+                asked.push(call_id.unwrap());
+                assert_eq!(
+                    broker.resolve(&approval_id, false),
+                    ApprovalResolve::Resolved
+                );
+            }
+        }
+        assert_eq!(asked, vec!["call-1", "call-3"], "only new calls are asked");
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        let replayed = tool_messages(&backend.requests()[3]);
+        assert!(replayed[1].contains("Tool call denied by user"));
+        assert!(replayed[1].contains("[milim] This exact call was already denied"));
+        assert!(!replayed[2].contains("[milim]"));
+    }
+
+    #[tokio::test]
+    async fn an_overflowing_prefix_summary_falls_back_to_the_transcript() {
+        // The step overflows, and so does the prefix summary request.
+        let backend = ScriptedBackend::new(vec![
+            Script::OpenError(CONTEXT_OVERFLOW.into()),
+            Script::OpenError(CONTEXT_OVERFLOW.into()),
+            text_step("- read sixteen files", "stop"),
+            text_step("done", "stop"),
+        ]);
+        let events = run_scripted(
+            backend.clone(),
+            ToolRegistry::new(),
+            long_conversation(16),
+            AgentRunConfig::default(),
+        )
+        .await;
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[1]
+            .messages
+            .last()
+            .unwrap()
+            .text_content()
+            .starts_with(context::SUMMARY_REQUEST_MARKER));
+        assert_eq!(
+            requests[2].messages[0].text_content(),
+            context::SUMMARY_INSTRUCTIONS
+        );
+        assert!(requests[3].messages.iter().any(is_summary_text));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ContextCompacted {
+                summary_error: None,
+                summarized_messages: 28,
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Final { content } if content == "done")));
     }
 }

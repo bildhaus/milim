@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import { DEFAULT_RUN_LIMITS, normalizeRunLimits, type RunLimits } from "../lib/runLimits.js";
+import {
+  DEFAULT_RUN_LIMITS,
+  DEFAULT_WORKER_LIMITS,
+  normalizeRunLimits,
+  normalizeWorkerLimits,
+  type RunLimits,
+  type WorkerLimits,
+} from "../lib/runLimits.js";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
   DEFAULT_ACCOUNT_RUNTIME_ENABLEMENT,
@@ -70,6 +77,7 @@ interface SettingsState {
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   globalInstructions: string;
   runLimits: RunLimits;
+  workerLimits: WorkerLimits;
   media: MediaSettings;
   newThreadBehavior: NewThreadBehavior;
   configuredThreadDefaults: ConfiguredThreadDefaults;
@@ -84,6 +92,7 @@ interface SettingsState {
   setModelReasoningEffort: (model: string, effort: ReasoningEffort) => void;
   setGlobalInstructions: (instructions: string) => void;
   setRunLimits: (limits: RunLimits) => void;
+  setWorkerLimits: (limits: WorkerLimits) => void;
   setMediaSettings: (settings: Partial<MediaSettings>) => void;
   setNewThreadBehavior: (behavior: NewThreadBehavior) => void;
   setConfiguredThreadDefaults: (settings: Partial<ConfiguredThreadDefaults>) => void;
@@ -212,6 +221,8 @@ export const useSettings = create<SettingsState>()(
       globalInstructions: "",
       runLimits: DEFAULT_RUN_LIMITS,
       setRunLimits: (runLimits) => set({ runLimits: normalizeRunLimits(runLimits) }),
+      workerLimits: DEFAULT_WORKER_LIMITS,
+      setWorkerLimits: (workerLimits) => set({ workerLimits: normalizeWorkerLimits(workerLimits) }),
       media: DEFAULT_MEDIA_SETTINGS,
       newThreadBehavior: "inherit",
       configuredThreadDefaults: DEFAULT_CONFIGURED_THREAD_DEFAULTS,
@@ -281,6 +292,7 @@ export const useSettings = create<SettingsState>()(
           reasoningEffortByModel: normalizeReasoningEffortByModel(saved?.reasoningEffortByModel),
           globalInstructions: normalizeGlobalInstructions(saved?.globalInstructions),
           runLimits: normalizeRunLimits(saved?.runLimits),
+          workerLimits: normalizeWorkerLimits(saved?.workerLimits),
           media: normalizeMediaSettings(saved?.media),
           newThreadBehavior: saved?.newThreadBehavior === "configured" ? "configured" : "inherit",
           configuredThreadDefaults: normalizeConfiguredThreadDefaults(saved?.configuredThreadDefaults),
@@ -297,6 +309,7 @@ export const useSettings = create<SettingsState>()(
         reasoningEffortByModel: s.reasoningEffortByModel,
         globalInstructions: normalizeGlobalInstructions(s.globalInstructions),
         runLimits: normalizeRunLimits(s.runLimits),
+        workerLimits: normalizeWorkerLimits(s.workerLimits),
         media: s.media,
         newThreadBehavior: s.newThreadBehavior,
         configuredThreadDefaults: normalizeConfiguredThreadDefaults(s.configuredThreadDefaults),

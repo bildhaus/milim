@@ -3236,6 +3236,30 @@ mod tests {
     }
 
     #[test]
+    fn tool_choice_none_reaches_chat_completions_and_responses() {
+        let mut req = empty_req();
+        req.model = "gpt-5".into();
+        req.messages = vec![milim_core::api::openai::ChatMessage::text(
+            "user",
+            "Summarize.",
+        )];
+        req.tools = vec![tool("list_dir")];
+        req.tool_choice = Some(json!("none"));
+        for backend in [
+            RemoteBackend::new("OpenAI", "https://api.openai.com/v1", None),
+            RemoteBackend::new("OpenRouter", "https://openrouter.ai/api/v1", None),
+            RemoteBackend::new("Ollama", "http://localhost:11434/v1", None),
+        ] {
+            let body = backend.chat_body(&req, true).unwrap();
+            assert_eq!(body["tool_choice"], "none");
+            assert_eq!(body["tools"][0]["function"]["name"], "list_dir");
+        }
+        let body = openai_responses::build_body(&req, true, prompt_cache_key(&req)).unwrap();
+        assert_eq!(body["tool_choice"], "none");
+        assert_eq!(body["tools"][0]["name"], "list_dir");
+    }
+
+    #[test]
     fn chat_completions_never_sends_provider_state() {
         let mut req = empty_req();
         let mut assistant = milim_core::api::openai::ChatMessage::text("assistant", "hi");

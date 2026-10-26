@@ -1,0 +1,8 @@
+{
+  "id": "ci-log-timezone",
+  "title": "Debug a CI-only failure from its pasted log",
+  "category": "debug-from-ci-log",
+  "prompt": "CI is red on main, but `npm test` passes on my machine. The log of the failing job is in ci/failure.log. Find the cause and fix it so the tests pass in CI too. Don't change the tests, package.json, or the CI workflow.",
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

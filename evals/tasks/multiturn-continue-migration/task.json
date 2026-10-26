@@ -1,0 +1,17 @@
+{
+  "id": "multiturn-continue-migration",
+  "title": "Migrate in two passes; the second turn only says \"continue\"",
+  "category": "multi-turn",
+  "turns": [
+    {
+      "prompt": "Convert the request handlers in src/handlers/ from Node-style callbacks to `async` functions that take only `req` and resolve to `{ status, body }` (throw the HttpError instead of passing it to the callback), and make src/router.js await them. Use `db.promises` rather than changing src/db.js, and keep the tests passing without changing them. There are twelve handlers, so let's do this in two passes: in this turn convert only the handlers whose file names start with a letter from a to m, make the router work with both styles in the meantime, and then stop and tell me which handlers are left.",
+      "timeout_s": 480
+    },
+    {
+      "prompt": "continue",
+      "timeout_s": 480
+    }
+  ],
+  "timeout_s": 480,
+  "check": "node check.mjs"
+}

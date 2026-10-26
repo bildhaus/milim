@@ -1042,6 +1042,8 @@ async fn fire_schedule(
                     "text": prompt,
                     "display_text": schedule.prompt,
                     "attachments": attachments,
+                    // Nobody is there to answer `ask_user` or approve a plan.
+                    "unattended": true,
                 }),
                 confirmation_token: None,
             },
@@ -1194,6 +1196,9 @@ mod tests {
         ));
         let runs = store.control_runs(false).unwrap();
         assert_eq!(runs.len(), 1);
+        // No one is present to answer `ask_user` on a scheduled turn.
+        let accepted: serde_json::Value = serde_json::from_str(&runs[0].request_json).unwrap();
+        assert_eq!(accepted["unattended"], true);
     }
 
     #[tokio::test]

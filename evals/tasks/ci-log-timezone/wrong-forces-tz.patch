@@ -1,0 +1,12 @@
+--- a/src/report.js
++++ b/src/report.js
+@@ -1,6 +1,9 @@
+ // Sales report helpers. Order timestamps are ISO 8601 strings in UTC, and
+ // reports are bucketed by UTC calendar day ("YYYY-MM-DD").
+
++// CI runs in New York; pin the process to UTC.
++process.env.TZ = "UTC";
++
+ const pad = (value) => String(value).padStart(2, "0");
+
+ /** The UTC calendar day of an ISO timestamp, as "YYYY-MM-DD". */

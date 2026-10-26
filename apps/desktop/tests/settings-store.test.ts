@@ -78,6 +78,12 @@ deepEqual(useSettings.getState().runLimits, { maxSteps: 8, maxSeconds: 120, maxC
 assert(localStorage.getItem("milim.settings")?.includes('"maxCostUsd":0.25'), "run limits should persist");
 useSettings.getState().setRunLimits({ maxSteps: 1.5, maxSeconds: -1, maxCostUsd: Infinity });
 deepEqual(useSettings.getState().runLimits, { maxSteps: null, maxSeconds: null, maxCostUsd: null }, "invalid limits should normalize to unset");
+deepEqual(useSettings.getState().workerLimits, { maxSteps: null, maxTokens: null, maxMinutes: null }, "worker budget should default to the built-in limits");
+useSettings.getState().setWorkerLimits({ maxSteps: 120, maxTokens: 2_000_000, maxMinutes: 90 });
+deepEqual(useSettings.getState().workerLimits, { maxSteps: 120, maxTokens: 2_000_000, maxMinutes: 90 }, "worker budget should accept whole numbers in range");
+assert(localStorage.getItem("milim.settings")?.includes('"workerLimits":{"maxSteps":120'), "worker budget should persist where the server reads it");
+useSettings.getState().setWorkerLimits({ maxSteps: 1_001, maxTokens: 500, maxMinutes: 2.5 });
+deepEqual(useSettings.getState().workerLimits, { maxSteps: null, maxTokens: null, maxMinutes: null }, "out-of-range worker limits should normalize to unset");
 equal(useSettings.getState().favoritesOnly, true, "favorites-only mode should enable");
 useSettings.getState().setFavoritesOnly(false);
 useSettings.getState().toggleFavorite("gpt-5");

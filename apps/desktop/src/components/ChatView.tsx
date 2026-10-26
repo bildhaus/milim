@@ -90,6 +90,7 @@ import {
   type CustomSlashCommand,
   type ChatApprovalRequest,
   type ChatMessage,
+  type UserDecisionResponseV1,
   type ChatStreamPart,
   type ControlPendingInputV1,
   type ControlQueuedTurnV1,
@@ -287,6 +288,7 @@ import {
 } from "../lib/previewRuntimeKeys";
 import { listenForPreviewOpenUrl } from "../lib/previewWebview";
 import { statusPart } from "../lib/turnEvents";
+import { userDecisionAnswer } from "../lib/userDecisions";
 import {
   accountRuntimeNotReadyForTurn,
   appendUserTurn,
@@ -6789,6 +6791,7 @@ export function ChatView({
                 display_text: last.content,
                 attachments: controlAttachments(last.attachments),
                 ...(managedPreviewRuntime ? { preview_runtime: managedPreviewRuntime } : {}),
+                ...(last.answersDecision ? { answers_decision: last.answersDecision } : {}),
               },
       });
       if (command.status === "queued") {
@@ -7808,6 +7811,45 @@ export function ChatView({
     ).catch(() => {});
   }
 
+  /**
+   * Answer the decision an assistant turn ended on (`ask_user` or
+   * `exit_plan_mode`) with the next turn. Rust closes the decision when it
+   * accepts the turn and rejects a stale or second answer.
+   */
+  function answerUserDecision(
+    decisionMessage: ChatMessage,
+    response: UserDecisionResponseV1,
+    text: string,
+  ): boolean {
+    const decision = decisionMessage.userDecision;
+    const answerText = text.trim();
+    if (busy || activeMediaTarget || !decision || decision.status !== "pending" || !answerText) {
+      return false;
+    }
+    const selectedModel = requireChatModel();
+    if (!selectedModel) return false;
+    const conversation = appendUserTurn(messages, answerText);
+    conversation[conversation.length - 1] = {
+      ...conversation[conversation.length - 1],
+      answersDecision: userDecisionAnswer(decision, response),
+    };
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+    if (response !== "approve_plan") {
+      void runTurnAndDrain(conversation, selectedModel);
+      return true;
+    }
+    // Rust also turns plan mode off when it accepts the approval; this keeps
+    // the composer's Plan Mode toggle in step.
+    setChatNotice({ tone: "info", message: "Plan approved. Implementing..." });
+    void writeCanonicalExecutionSettings(
+      activeId,
+      { plan_mode: false },
+      { planMode: false },
+    ).then(() => runTurnAndDrain(conversation, selectedModel)).catch(() => {});
+    return true;
+  }
+
   /** Re-run the last user turn (drop trailing assistant message(s)). */
   function regenerate() {
     if (busy) return;
@@ -8570,6 +8612,7 @@ export function ChatView({
     openPreviewArtifact,
     artifactRevisionChoice,
     executePlan,
+    answerUserDecision,
     restoreWorkspaceCheckpoint,
     forkThreadAt,
     setEditing,

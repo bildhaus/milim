@@ -1,0 +1,21 @@
+{
+  "id": "multiturn-list-then-fix",
+  "title": "List the failing tests, then fix them in the order you listed",
+  "category": "multi-turn",
+  "turns": [
+    {
+      "prompt": "Run the test suite with `npm test` and tell me which tests fail and why, as a numbered list with one failing test per line. Don't change any files yet.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Fix only the second failure on your list. Leave the other failures alone for now.",
+      "timeout_s": 300
+    },
+    {
+      "prompt": "Now fix the first one on your list as well, and still leave the remaining one alone.",
+      "timeout_s": 300
+    }
+  ],
+  "timeout_s": 300,
+  "check": "node check.mjs"
+}

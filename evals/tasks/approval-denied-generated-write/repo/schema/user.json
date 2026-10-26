@@ -1,0 +1,8 @@
+{
+  "fields": [
+    { "name": "id", "type": "string" },
+    { "name": "email", "type": "string" },
+    { "name": "age", "type": "integer", "optional": true },
+    { "name": "newsletter", "type": "boolean", "optional": true }
+  ]
+}

@@ -1,0 +1,11 @@
+--- a/src/report.js
++++ b/src/report.js
+@@ -7,7 +7,7 @@ const pad = (value) => String(value).padStart(2, "0");
+ export function dayKey(timestamp) {
+   const date = new Date(timestamp);
+   if (Number.isNaN(date.getTime())) throw new RangeError(`invalid timestamp: ${timestamp}`);
+-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
++  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+ }
+
+ /** Revenue in cents per day, days in ascending order. Refunded orders are skipped. */

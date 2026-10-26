@@ -12,6 +12,7 @@ import {MessageMarkdown} from './MessageMarkdown';
 import type {MessageActionTarget} from './MessageActionsSheet';
 import {activityStatusLabel, activityStatusColor, activityIconName, ActivityGroup} from './activity';
 import {ApprovalCard} from './ApprovalCard';
+import {UserDecisionCard} from './UserDecisionCard';
 
 export const TranscriptItemView = React.memo(function MemoizedTranscriptItem({
   item,
@@ -62,6 +63,9 @@ export const TranscriptItemView = React.memo(function MemoizedTranscriptItem({
       loadMoreRunEvents={loadMoreRunEvents}
     />
   );
+  if (item.kind === 'user-decision') {
+    return <UserDecisionCard item={item} execute={execute} markdownStyles={markdownStyles} />;
+  }
   if (item.kind === 'approval') {
     if (item.approval) return <ApprovalCard approval={item.approval} execute={execute} inline />;
     const color = activityStatusColor(item.status, palette);

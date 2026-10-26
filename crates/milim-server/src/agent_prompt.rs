@@ -5,7 +5,7 @@
 //! loop receive this prompt. The tool guidance is built from the run's final
 //! registry so it never mentions a tool the model cannot call.
 
-use milim_tools::{ToolRegistry, ToolSpec};
+use milim_tools::{ToolRegistry, ToolSpec, CALL_TOOL_TOOL, TOOL_SEARCH_TOOL};
 use serde_json::Value;
 
 const IDENTITY: &str = "\
@@ -36,6 +36,12 @@ succeeded unless you saw it. If something failed or is unfinished, say what and 
 - When a request is ambiguous and a wrong guess would be costly, ask one short question; \
 otherwise make a reasonable assumption and state it.";
 
+/// The last working-style rule when `ask_user` is available.
+const WORKING_STYLE_ASK_USER: &str = "\
+- When a request is ambiguous and a wrong guess would be costly, ask one short question \
+(with `ask_user` when a few concrete options capture the choice); otherwise make a \
+reasonable assumption and state it.";
+
 const PLAN_MODE: &str = "\
 # Plan mode
 Plan mode is active for this turn. Use only the read-only tools available to inspect the \
@@ -43,6 +49,16 @@ request and the relevant code. Don't edit or write files, run commands, create s
 register memories, or make any other change. Once you understand enough, reply with a \
 concrete implementation plan (the files to change, the approach, and how to verify it) and \
 wait for the user to approve it before implementing.";
+
+/// Plan mode when `exit_plan_mode` is available.
+const PLAN_MODE_EXIT_TOOL: &str = "\
+# Plan mode
+Plan mode is active for this turn. Use only the read-only tools available to inspect the \
+request and the relevant code. Don't edit or write files, run commands, create schedules, \
+register memories, or make any other change. Once you understand enough, call \
+`exit_plan_mode` with a concrete implementation plan (the files to change, the approach, \
+and how to verify it) instead of replying with the plan as text. Your turn ends there; the \
+user approves the plan, which turns plan mode off, or asks for changes.";
 
 const SAFETY: &str = "\
 # Safety
@@ -68,15 +84,31 @@ code and commands.
 - When you finish a task, summarize what changed and how you verified it in a few lines.";
 
 /// The base system prompt for one native agent run with the given tools.
+/// Deferred tools are named but not described; their names come in the
+/// registry's stable order so the prompt stays cacheable.
 pub(crate) fn base_system_prompt(registry: &ToolRegistry, plan_mode: bool) -> String {
-    let tools = registry.list();
-    let mut sections = vec![IDENTITY.to_string(), WORKING_STYLE.to_string()];
-    let guidance = tool_guidance(&tools);
+    let tools = registry.model_list();
+    let has = |name: &str| tools.iter().any(|tool| tool.name == name);
+    let mut working_style = WORKING_STYLE.to_string();
+    if has("ask_user") {
+        let last_rule = working_style
+            .rfind("\n- ")
+            .expect("working style has rules");
+        working_style.truncate(last_rule + 1);
+        working_style.push_str(WORKING_STYLE_ASK_USER);
+    }
+    let mut sections = vec![IDENTITY.to_string(), working_style];
+    let mut guidance = tool_guidance(&tools);
+    guidance.extend(deferred_tool_guidance(&tools, &registry.deferred_names()));
     if !guidance.is_empty() {
         sections.push(format!("# Tools\n{}", guidance.join("\n")));
     }
     if plan_mode {
-        sections.push(PLAN_MODE.to_string());
+        sections.push(if has("exit_plan_mode") {
+            PLAN_MODE_EXIT_TOOL.to_string()
+        } else {
+            PLAN_MODE.to_string()
+        });
     }
     let mut safety = SAFETY.to_string();
     if tools.iter().any(|tool| tool.name == "shell") {
@@ -86,6 +118,18 @@ pub(crate) fn base_system_prompt(registry: &ToolRegistry, plan_mode: bool) -> St
     sections.push(safety);
     sections.push(OUTPUT.to_string());
     sections.join("\n\n")
+}
+
+fn deferred_tool_guidance(tools: &[ToolSpec], deferred: &[String]) -> Option<String> {
+    let has = |name: &str| tools.iter().any(|tool| tool.name == name);
+    (!deferred.is_empty() && has(TOOL_SEARCH_TOOL) && has(CALL_TOOL_TOOL)).then(|| {
+        format!(
+            "- More tools are available but not loaded. Before using one, get its description and \
+             input schema with `{TOOL_SEARCH_TOOL}` (keywords, or `select:name1,name2`), then run \
+             it with `{CALL_TOOL_TOOL}`. Deferred tools: {}.",
+            deferred.join(", ")
+        )
+    })
 }
 
 fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
@@ -128,9 +172,10 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
         }
         lines.push(line);
         lines.push(
-            "- Earlier turns are replayed as their messages and a condensed log of the work, \
-             not their full tool output. Re-read files and re-run commands rather than relying \
-             on what an earlier turn saw."
+            "- Earlier turns are replayed with their tool calls and output, so you can rely on \
+             what they read. Re-read a file or re-run a command only when its output was \
+             elided or condensed to save context, or when it may have changed since (the user \
+             can edit files between turns)."
                 .to_string(),
         );
     }
@@ -153,6 +198,30 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
         ),
         (false, false) => {}
     }
+    if has("apply_patch") {
+        lines.push(
+            "- For changes that span several files or several places in one file, send one \
+             `apply_patch` (`*** Begin Patch` ... `*** End Patch`); it applies every hunk or none."
+                .to_string(),
+        );
+    }
+    if has("notebook_edit") {
+        lines.push(
+            "- `read_file` shows Jupyter notebooks as cells; change them with `notebook_edit`, \
+             not `edit_file`."
+                .to_string(),
+        );
+    }
+    if has("code_navigation") {
+        let mut line = String::from(
+            "- Use `code_navigation` to jump to a symbol's definition, list its references, or \
+             see its type through the language server.",
+        );
+        if has("grep") {
+            line.push_str(" Fall back to `grep` when it reports no language server.");
+        }
+        lines.push(line);
+    }
     if has("diagnostics") {
         let mut line = String::from(
             "- Check compiler and linter errors with `diagnostics` (a file `path`, or no path for \
@@ -166,9 +235,16 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
         }
         lines.push(line);
     }
-    if ["read_file", "glob", "grep", "list_dir", "diagnostics"]
-        .iter()
-        .any(|name| has(name))
+    if [
+        "read_file",
+        "glob",
+        "grep",
+        "list_dir",
+        "diagnostics",
+        "code_navigation",
+    ]
+    .iter()
+    .any(|name| has(name))
     {
         lines.push(
             "- When several read-only calls are independent (reading files, searching), make them \
@@ -178,7 +254,7 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
     }
     if has("shell") {
         let mut line = String::from(
-            "- Use `shell` for builds, tests, git, and other commands. It starts in the workspace root, and a `cd` carries over to later calls.",
+            "- Use `shell` for builds, tests, git, and other commands. It starts in the workspace root, and a `cd` or an exported environment variable carries over to later calls.",
         );
         if has_param("shell", "timeout_secs") {
             line.push_str(" Pass `timeout_secs` for commands that may take long.");
@@ -216,17 +292,31 @@ fn tool_guidance(tools: &[ToolSpec]) -> Vec<String> {
         (false, false) => {}
     }
     if has("delegate_workers") {
-        lines.push(
+        let mut line = String::from(
             "- Use `delegate_workers` only for substantial, genuinely independent tasks; do short \
              or sequential work yourself. Workers don't see this conversation, so give each one \
-             a self-contained task."
-                .to_string(),
+             a self-contained task.",
         );
+        if has("wait_workers") {
+            line.push_str(
+                " To keep working while they run, pass `wait: false` and collect their reports \
+                 with `wait_workers` before you finish.",
+            );
+        }
+        lines.push(line);
     }
     if has("load_skill") {
         lines.push(
             "- When a request matches an installed skill, call `load_skill` to read its \
              instructions before you start."
+                .to_string(),
+        );
+    }
+    if has("ask_user") {
+        lines.push(
+            "- Use `ask_user` only for a genuine ambiguity where a wrong guess would be costly \
+             and a few concrete options capture the choice. Don't use it to confirm routine \
+             steps or to ask what you can find out yourself. It ends your turn, so call it last."
                 .to_string(),
         );
     }
@@ -292,6 +382,9 @@ mod tests {
                 ("http_fetch", &["url"]),
                 ("load_skill", &["name"]),
                 ("diagnostics", &["path"]),
+                ("apply_patch", &["input"]),
+                ("notebook_edit", &["path"]),
+                ("code_navigation", &["operation", "path"]),
             ]),
             false,
         );
@@ -308,9 +401,14 @@ mod tests {
             "`load_skill`",
             "`diagnostics`",
             "Diagnostics after edit",
+            "`apply_patch`",
+            "`notebook_edit`",
+            "`code_navigation`",
+            "Fall back to `grep`",
+            "exported environment variable",
             "in parallel",
             "Never commit, push, amend",
-            "Re-read files",
+            "Re-read a file or re-run a command only when",
             "Keep going until the request is done",
             "answer it without changing files",
         ] {
@@ -335,6 +433,9 @@ mod tests {
             "web_search",
             "diagnostics",
             "git history",
+            "apply_patch",
+            "notebook_edit",
+            "code_navigation",
         ] {
             assert!(!minimal.contains(absent), "unexpected {absent}:\n{minimal}");
         }
@@ -342,5 +443,65 @@ mod tests {
         let none = base_system_prompt(&ToolRegistry::new(), false);
         assert!(!none.contains("# Tools"));
         assert!(none.contains("take precedence"));
+        assert!(!full.contains("tool_search"));
+    }
+
+    #[test]
+    fn deferred_tools_are_named_in_order_without_their_schemas() {
+        let mut tools = registry(&[
+            ("read_file", &["path"]),
+            ("schedule_list", &["secret_param"]),
+            ("mcp_server_list", &[]),
+        ]);
+        tools.defer(["schedule_list", "mcp_server_list"]);
+        let prompt = base_system_prompt(&tools, false);
+        assert!(
+            prompt.contains("Deferred tools: mcp_server_list, schedule_list."),
+            "{prompt}"
+        );
+        assert!(prompt.contains("`tool_search`") && prompt.contains("`call_tool`"));
+        assert!(!prompt.contains("secret_param"));
+        assert_eq!(prompt, base_system_prompt(&tools.scoped_for_run(), false));
+    }
+
+    #[test]
+    fn background_delegation_is_mentioned_only_with_wait_workers() {
+        let blocking = base_system_prompt(&registry(&[("delegate_workers", &["tasks"])]), false);
+        assert!(blocking.contains("`delegate_workers`"));
+        assert!(!blocking.contains("wait_workers"));
+        let background = base_system_prompt(
+            &registry(&[
+                ("delegate_workers", &["tasks", "wait"]),
+                ("wait_workers", &["run_id"]),
+            ]),
+            false,
+        );
+        assert!(background.contains("`wait: false`") && background.contains("`wait_workers`"));
+    }
+
+    #[test]
+    fn decision_tools_change_the_question_rule_and_plan_mode_ending() {
+        let without = base_system_prompt(&registry(&[("read_file", &["path"])]), true);
+        assert!(without.contains("ask one short question; otherwise"));
+        assert!(without.contains("reply with a concrete implementation plan"));
+        assert!(!without.contains("ask_user"));
+        assert!(!without.contains("exit_plan_mode"));
+
+        let with = base_system_prompt(
+            &registry(&[
+                ("read_file", &["path"]),
+                ("ask_user", &["questions"]),
+                ("exit_plan_mode", &["plan"]),
+            ]),
+            true,
+        );
+        assert!(with.contains(
+            "ask one short question (with `ask_user` when a few concrete options capture the choice)"
+        ));
+        assert!(with.contains("Use `ask_user` only for a genuine ambiguity"));
+        assert!(with.contains("call `exit_plan_mode` with a concrete implementation plan"));
+        assert!(!with.contains("reply with a concrete implementation plan"));
+        assert_eq!(with.matches("ask one short question").count(), 1);
+        assert_eq!(with.matches("# Plan mode").count(), 1);
     }
 }

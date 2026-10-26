@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use milim_control_contract::{
-    ControlAttachmentV1, ControlCommandResultV1, ControlCommandStatusV1, ControlCommandV1,
-    FrozenRunConfigV1,
+    ControlAttachmentV1, ControlCommandKindV1, ControlCommandResultV1, ControlCommandStatusV1,
+    ControlCommandV1, FrozenRunConfigV1, UserDecisionResponseV1, UserDecisionStatusV1,
 };
 use milim_core::{Error, Result};
 use milim_storage::{
@@ -22,7 +22,9 @@ use super::linked_threads::mailbox_context_from_record;
 use super::preview_runtime::{preview_runtime_from_payload, sanitize_managed_preview_runtime};
 use super::run_config::{resolve_frozen_config, thread_agent_id};
 use super::views::{run_snapshot, thread_summary};
-use super::{now_ms, AcceptedTurnV1, ActiveRun, RunManager, RunOutcome, TurnSendPayloadV1};
+use super::{
+    now_ms, AcceptedTurnV1, ActiveRun, RunManager, RunOutcome, ThreadPatch, TurnSendPayloadV1,
+};
 use crate::AppState;
 
 /// Prefix of the id the renderer assigns to an assistant turn it projects
@@ -55,7 +57,7 @@ impl RunManager {
             ));
         }
         validate_control_attachments(&payload.attachments)?;
-        let thread = self
+        let mut thread = self
             .store
             .control_thread(&thread_id)?
             .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
@@ -67,6 +69,46 @@ impl RunManager {
                 )));
             }
         }
+        let answered = match payload.answers_decision.as_ref() {
+            Some(answer) => match self.answerable_user_decision(&thread_id, answer)? {
+                Some(pending) => Some((answer.response, pending)),
+                None => {
+                    return Ok(ControlCommandResultV1 {
+                        command_id: command.command_id.clone(),
+                        status: ControlCommandStatusV1::Conflict,
+                        thread_id: Some(thread_id),
+                        revision: Some(thread.revision),
+                        run_id: None,
+                        queue_id: None,
+                        confirmation_token: None,
+                        message: Some(
+                            "This decision was already answered or is no longer pending.".into(),
+                        ),
+                        data: json!({ "decision_id": answer.decision_id }),
+                    });
+                }
+            },
+            None => None,
+        };
+        if matches!(answered, Some((UserDecisionResponseV1::ApprovePlan, _))) {
+            // An approved plan is implemented outside plan mode, whichever
+            // client approved it.
+            self.patch_thread(
+                &ControlCommandV1 {
+                    command_id: format!("{}:plan-approved", command.command_id),
+                    kind: ControlCommandKindV1::ThreadSetExecutionSettings,
+                    thread_id: Some(thread_id.clone()),
+                    expected_revision: None,
+                    payload: json!({ "plan_mode": false }),
+                    confirmation_token: None,
+                },
+                ThreadPatch::Execution,
+            )?;
+            thread = self
+                .store
+                .control_thread(&thread_id)?
+                .ok_or_else(|| Error::NotFound(format!("thread {thread_id}")))?;
+        }
         let config = self.resolve_turn_config(&state, &thread, payload.attachments, "sending")?;
         let accepted = AcceptedTurnV1 {
             text: payload.text,
@@ -77,7 +119,18 @@ impl RunManager {
             mailbox_origin: None,
             mailbox_context: Vec::new(),
             preview_runtime: sanitize_managed_preview_runtime(payload.preview_runtime),
+            answers_decision: payload.answers_decision,
+            unattended: payload.unattended,
         };
+        if let Some((response, pending)) = answered.as_ref() {
+            self.resolve_user_decision(
+                &thread_id,
+                pending,
+                UserDecisionStatusV1::Answered,
+                Some(*response),
+                Some(&command.command_id),
+            )?;
+        }
         let busy = self
             .active
             .lock()
@@ -191,6 +244,8 @@ impl RunManager {
             mailbox_origin: None,
             mailbox_context: Vec::new(),
             preview_runtime: sanitize_managed_preview_runtime(payload.preview_runtime),
+            answers_decision: None,
+            unattended: false,
         };
         let inbox_id = Uuid::new_v4().to_string();
         self.store.control_put_inbox(&ControlInboxRecord {
@@ -350,6 +405,8 @@ impl RunManager {
             mailbox_origin: None,
             mailbox_context: Vec::new(),
             preview_runtime: preview_runtime_from_payload(&command.payload)?,
+            answers_decision: None,
+            unattended: false,
         };
         let run_id = self.start_turn(state, thread_id.clone(), accepted)?;
         let run = self
@@ -588,14 +645,17 @@ impl RunManager {
             thread_id: thread_id.clone(),
             run_id: run_id.clone(),
             sent_step: Default::default(),
+            request_index: Default::default(),
         };
         journal.commit_composition(&accepted)?;
+        // Any other turn closes a decision the user left unanswered.
+        self.supersede_pending_user_decision(&thread_id)?;
         if accepted.append_user {
             let user_message_id = accepted
                 .client_message_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
-            let user_message = json!({
+            let mut user_message = json!({
                 "id": user_message_id,
                 "role": "user",
                 "content": accepted.display_text.as_deref().unwrap_or(&accepted.text),
@@ -604,6 +664,9 @@ impl RunManager {
                 "runId": run_id,
                 "mailboxOrigin": accepted.mailbox_origin.clone(),
             });
+            if let Some(answer) = accepted.answers_decision.as_ref() {
+                user_message["answersDecision"] = json!(answer);
+            }
             if accepted.client_message_id.is_some() {
                 self.persist_adopted_message_and_event(
                     &thread_id,
@@ -723,6 +786,7 @@ impl RunManager {
                 thread_id: thread_id.clone(),
                 run_id: run_id.clone(),
                 sent_step: Default::default(),
+                request_index: Default::default(),
             };
             let _ = journal.commit_failure(0, error);
         }
